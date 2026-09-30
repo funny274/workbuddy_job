@@ -1,0 +1,825 @@
+<section id="c10-cache" class="anchor" data-title="Day4.1 · 缓存三大问题与一致性">
+<div class="ch-meta">
+  <span class="ch-num">Day 4 · 第 1 节</span>
+  <span class="badge bg-blue">预计 90 分钟</span>
+  <span class="badge bg-red">面试最高频</span>
+</div>
+<h1>Day4.1 · 缓存三大问题与双写一致性</h1>
+
+<div class="box b-tip">
+  <div class="box-t">一句话结论</div>
+  <p>缓存治理的四个关键词：<strong>穿透（查不到）→ 空值缓存 / 布隆过滤器</strong>、<strong>击穿（单个热点 key 失效）→ 互斥重建 / 逻辑过期</strong>、<strong>雪崩（大批 key 同时失效）→ 过期时间打散 / 多级缓存</strong>、<strong>一致性（缓存与 DB 不同步）→ Cache Aside + 延时双删 / Canal 订阅 binlog</strong>。</p>
+  <p>面试真正拉分的地方不是背这四句话，而是：<strong>① 为什么「先删缓存再更新 DB」是危险的；② 延时双删的「延时」到底该延迟多久；③ 缓存一致性到底要不要做到强一致（答案：绝大多数场景不需要，但你要说清代价）。</strong></p>
+</div>
+
+<h2 id="c10-1">1. 为什么需要缓存：一次容量推算</h2>
+<p>先算清楚缓存给你带来什么，才能在面试里说清「成本收益」。</p>
+
+<table>
+<thead><tr><th style="width:20%">指标</th><th>MySQL（单实例）</th><th>Redis（单实例）</th><th>倍数</th></tr></thead>
+<tbody>
+<tr><td>读 QPS</td><td>约 3,000 ~ 8,000</td><td>约 100,000+（简单命令）</td><td><strong>约 20-50×</strong></td></tr>
+<tr><td>写 QPS</td><td>约 3,000 ~ 5,000</td><td>约 100,000+</td><td><strong>约 20-30×</strong></td></tr>
+<tr><td>P99 延迟</td><td>1 ~ 10 ms（含网络）</td><td>0.3 ~ 1 ms</td><td><strong>约 10×</strong></td></tr>
+<tr><td>成本</td><td>高（磁盘、主从、高配）</td><td>低（内存为主）</td><td>—</td></tr>
+</tbody>
+</table>
+
+<div class="box b-x">
+  <div class="box-t">🚨 一个真实的比例：90% 读 + 10% 写</div>
+  <p>互联网业务的典型读写比是 <strong>9:1 甚至 99:1</strong>。假设 QPS 是 10 万，读 9 万、写 1 万。<br>
+  <strong>不加缓存</strong>：9 万读全打到 MySQL，需要至少 15 台 MySQL（按 6000 QPS/台）。<br>
+  <strong>加缓存且命中率 95%</strong>：只剩 4500 读打到 MySQL，1 台数据库就够了。<br>
+  <strong>结论</strong>：缓存的价值 = <strong>用 1/10 的成本扛住 10 倍的流量</strong>。但前提是命中率高——这就引出下面的三大问题。</p>
+</div>
+
+<h2 id="c10-2">2. 缓存穿透：查一个「不存在」的数据</h2>
+
+<div class="box b-big">
+  <div class="box-t">✅ 定义与本质</div>
+  <p><strong>定义</strong>：请求查询一个<strong>数据库里根本不存在</strong>的数据。因为不存在，所以缓存里也永远没有（正常流程是「查缓存没有 → 查 DB → 写缓存」，DB 也查不到，于是不会写缓存）。<strong>结果每次请求都穿透到 DB。</strong></p>
+  <p><strong>本质</strong>：缓存「拦截住了有数据的请求，但拦截不住无数据的请求」。所以穿透攻击的杀伤力在于——<strong>恶意请求可以完全绕过缓存，直接打 DB。</strong></p>
+  <p><strong>典型攻击</strong>：用一个脚本疯狂请求 <code class="inline">GET /user/999999999999</code>（ID 不存在）。如果 QPS 是 100 万，DB 直接被打死。</p>
+  <p><strong>区别于「缓存击穿」</strong>：穿透 = 数据<strong>根本不存在</strong>；击穿 = 数据<strong>存在但缓存失效了</strong>。这是两个最容易被混淆的概念。</p>
+</div>
+
+<h3>方案一：缓存空值（最简单，首选）</h3>
+<pre><code class="lang-java"><span class="cm">/**
+ * 缓存空值方案：DB 查不到时，缓存一个特殊值（如空字符串），并设置较短的过期时间
+ */</span>
+<span class="kw">public</span> User <span class="fn">getUser</span>(Long userId) {
+    String key = <span class="st">"user:"</span> + userId;
+    String cached = redis.get(key);
+
+    <span class="cm">// ① 命中缓存（含"空值"这个特殊标记）</span>
+    <span class="kw">if</span> (cached != <span class="kw">null</span>) {
+        <span class="kw">if</span> (EMPTY_FLAG.equals(cached)) {
+            <span class="kw">return null</span>;   <span class="cm">// 明确的"空"，直接返回，不查 DB</span>
+        }
+        <span class="kw">return</span> JSON.parseObject(cached, User.class);
+    }
+
+    <span class="cm">// ② 回查 DB</span>
+    User user = userMapper.selectById(userId);
+
+    <span class="kw">if</span> (user == <span class="kw">null</span>) {
+        <span class="cm">// ③ DB 也没查到 → 缓存空值，过期时间要短（30~60 秒）</span>
+        redis.setex(key, <span class="nu">60</span>, EMPTY_FLAG);
+        <span class="kw">return null</span>;
+    }
+
+    <span class="cm">// ④ 正常数据缓存，过期时间较长（30 分钟 ~ 数小时）</span>
+    redis.setex(key, <span class="nu">1800</span>, JSON.toJSONString(user));
+    <span class="kw">return</span> user;
+}</code></pre>
+
+<div class="box b-warn">
+  <div class="box-t">⚠️ 缓存空值的两个关键细节</div>
+  <ol style="margin-bottom:0">
+  <li><strong>空值的过期时间必须远小于正常值</strong>（比如正常 30 分钟、空值 60 秒）。<br>
+  原因：数据可能<strong>后来被创建了</strong>。如果空值缓存 30 分钟，那这段时间内新注册的用户一直查不到。<strong>60 秒是一个经验值</strong>——既能挡住主要的攻击流量，又能容忍数据延迟。</li>
+  <li><strong>空值占内存</strong>。如果攻击者用<strong>大量不同的随机 ID</strong> 攻击，会写入海量的空值 key，把内存打满（这本身变成了一种攻击）。<br>
+  <strong>对策</strong>：① 空值加随机前缀，便于批量清理；② 增加 key 数量告警；③ <strong>对明显异常的请求（ID 格式非法、超范围）直接在最外层拦截，不要进 Redis</strong>；④ 用布隆过滤器挡在最前面。</li>
+  </ol>
+</div>
+
+<h3>方案二：布隆过滤器（海量数据场景）</h3>
+<div class="box b-big">
+  <div class="box-t">✅ 布隆过滤器原理（面试必答）</div>
+  <p><strong>数据结构</strong>：一个很长的<strong>位数组</strong>（bitmap）+ K 个独立的哈希函数。</p>
+  <p><strong>写入</strong>：对元素 x 用 K 个哈希函数算出 K 个位置，把这 K 位都置 1。</p>
+  <p><strong>查询</strong>：对元素 y 用同样的 K 个哈希函数算出 K 个位置，<strong>只要有任意一位是 0，就说明 y 一定不存在</strong>；如果全是 1，说明 y <strong>可能存在</strong>（因为有可能是别的元素把这些位置置 1 的——这就是误判）。</p>
+  <p><strong>核心特性（必须背下来）</strong>：</p>
+  <ul>
+  <li>✅ <strong>说不存在 → 一定不存在</strong>（<strong>零假阴性</strong>）</li>
+  <li>❌ <strong>说存在 → 可能不存在</strong>（<strong>有假阳性 / 误判率</strong>）</li>
+  <li>✅ <strong>空间极省</strong>：1 亿个元素、1% 误判率，只需约 <strong>114 MB</strong>（11.4 bit/元素）；如果用 HashSet 存 1 亿字符串，至少要几 GB。</li>
+  <li>❌ <strong>不支持删除</strong>（把某位置 0 会影响其他元素）——除非用 Counting Bloom Filter（每个位置用计数器）</li>
+  <li>❌ <strong>不支持更新</strong>，只能重建</li>
+  </ul>
+  <p><strong>误判率公式</strong>（面试加分）：<br>
+  设位数组长度 m、哈希函数个数 k、元素个数 n，则误判率约为：<br>
+  <code class="inline">P ≈ (1 - e^(-kn/m))^k</code><br>
+  最优的哈希函数个数是 <code class="inline">k = (m/n)·ln2 ≈ 0.7·(m/n)</code>。</p>
+</div>
+
+<pre><code class="lang-bash"><span class="cm">########## Redis 8.x 原生布隆过滤器（RedisBloom 已内置）##########</span>
+<span class="cm"># 注意：Redis 8.0 起，RedisBloom（含 Bloom / Cuckoo / TopK / CMS / TDigest）</span>
+<span class="cm">#      已作为内置模块集成，无需单独编译加载</span>
+
+<span class="cm"># 创建：误判率 1%，容量 100 万</span>
+BF.RESERVE user:filter 0.01 1000000
+
+<span class="cm"># 添加（user:filter 不存在会自动创建）</span>
+BF.ADD user:filter 1001
+BF.MADD user:filter 1002 1003 1004
+
+<span class="cm"># 判断是否存在</span>
+BF.EXISTS user:filter 1001     <span class="cm"># 1 = 可能存在</span>
+BF.EXISTS user:filter 9999     <span class="cm"># 0 = 一定不存在 ✅</span>
+BF.MEXISTS user:filter 1001 9999
+
+<span class="cm"># 查看信息（用了多少位、误判率）</span>
+BF.INFO user:filter
+
+<span class="cm">########## 布隆过滤器在业务里的位置 ##########</span>
+<span class="cm"># 请求流：客户端 → 布隆过滤器 → 缓存 → DB</span>
+<span class="cm">#   ① 布隆过滤器说不存在 → 直接返回，DB 完全不感知 ✅</span>
+<span class="cm">#   ② 布隆过滤器说可能存在 → 继续走缓存 → DB（此时几乎都是真数据）</span></code></pre>
+
+<div class="box b-x">
+  <div class="box-t">🚨 布隆过滤器的三个工程坑（面试官爱追问）</div>
+  <ol style="margin-bottom:0">
+  <li><strong>数据新增怎么办？</strong> 用户注册后必须<strong>同步把新 ID 加进布隆过滤器</strong>。如果漏了，就会出现「用户存在但过滤器说不存在」——这才是真正的故障（相对而言，误判为「可能存在」只是多查一次 DB，无害）。<br>
+  <strong>所以：必须保证「写入 DB 成功后，一定写入布隆过滤器」</strong>，一般用「先写 DB，再写 Bloom，写 Bloom 失败就重试 + 告警」。</li>
+  <li><strong>数据删除怎么办？</strong> 布隆过滤器不支持删除。所以<strong>只能用「只会新增不会删除」的数据集</strong>（如用户 ID、商品 ID）。<br>
+  如果需要支持删除 → 用 <strong>Cuckoo Filter</strong>（Redis 8 的 <code class="inline">CF.*</code> 命令），它支持删除，空间效率也不错。</li>
+  <li><strong>Redis 重启后布隆过滤器会丢。</strong> 因为它是模块数据，需要 RDB/AOF 持久化。Redis 8 的模块数据支持持久化，但要<strong>确认配置正确</strong>。<br>
+  <strong>生产建议</strong>：① 开启 AOF；② 或者用「启动时从 DB 全量重建」的兜底方案（1 亿数据重建约需要几十秒到几分钟，可接受）；③ <strong>重建期间降级为「直接查缓存 + DB」</strong>。</li>
+  </ol>
+  <p><strong>加分回答</strong>：「我们在生产里用的是<strong>分层过滤</strong>——最外层用布隆过滤器挡掉 99% 的无效请求，再往里是空值缓存兜底。即使布隆过滤器因为重启丢失了，空值缓存也能撑住一段时间，给我们重建的时间窗口。这种『双保险』的思路在大厂很常见。」</p>
+</div>
+
+<h2 id="c10-3">3. 缓存击穿：热点 key 突然失效</h2>
+
+<div class="box b-big">
+  <div class="box-t">✅ 定义与本质</div>
+  <p><strong>定义</strong>：某个<strong>被高频访问的热点 key 突然过期</strong>（或因为淘汰被删掉），此时大量并发请求同时发现「缓存没了」，于是<strong>全部涌向 DB 去重建缓存</strong>，DB 瞬间被打爆。</p>
+  <p><strong>关键词是「同时」</strong>。如果只有 1 个请求来重建，那没问题；问题是 1 万个请求同时来。<strong>所以击穿的本质是「缓存重建时的并发失控」。</strong></p>
+  <p><strong>典型场景</strong>：首页秒杀商品详情、明星微博主页、大促主会场配置。<strong>这类数据的特点是「访问量极大 + 缓存失效的瞬间就是灾难」。</strong></p>
+</div>
+
+<h3>方案一：互斥锁重建（Mutual Exclusion，最常用）</h3>
+<pre><code class="lang-java"><span class="cm">/**
+ * 互斥锁方案：保证只有一个线程去重建缓存，其他线程等待后读缓存
+ * 优点：实现简单，一致性好
+ * 缺点：等待线程会阻塞，吞吐量受限于"重建耗时"；持锁线程挂了要有兜底
+ */</span>
+<span class="kw">public</span> User <span class="fn">getUserWithMutex</span>(Long userId) {
+    String key = <span class="st">"user:"</span> + userId;
+    String cached = redis.get(key);
+    <span class="kw">if</span> (cached != <span class="kw">null</span>) {
+        <span class="kw">return</span> EMPTY_FLAG.equals(cached) ? <span class="kw">null</span> : JSON.parseObject(cached, User.class);
+    }
+
+    <span class="cm">// 缓存未命中 → 尝试抢锁（只让一个线程去查 DB）</span>
+    String lockKey = <span class="st">"lock:user:"</span> + userId;
+    <span class="cm">// SET NX + 过期时间，保证原子性（详见 Day4.2 分布式锁）</span>
+    <span class="kw">boolean</span> locked = redis.setIfAbsent(lockKey, <span class="st">"1"</span>, Duration.ofSeconds(<span class="nu">10</span>));
+
+    <span class="kw">if</span> (!locked) {
+        <span class="cm">// 没抢到锁 → 等待一小会儿再重试读缓存（自旋）</span>
+        <span class="kw">try</span> {
+            sleep(<span class="nu">50</span>);
+            String retry = redis.get(key);
+            <span class="kw">if</span> (retry != <span class="kw">null</span>) {
+                <span class="kw">return</span> EMPTY_FLAG.equals(retry) ? <span class="kw">null</span> : JSON.parseObject(retry, User.class);
+            }
+        } <span class="kw">catch</span> (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        <span class="cm">// 重试仍无数据 → 走降级（返回兜底数据 / 直接查 DB，视业务容忍度）</span>
+        <span class="kw">return</span> fallback(userId);
+    }
+
+    <span class="kw">try</span> {
+        <span class="cm">// 二次检查（Double Check）：可能在等锁期间别人已经重建好了</span>
+        String again = redis.get(key);
+        <span class="kw">if</span> (again != <span class="kw">null</span>) {
+            <span class="kw">return</span> EMPTY_FLAG.equals(again) ? <span class="kw">null</span> : JSON.parseObject(again, User.class);
+        }
+
+        User user = userMapper.selectById(userId);
+        <span class="kw">if</span> (user == <span class="kw">null</span>) {
+            redis.setex(key, <span class="nu">60</span>, EMPTY_FLAG);
+            <span class="kw">return null</span>;
+        }
+        redis.setex(key, <span class="nu">1800</span>, JSON.toJSONString(user));
+        <span class="kw">return</span> user;
+    } <span class="kw">finally</span> {
+        <span class="cm">// ⚠️ 释放锁要用 Lua 保证"判断是自己的锁才删"（详见 Day4.2）</span>
+        redis.eval(UNLOCK_SCRIPT, Collections.singletonList(lockKey), <span class="st">"1"</span>);
+    }
+}</code></pre>
+
+<h3>方案二：逻辑过期（Logical Expiration，高并发首选）</h3>
+<div class="box b-big">
+  <div class="box-t">✅ 逻辑过期：不设 TTL，把过期时间写进 value</div>
+  <p><strong>核心思想</strong>：key <strong>永不物理过期</strong>，而是在 value 里存一个逻辑过期时间字段。查询时判断逻辑时间是否过期：</p>
+  <ul>
+  <li><strong>未过期</strong> → 直接返回（绝大多数情况）</li>
+  <li><strong>已过期</strong> → <strong>仍然返回旧数据（保证不阻塞）</strong>，同时<strong>异步</strong>开一个线程去重建缓存并更新逻辑过期时间</li>
+  </ul>
+  <p><strong>优点</strong>：<strong>没有任何请求需要等待</strong>——所有请求都立刻拿到数据（哪怕短暂是旧数据）。吞吐量远高于互斥锁方案。</p>
+  <p><strong>缺点</strong>：<strong>牺牲了强一致性</strong>，重建期间返回旧数据。所以只适用于「能接受短暂旧数据」的场景（商品详情、排行榜、配置）。<strong>金融余额、库存这类绝对不能用。</strong></p>
+  <p><strong>另一个坑</strong>：需要在业务层感知「逻辑过期时间」这个字段，对数据结构有侵入。</p>
+</div>
+
+<pre><code class="lang-java"><span class="cm">/**
+ * 逻辑过期方案：value 里带 expireTime，永不过期
+ */</span>
+<span class="cm">// 存储结构（Redis Hash 或 JSON 字符串）</span>
+<span class="cm">// { "data": {...业务数据...}, "expireTime": 1759161600000 }</span>
+
+<span class="kw">public</span> User <span class="fn">getUserWithLogicalExpire</span>(Long userId) {
+    String key = <span class="st">"user:logic:"</span> + userId;
+    String cached = redis.get(key);
+
+    <span class="cm">// ① 缓存从未建立 → 走互斥锁方案兜底（只有第一次）</span>
+    <span class="kw">if</span> (cached == <span class="kw">null</span>) {
+        <span class="kw">return</span> getUserWithMutex(userId);
+    }
+
+    CacheData&lt;User&gt; data = JSON.parseObject(cached, <span class="kw">new</span> TypeReference&lt;CacheData&lt;User&gt;&gt;() {});
+
+    <span class="cm">// ② 逻辑时间未过期 → 直接返回</span>
+    <span class="kw">if</span> (data.getExpireTime().after(<span class="kw">new</span> Date())) {
+        <span class="kw">return</span> data.getData();
+    }
+
+    <span class="cm">// ③ 逻辑时间已过期 → 尝试异步重建（抢到锁的那个线程去重建）</span>
+    <span class="kw">if</span> (redis.setIfAbsent(<span class="st">"lock:rebuild:"</span> + userId, <span class="st">"1"</span>, Duration.ofSeconds(<span class="nu">10</span>))) {
+        REBUILD_EXECUTOR.submit(() -&gt; {
+            <span class="kw">try</span> {
+                <span class="cm">// 开新事务/新线程，避免和主流程共享事务上下文</span>
+                User fresh = userMapper.selectById(userId);
+                CacheData&lt;User&gt; newData = <span class="kw">new</span> CacheData&lt;&gt;(
+                    fresh,
+                    Date.from(Instant.now().plus(<span class="nu">30</span>, ChronoUnit.MINUTES))
+                );
+                <span class="cm">// ⚠️ 不设 TTL，或设一个很长的 TTL（如 7 天）作为"最终清理"</span>
+                redis.set(key, JSON.toJSONString(newData));
+            } <span class="kw">finally</span> {
+                redis.del(<span class="st">"lock:rebuild:"</span> + userId);
+            }
+        });
+    }
+
+    <span class="cm">// ④ 无论是否抢到锁，都立刻返回旧数据（不阻塞）</span>
+    <span class="kw">return</span> data.getData();
+}</code></pre>
+
+<h3>方案三：热点 key 永不过期 + 主动刷新</h3>
+<p>如果是「少量、可枚举」的超级热点（比如首页配置、大促主会场），最土但最有效的办法是：</p>
+<ul>
+  <li><strong>不设 TTL</strong>（或设超长 TTL）</li>
+  <li>用<strong>定时任务 / 消息通知</strong>在数据变更时主动刷新缓存</li>
+  <li>加<strong>本地缓存（Caffeine）</strong>做二级缓存，Redis 抖动也不影响</li>
+</ul>
+
+<div class="box b-tip">
+  <div class="box-t">💡 击穿方案的选型话术</div>
+  <p>「我会按<strong>数据量级和一致性要求</strong>选：</p>
+  <ul style="margin-bottom:0">
+  <li><strong>普通热点 key（比如某个商品详情）</strong> → 互斥锁方案。实现简单，一致性有保证，重建耗时一般也就几十毫秒，可接受。</li>
+  <li><strong>超级热点（百万 QPS，比如明星主页、大促会场）</strong> → 逻辑过期 + 本地缓存。因为让一万个线程排队等锁，即使只有一个查 DB，其他线程的<strong>排队等待时间</strong>本身就是延迟，用户体验差。逻辑过期让所有人立即拿到数据（哪怕旧一点）。</li>
+  <li><strong>强一致要求（价格、库存）</strong> → 不用缓存兜底，直接走「互斥锁 + 短 TTL + 主动刷新」这套保守方案，或者干脆用 DB + 乐观锁。</li>
+  </ul>
+</div>
+
+<h2 id="c10-4">4. 缓存雪崩：大批 key 同时失效 / Redis 整体不可用</h2>
+
+<div class="box b-big">
+  <div class="box-t">✅ 雪崩有两种形态（面试要说全）</div>
+  <p><strong>形态一：同一时刻大批 key 同时过期</strong></p>
+  <p>原因：如果给缓存设置过期时间时用了<strong>统一的时长</strong>（比如都在凌晨 0 点系统预热、全部设 30 分钟 TTL），那么 30 分钟后这几十万个 key <strong>同时失效</strong>，所有请求一起打到 DB。</p>
+  <p><strong>解法</strong>：</p>
+  <ul>
+  <li><strong>过期时间加随机值</strong>：<code class="inline">TTL = 基础时间 + random(0, 基础时间 × 20%)</code>。这是最简单有效的一招。</li>
+  <li><strong>分级过期</strong>：把 key 分成几组，每组用不同的基础 TTL（如 25、30、35 分钟）。</li>
+  <li><strong>热点数据永不过期</strong>：用主动更新代替被动过期。</li>
+  </ul>
+  <p><strong>形态二：Redis 集群整体挂掉 / 网络分区</strong></p>
+  <p>原因：Redis 崩了、机房断电、网络抖动导致客户端全部连不上。<strong>此时不只是「缓存不命中」，而是「缓存层完全消失」，所有流量同时砸向 DB。</strong></p>
+  <p><strong>解法（这是真正的架构级方案）</strong>：</p>
+  <ul>
+  <li><strong>多级缓存</strong>：<code class="inline">本地缓存（Caffeine）→ Redis → DB</code>。Redis 挂了，本地缓存还能扛住一部分（缓存一致性问题变大，但可用性提升）。</li>
+  <li><strong>熔断 / 限流 / 降级</strong>：Sentinel / Hystrix / Resilience4j 做熔断，DB 前面加限流；非核心功能直接降级返回兜底数据。</li>
+  <li><strong>DB 层保护</strong>：DB 连接池限流、慢查询保护、只读副本分流。</li>
+  <li><strong>Redis 高可用</strong>：哨兵 / Cluster + 多可用区部署，避免单机房故障。</li>
+  <li><strong>预热</strong>：大促前把热点数据提前灌进缓存（这时<strong>不要给这些 key 设短 TTL</strong>，或设长 TTL + 随机值）。</li>
+  </ul>
+</div>
+
+<pre><code class="lang-java"><span class="cm">/**
+ * 过期时间打散：基础 TTL + 随机扰动
+ */</span>
+<span class="kw">public void</span> <span class="fn">setWithJitter</span>(String key, String value, <span class="kw">long</span> baseSeconds) {
+    <span class="cm">// 在基础 TTL 上叠加 ±20% 的随机扰动</span>
+    <span class="kw">long</span> jitter = ThreadLocalRandom.current().nextLong(-baseSeconds / <span class="nu">5</span>, baseSeconds / <span class="nu">5</span>);
+    <span class="kw">long</span> ttl = baseSeconds + jitter;
+    redis.setex(key, ttl, value);
+}
+
+<span class="cm">// 批量预热时更要注意：分批次、分时段写入，避免同一批 key 同时过期</span>
+<span class="kw">for</span> (Product p : products) {
+    <span class="cm">// 每个 key 的 TTL 都不同，避免"整齐划一地过期"</span>
+    setWithJitter(<span class="st">"product:"</span> + p.getId(), JSON.toJSONString(p), <span class="nu">3600</span>);
+}</code></pre>
+
+<div class="box b-x">
+  <div class="box-t">🚨 真实故障复盘：某电商大促首分钟雪崩</div>
+  <p><strong>现象</strong>：大促 0 点开抢，第一分钟系统正常，第二分钟开始 DB CPU 飙到 100%，接口大面积超时。</p>
+  <p><strong>根因</strong>：预热脚本在 23:59:30 把 50 万个商品详情 key 一次性写入，<strong>TTL 统一设为 1800 秒</strong>。于是 30 分 29 秒后，这 50 万个 key <strong>在同一秒集中失效</strong>，请求全部穿透到 DB。</p>
+  <p><strong>教训</strong>：</p>
+  <ul style="margin-bottom:0">
+  <li>预热脚本<strong>必须打散 TTL</strong>，并且分批写入（拉长写入时间窗口）。</li>
+  <li>预热数据的 TTL 应该<strong>长于大促时长的 1.5 倍以上</strong>，并在大促期间<strong>禁止被动过期</strong>（改为主动刷新）。</li>
+  <li>要有<strong>「缓存命中率」的实时告警</strong>——命中率从 99% 掉到 60%，就是雪崩的前兆信号。</li>
+  </ul>
+</div>
+
+<h2 id="c10-5">5. 三大问题对比总表（面试速查）</h2>
+<table>
+<thead><tr><th style="width:12%">问题</th><th style="width:18%">本质</th><th style="width:22%">触发条件</th><th>解决方案（按推荐度排序）</th></tr></thead>
+<tbody>
+<tr>
+  <td><strong>穿透</strong></td>
+  <td>查<strong>不存在</strong>的数据，缓存永远拦不住</td>
+  <td>恶意攻击 / 非法参数 / 数据被删</td>
+  <td>① 参数校验 + 法定范围拦截（最外层）<br>② 缓存空值（30-60s，短 TTL）<br>③ 布隆过滤器（海量数据）<br>④ Cuckoo Filter（需支持删除时）</td>
+</tr>
+<tr>
+  <td><strong>击穿</strong></td>
+  <td>单个<strong>热点 key</strong> 失效，并发重建失控</td>
+  <td>热点 key 过期 / 被淘汰 / 被主动删除</td>
+  <td>① 逻辑过期 + 异步重建（超高并发）<br>② 互斥锁重建（普通热点）<br>③ 热点 key 永不过期 + 主动刷新<br>④ 本地缓存兜底</td>
+</tr>
+<tr>
+  <td><strong>雪崩</strong></td>
+  <td>大批 key 同时失效，或<strong>缓存层整体消失</strong></td>
+  <td>统一 TTL / Redis 宕机 / 机房故障</td>
+  <td>① TTL 加随机扰动（必做）<br>② 多级缓存（本地 + Redis）<br>③ 熔断限流降级<br>④ Redis 高可用 + 多可用区<br>⑤ 提前预热（长 TTL）</td>
+</tr>
+</tbody>
+</table>
+
+<div class="box b-tip">
+  <div class="box-t">💡 一句话记忆法</div>
+  <p><strong>穿透是「没有」，击穿是「一个」，雪崩是「一片」。</strong><br>
+  穿透 → 数据不存在（挡不住的查询）<br>
+  击穿 → 一个热点 key（同时重建的压力）<br>
+  雪崩 → 一片 key 或整个缓存层（系统性失效）</p>
+</div>
+
+<h2 id="c10-6">6. 双写一致性：缓存与 DB 怎么同步</h2>
+
+<div class="box b-big">
+  <div class="box-t">✅ 先说结论：一致性是有层级的</div>
+  <p>面试官问「如何保证缓存和 DB 一致」，如果你直接回答「延时双删」，说明你只是在背方案。<strong>正确的回答是先把「一致性」分级：</strong></p>
+  <table style="margin:8px 0">
+  <thead><tr><th style="width:22%">一致性级别</th><th>含义</th><th>做法</th><th>适用</th></tr></thead>
+  <tbody>
+  <tr><td><strong>强一致</strong></td><td>任何时刻读到的都是最新值</td><td>分布式锁 / 读写都串行化 / 干脆不用缓存</td><td>金融余额、库存扣减（<strong>性能代价极大</strong>）</td></tr>
+  <tr><td><strong>最终一致</strong></td><td>短暂不一致，但最终会同步</td><td>Cache Aside + 延时双删 / Canal 订阅 binlog</td><td><strong>绝大多数业务</strong>（商品、用户、订单查询）</td></tr>
+  <tr><td><strong>弱一致（可接受）</strong></td><td>允许较长时间的旧数据</td><td>定时刷新 / 逻辑过期</td><td>排行榜、统计报表、配置缓存</td></tr>
+  </tbody>
+  </table>
+  <p><strong>关键洞察</strong>：「生产上 99% 的场景要的是<strong>最终一致</strong>，而不是强一致。<strong>因为强一致的代价是牺牲缓存的性能优势——那就没必要用缓存了。</strong>所以正确的思路是：把「允许不一致的窗口」压缩到业务能接受的范围内（比如 100ms 内），并且设计好兜底机制。」</p>
+</div>
+
+<h3>6.1 四种经典写策略对比</h3>
+<table>
+<thead><tr><th style="width:18%">策略</th><th style="width:32%">做法</th><th>优点</th><th>缺点</th></tr></thead>
+<tbody>
+<tr>
+  <td><strong>① 先更新 DB，再更新缓存</strong></td>
+  <td>UPDATE DB 成功 → SET cache</td>
+  <td>思路直观</td>
+  <td>❌ <strong>并发写会覆盖</strong>（A 先更 DB 后更缓存，B 插在中间，缓存最终是 A 的旧值）<br>❌ 更新缓存<strong>可能是无用功</strong>（写多读少的场景）</td>
+</tr>
+<tr>
+  <td><strong>② 先删缓存，再更新 DB</strong></td>
+  <td>DEL cache → UPDATE DB</td>
+  <td>比 ① 好</td>
+  <td>❌ <strong>并发读会写回脏数据</strong>：<br>① 线程A 删缓存<br>② 线程B 读缓存未命中 → 读 DB（旧值）<br>③ 线程A 更新 DB<br>④ 线程B 把<strong>旧值写进缓存</strong> → 长期脏数据</td>
+</tr>
+<tr>
+  <td><strong>③ 先更新 DB，再删缓存</strong><br><span class="badge bg-green">Cache Aside（推荐）</span></td>
+  <td>UPDATE DB → DEL cache</td>
+  <td>✅ 出现脏数据的概率<strong>极低</strong>（需要「读请求恰好卡在更新DB前后 + 读比写还慢」）</td>
+  <td>⚠️ 仍有理论上的极端情况；删除失败会留下脏缓存</td>
+</tr>
+<tr>
+  <td><strong>④ 更新 DB + 延时双删</strong></td>
+  <td>DEL cache → UPDATE DB → sleep → DEL cache</td>
+  <td>✅ 进一步压缩不一致窗口，是③的加强版</td>
+  <td>⚠️ 延迟时间难以精确设定；第二次删除可能失败；<strong>延迟本身阻塞/占用线程</strong></td>
+</tr>
+</tbody>
+</table>
+
+<div class="box b-big">
+  <div class="box-t">✅ 为什么「先更新 DB，再删缓存」（Cache Aside）是最优的</div>
+  <p><strong>核心论证</strong>（面试必须说清这个推理链）：</p>
+  <p>假设并发场景：事务 T1 是「更新」，T2 是「查询读」。极端不利的情况是：</p>
+  <ol>
+  <li>T1：UPDATE DB（写新值）</li>
+  <li>T2：读缓存 → 未命中</li>
+  <li>T2：读 DB → <strong>读到新值</strong>（因为 T1 已经更新了）〔如果是读旧值才有问题，所以这里要求 T2 的读 DB 发生在 T1 的 UPDATE 之后〕</li>
+  <li>T1：DEL cache</li>
+  <li>T2：SET cache（把新值写进去）</li>
+  </ol>
+  <p>这个顺序<strong>结果是正确的</strong>。要产生脏数据，必须满足：<strong>T2 读 DB 发生在 T1 的 UPDATE 之前，但 T2 写缓存发生在 T1 的 DEL 之后</strong>。这意味着「T2 的读 DB → 写缓存」整个耗时<strong>比 T1 的 UPDATE → DEL 还长</strong>。</p>
+  <p>现实中的情况是：<strong>写 DB（带锁、要落盘）通常比读 DB（可能命中索引、走缓存页）慢得多</strong>。所以「读的整个链路比写还慢」这件事<strong>概率极低</strong>。</p>
+  <p><strong>结论</strong>：Cache Aside 的脏数据窗口是「毫秒级且概率极低」，对绝大多数业务完全够用。<strong>「概率极低」这个论证本身就是面试的高分点。</strong></p>
+</div>
+
+<h3>6.2 三种工程级落地方案</h3>
+
+<h4>方案 A：Cache Aside + 删除失败重试</h4>
+<pre><code class="lang-java"><span class="cm">/**
+ * 方案 A：先更新 DB，再删缓存 + 删除失败重试（保证最终一致性）
+ * 这是最简单也最常用的落地方式
+ */</span>
+<span class="kw">public void</span> <span class="fn">updateProduct</span>(Product product) {
+    <span class="cm">// ① 先更新数据库</span>
+    productMapper.updateById(product);
+
+    <span class="cm">// ② 再删缓存（注意：是"删除"，不是"更新"）</span>
+    String key = <span class="st">"product:"</span> + product.getId();
+    <span class="kw">try</span> {
+        redis.del(key);
+    } <span class="kw">catch</span> (Exception e) {
+        <span class="cm">// ③ 删除失败 → 丢进消息队列异步重试（不能吞掉！）</span>
+        log.error(<span class="st">"缓存删除失败，进入重试队列: {}"</span>, key, e);
+        mqTemplate.send(<span class="st">"cache:delete:retry"</span>, key);
+    }
+}
+
+<span class="cm">// 消费者：带重试次数上限，超限告警</span>
+<span class="kw">@RabbitListener</span>(queues = <span class="st">"cache:delete:retry"</span>)
+<span class="kw">public void</span> <span class="fn">onCacheDeleteRetry</span>(String key, Channel channel, <span class="kw">@Header</span>(AmqpHeaders.DELIVERY_TAG) <span class="kw">long</span> tag) {
+    <span class="kw">try</span> {
+        redis.del(key);
+        channel.basicAck(tag, <span class="kw">false</span>);
+    } <span class="kw">catch</span> (Exception e) {
+        Map&lt;String, Object&gt; headers = <span class="kw">new</span> HashMap&lt;&gt;();
+        Integer retry = (Integer) headers.get(<span class="st">"retry"</span>);
+        <span class="kw">int</span> count = retry == <span class="kw">null</span> ? <span class="nu">1</span> : retry + <span class="nu">1</span>;
+        <span class="kw">if</span> (count &gt; <span class="nu">3</span>) {
+            <span class="cm">// 超过重试上限 → 告警 + 让 key 自然过期，避免无限循环</span>
+            alertService.warn(<span class="st">"缓存删除重试耗尽: "</span> + key);
+            channel.basicAck(tag, <span class="kw">false</span>);
+        } <span class="kw">else</span> {
+            headers.put(<span class="st">"retry"</span>, count);
+            channel.basicNack(tag, <span class="kw">false</span>, <span class="kw">true</span>);
+        }
+    }
+}</code></pre>
+
+<h4>方案 B：延时双删（应对「先删缓存再更新 DB」的场景）</h4>
+<pre><code class="lang-java"><span class="cm">/**
+ * 方案 B：延时双删
+ * 顺序：删缓存 → 更新 DB → 延迟 N 毫秒 → 再删缓存
+ *
+ * 为什么需要在"更新 DB 前先删一次"？
+ *   目的是让"已经读到旧数据的请求"在第二次删除时被清掉，避免它把旧值写回缓存。
+ */</span>
+<span class="kw">public void</span> <span class="fn">updateWithDoubleDelete</span>(Product product) {
+    String key = <span class="st">"product:"</span> + product.getId();
+    <span class="kw">long</span> oldVersion = ...;  <span class="cm">// 可选的版本号机制</span>
+
+    <span class="cm">// ① 第一次删除：清掉旧缓存</span>
+    redis.del(key);
+
+    <span class="cm">// ② 更新数据库</span>
+    productMapper.updateById(product);
+
+    <span class="cm">// ③ 延迟后第二次删除：清掉"更新期间被读请求写回的旧值"</span>
+    <span class="cm">// ⚠️ 关键问题：延迟多久？</span>
+    scheduleExecutor.schedule(() -&gt; {
+        <span class="cm">// 为了更安全，删除前可以做一次"版本比对"：</span>
+        <span class="cm">//   如果缓存里的值版本 &lt; DB 版本，说明缓存是旧的 → 删</span>
+        redis.del(key);
+    }, <span class="nu">500</span>, TimeUnit.MILLISECONDS);
+}</code></pre>
+
+<div class="box b-warn">
+  <div class="box-t">⚠️ 延时双删的「延时」到底该延迟多久（面试深挖点）</div>
+  <p><strong>理论上的答案是</strong>：「大于『一次读请求的耗时（读缓存 + 读 DB + 写缓存）』」。</p>
+  <p><strong>工程上的答案是</strong>：<strong>没有标准答案，只能靠压测和经验值</strong>。一般取 <strong>200ms ~ 1s</strong>。理由是：</p>
+  <ul>
+  <li>如果你延迟太短（如 50ms），可能读请求还没走完，就被你「提前删除」了，然后它又把旧值写回来。</li>
+  <li>如果你延迟太长（如 5s），那不一致窗口就是 5s 以上，业务可能无法接受。</li>
+  <li><strong>聪明的做法是「用版本号代替时间猜测」</strong>：缓存 value 里带一个 version（来自 DB 的 version 字段或 update_time）。删缓存前先比对——如果缓存里的 version 更旧，才删除或覆盖。</li>
+  </ul>
+  <p><strong>面试加分句</strong>：「延时双删的『延时』本质上是一个<strong>靠统计推断出来的经验值，不是精确保证</strong>。所以它只适合『不一致窗口几百毫秒可接受』的场景。如果要求更严格，我会用<strong>版本号比对这个更精确的方案</strong>，或者直接上 Canal 订阅 binlog。」</p>
+</div>
+
+<h4>方案 C：Canal 订阅 binlog（大厂主流，最彻底）</h4>
+<div class="box b-big">
+  <div class="box-t">✅ Canal：把「缓存失效」变成 DB 变更的副产品</div>
+  <p><strong>核心思想</strong>：应用<strong>只负责写 DB，完全不管缓存</strong>。Canal 伪装成 MySQL 的从库（发送 dump 协议），实时订阅 binlog，解析出数据变更，然后<strong>异步</strong>地把变更同步到 Redis。</p>
+  <p><strong>数据流</strong>：<br>
+  <code class="inline">应用 → UPDATE MySQL → binlog → Canal Server → MQ（Kafka/RocketMQ）→ 缓存同步消费者 → 更新/删除 Redis</code></p>
+  <p><strong>优势</strong>：</p>
+  <ul>
+  <li><strong>业务代码零侵入</strong>：不需要在业务代码里写「删缓存」的逻辑，天然避免「忘记删缓存」的 bug。</li>
+  <li><strong>解耦</strong>：缓存同步失败不影响主流程，可以无限重试 + 人工兜底。</li>
+  <li><strong>可靠</strong>：binlog 是 DB 的持久化日志，不丢（只要 binlog 不丢）。</li>
+  <li><strong>统一治理</strong>：所有缓存更新都走同一套链路，方便加日志、监控、灰度。</li>
+  <li><strong>支持多目标</strong>：同一份 binlog 可以同时同步到 Redis、ES、HBase 等多个下游。</li>
+  </ul>
+  <p><strong>缺点</strong>：</p>
+  <ul>
+  <li>引入<strong>额外组件</strong>（Canal Server + MQ + 消费者），运维复杂度上升。</li>
+  <li><strong>延迟更高</strong>：binlog → Canal → MQ → 消费者，端到端延迟通常是<strong>几十毫秒到几百毫秒</strong>，比「业务代码里直接删缓存」的 ms 级要慢。</li>
+  <li>需要处理<strong>binlog 格式</strong>（ROW 模式才能拿到变更前后的完整数据）、DDL 事件等。</li>
+  <li>MQ 积压时缓存会长时间不更新。</li>
+  </ul>
+</div>
+
+<pre><code class="lang-yaml"><span class="cm">########## Canal 配置示例 ##########</span>
+<span class="cm"># canal.properties（服务端）</span>
+<span class="kw">canal.instance.master.address</span>=<span class="st">mysql-master:3306</span>
+<span class="kw">canal.instance.dbUsername</span>=<span class="st">canal</span>
+<span class="kw">canal.instance.dbPassword</span>=<span class="st">canal_password</span>
+<span class="kw">canal.instance.filter.regex</span>=<span class="st">.*\\..*</span>          <span class="cm"># 订阅所有库表</span>
+
+<span class="cm"># instance.properties（目标实例）</span>
+<span class="kw">canal.instance.mysql.slaveId</span>=<span class="nu">1234</span>              <span class="cm"># 伪装成从库的 serverId（不能和现有从库冲突！）</span>
+<span class="kw">canal.instance.filter.regex</span>=<span class="st">mall\\.product,mall\\.order</span>   <span class="cm"># 只订阅这两张表</span>
+<span class="kw">canal.instance.connectionCharset</span>=<span class="st">UTF-8</span>
+<span class="kw">canal.instance.tsdb.enable</span>=<span class="st">true</span></code></pre>
+
+<pre><code class="lang-java"><span class="cm">/**
+ * Canal 消费者：解析 binlog 事件 → 删除对应缓存
+ */</span>
+<span class="kw">@Component</span>
+<span class="kw">public class</span> <span class="fn">CacheSyncConsumer</span> {
+
+    <span class="kw">@KafkaListener</span>(topics = <span class="st">"canal-product"</span>)
+    <span class="kw">public void</span> <span class="fn">onCanalMessage</span>(String message) {
+        CanalMessage msg = JSON.parseObject(message, CanalMessage.class);
+        <span class="kw">if</span> (!<span class="st">"product"</span>.equals(msg.getTable())) <span class="kw">return</span>;
+
+        <span class="kw">for</span> (CanalRowData row : msg.getData()) {
+            String id = row.get(<span class="st">"id"</span>);
+            String key = <span class="st">"product:"</span> + id;
+
+            <span class="kw">if</span> (<span class="st">"DELETE"</span>.equals(msg.getType())) {
+                redis.del(key);
+            } <span class="kw">else if</span> (<span class="st">"UPDATE"</span>.equals(msg.getType())) {
+                <span class="cm">// 直接删缓存（下次读时重建），而不是更新缓存</span>
+                <span class="cm">// 为什么删而不是更新？避免"更新时并发读写的覆盖问题"</span>
+                redis.del(key);
+            } <span class="kw">else if</span> (<span class="st">"INSERT"</span>.equals(msg.getType())) {
+                <span class="cm">// 新增：可以选择预热缓存，或什么都不做（等首次读时加载）</span>
+                <span class="cm">// 一般选择不做，避免写入无用的缓存</span>
+            }
+        }
+    }
+}</code></pre>
+
+<h3>6.3 三种方案选型对比</h3>
+<table>
+<thead><tr><th style="width:16%">维度</th><th>Cache Aside</th><th>延时双删</th><th>Canal 订阅 binlog</th></tr></thead>
+<tbody>
+<tr><td><strong>一致性</strong></td><td>最终一致（窗口 ms 级）</td><td>最终一致（窗口可控）</td><td>最终一致（窗口 10ms~几百 ms）</td></tr>
+<tr><td><strong>业务侵入</strong></td><td>中（每处写操作都要删缓存）</td><td>中（还要加延迟任务）</td><td><strong>低（业务代码零侵入）</strong></td></tr>
+<tr><td><strong>实现复杂度</strong></td><td><strong>低</strong></td><td>中</td><td><strong>高</strong></td></tr>
+<tr><td><strong>额外组件</strong></td><td>无</td><td>无（需调度器）</td><td>Canal + MQ + 消费者</td></tr>
+<tr><td><strong>延迟</strong></td><td>极低</td><td>低（可调）</td><td>较高</td></tr>
+<tr><td><strong>可靠性</strong></td><td>依赖删除成功（需重试机制）</td><td>依赖第二次删除成功</td><td><strong>高（binlog 不丢）</strong></td></tr>
+<tr><td><strong>排查难度</strong></td><td>低</td><td>低</td><td>中高（链路长）</td></tr>
+<tr><td><strong>适用</strong></td><td><strong>中小业务、写少读多</strong></td><td>写并发较高的场景</td><td><strong>大型系统、缓存种类多、需要统一治理</strong></td></tr>
+</tbody>
+</table>
+
+<div class="box b-tip">
+  <div class="box-t">💡 选型话术（可以直接在面试里说）</div>
+  <p>「我会分三档选：</p>
+  <ol style="margin-bottom:0">
+  <li><strong>业务初期 / 中小系统</strong>：直接用 <strong>Cache Aside</strong>——先更新 DB 再删缓存，加一个「删除失败进 MQ 重试」的兜底。实现成本最低，理论上的脏数据窗口是毫秒级且概率极低，够用。</li>
+  <li><strong>写并发较高、对一致性更敏感</strong>：用 <strong>延时双删 + 版本号比对</strong>。关键是不要指望「延迟时间」这个经验值，而是用版本号做精确判断。</li>
+  <li><strong>大型系统 / 多缓存目标</strong>：上 <strong>Canal + MQ</strong>。因为这时候「业务代码里到处写删缓存逻辑」本身就成了维护负担和 bug 来源。用 binlog 统一收口，还能顺便同步 ES、HBase。</li>
+  </ol>
+  <p>但无论哪种方案，我都会加三样东西：<strong>① 缓存过期时间（最终兜底，即使同步失败也会自愈）；② 缓存命中率监控（不一致往往表现为命中率异常）；③ 关键业务的对账任务（定时比对缓存和 DB）。</strong>」</p>
+</div>
+
+<h2 id="c10-7">7. 强一致场景的替代思路</h2>
+<div class="box b-big">
+  <div class="box-t">✅ 当业务真的需要强一致时（库存、余额）</div>
+  <p><strong>思路一：不用缓存，让 DB 扛</strong></p>
+  <p>库存扣减这类操作用 <code class="inline">UPDATE stock SET num = num - 1 WHERE id = ? AND num &gt; 0</code> 直接在 DB 做，靠行锁保证原子性。<strong>QPS 不够就分库分表 + 热点商品单独处理。</strong></p>
+  <p><strong>思路二：Redis 作为「唯一数据源」，DB 只做异步落库</strong></p>
+  <p>库存数字放在 Redis（<code class="inline">DECR</code> 是原子的），DB 只做异步持久化 + 对账。<strong>这样 Redis 就是强一致的（单线程原子操作），但要求 Redis 高可用做得足够好</strong>（否则 Redis 挂了库存就没了）。大厂秒杀常用这套。</p>
+  <p><strong>思路三：分布式锁 + 串行化</strong></p>
+  <p>对同一个商品的读和写都加同一把锁，强制串行。<strong>性能差，只适合极低频的强一致操作。</strong></p>
+  <p><strong>思路四：Lua 脚本保证 Redis 侧原子性</strong></p>
+  <p>把「判断 + 扣减 + 记录」写成一个 Lua 脚本，利用 Redis 单线程执行脚本的特性实现原子性。</p>
+</div>
+
+<pre><code class="lang-lua"><span class="cm">-- 库存扣减 Lua 脚本（原子性保证）</span>
+<span class="cm">-- KEYS[1] = 库存 key, ARGV[1] = 扣减数量</span>
+<span class="kw">local</span> stock = redis.call(<span class="st">'GET'</span>, KEYS[<span class="nu">1</span>])
+<span class="kw">if</span> <span class="kw">not</span> stock <span class="kw">then</span>
+    <span class="kw">return</span> -<span class="nu">1</span>    <span class="cm">-- 库存未初始化</span>
+<span class="kw">end</span>
+stock = tonumber(stock)
+<span class="kw">local</span> need = tonumber(ARGV[<span class="nu">1</span>])
+<span class="kw">if</span> stock &lt; need <span class="kw">then</span>
+    <span class="kw">return</span> -<span class="nu">2</span>    <span class="cm">-- 库存不足</span>
+<span class="kw">end</span>
+redis.call(<span class="st">'DECRBY'</span>, KEYS[<span class="nu">1</span>], need)
+<span class="kw">return</span> stock - need    <span class="cm">-- 返回剩余库存</span></code></pre>
+
+<h2 id="c10-8">面试深度问答</h2>
+
+<details class="qa"><summary>什么是缓存穿透？怎么解决？<span class="lvl lv1">基础</span></summary>
+<div class="qa-b">
+<p><strong>定义</strong>：查询一个数据库里不存在的数据，缓存无法拦截（因为不存在所以也缓存不到），导致每次请求都穿透到 DB。恶意攻击可以利用这点，用无效 ID 高频请求直接打爆 DB。</p>
+<p><strong>解决方案（按优先级）</strong>：</p>
+<ol>
+<li><strong>参数校验（最外层）</strong>：ID 格式非法、超出业务范围（如负数、超过最大 ID）直接拦截，连 Redis 都不查。<strong>这是成本最低、最先该做的一层。</strong></li>
+<li><strong>缓存空值</strong>：DB 查不到时也写一个空值缓存，TTL 设短（30-60s）。<strong>优点是实现简单；缺点是要注意空值占内存、以及数据新增后要等 TTL 过期。</strong></li>
+<li><strong>布隆过滤器</strong>：把所有存在的 key 预先加载进布隆过滤器，请求先过过滤器。<strong>优点是空间极省，缺点是误判率、不支持删除</strong>（需删除场景用 Cuckoo Filter）。</li>
+<li><strong>接口限流 + 黑名单</strong>：对同一 IP / 用户的高频异常请求做限流与封禁。</li>
+</ol>
+<p><strong>面试加分</strong>：说清「穿透和击穿的区别」——穿透是数据不存在，击穿是数据存在但缓存失效。</p>
+</div></details>
+
+<details class="qa"><summary>布隆过滤器的原理？有什么优缺点？<span class="lvl lv2">进阶</span></summary>
+<div class="qa-b">
+<p><strong>原理</strong>：位数组 + K 个独立哈希函数。写入时用 K 个哈希算出 K 个位置并置 1；查询时算出 K 个位置，<strong>只要有一个是 0 就说明一定不存在</strong>，全是 1 则「可能存在」。</p>
+<p><strong>核心特性</strong>：</p>
+<ul>
+<li><strong>零假阴性</strong>：说不存在就一定不存在（这个特性是它能用于「拦截无效请求」的根本原因）。</li>
+<li><strong>有假阳性</strong>：说存在可能实际不存在，误判率由 m（位数）、n（元素数）、k（哈希函数数）决定，公式 <code class="inline">P ≈ (1 - e^(-kn/m))^k</code>。</li>
+<li><strong>空间极省</strong>：1% 误判率下约 9.6 bit/元素，1 亿元素约 114MB。</li>
+<li><strong>不支持删除</strong>：因为一个位可能被多个元素共享，置 0 会误伤。</li>
+</ul>
+<p><strong>Redis 8 中的用法</strong>：RedisBloom 已内置，命令是 <code class="inline">BF.RESERVE / BF.ADD / BF.EXISTS / BF.INFO</code>。需要支持删除的场景用 Cuckoo Filter（<code class="inline">CF.*</code>）。</p>
+<p><strong>工程坑</strong>：① 新增数据必须同步写过滤器，否则会误判为不存在（严重故障）；② 重启后需要重建（靠 RDB/AOF 或从 DB 全量重建）；③ 大量随机无效 ID 会撑爆空值缓存或过滤器，需要在最外层做参数与频率校验。</p>
+</div></details>
+
+<details class="qa"><summary>缓存击穿是什么？互斥锁和逻辑过期怎么选？<span class="lvl lv2">进阶</span></summary>
+<div class="qa-b">
+<p><strong>定义</strong>：某个高频访问的热点 key 突然失效，大量并发请求同时发现缓存未命中，全部涌向 DB 重建缓存，DB 被打爆。<strong>本质是「缓存重建时的并发失控」。</strong></p>
+<p><strong>方案对比</strong>：</p>
+<table>
+<thead><tr><th style="width:18%">维度</th><th>互斥锁重建</th><th>逻辑过期</th></tr></thead>
+<tbody>
+<tr><td>一致性</td><td><strong>好</strong>（等锁后拿到新数据）</td><td>弱（重建期间返回旧数据）</td></tr>
+<tr><td>吞吐量</td><td>受限于重建耗时（其他线程排队等待）</td><td><strong>高</strong>（所有请求立即返回，无等待）</td></tr>
+<tr><td>实现复杂度</td><td>中（需处理锁超时、重试、二次检查）</td><td>中高（需在 value 里加逻辑过期字段，需要异步线程池）</td></tr>
+<tr><td>适用</td><td>普通热点、强一致要求</td><td><strong>超级热点</strong>（百万 QPS）、可接受短暂旧数据</td></tr>
+</tbody>
+</table>
+<p><strong>选型逻辑</strong>：普通热点选互斥锁（简单、一致）；超级热点选逻辑过期（不能让一万个线程排队）。<strong>关键判断是「重建耗时 × 并发量」——如果排队等待时间本身就不可接受，就必须用逻辑过期。</strong></p>
+<p><strong>补充</strong>：无论哪种方案，都要有「重建失败」的兜底（返回兜底数据 / 触发告警），以及「锁超时」保护，避免持锁线程挂了导致所有请求都拿不到数据。</p>
+</div></details>
+
+<details class="qa"><summary>缓存雪崩怎么预防？<span class="lvl lv2">进阶</span></summary>
+<div class="qa-b">
+<p><strong>两种形态要分开说</strong>：</p>
+<p><strong>形态一：大批 key 同时失效</strong></p>
+<ul>
+<li><strong>TTL 加随机扰动</strong>（必做，最简单有效）：<code class="inline">TTL = base + random(-20%, +20%)</code>。</li>
+<li><strong>分级 TTL</strong>：把 key 分组用不同基础 TTL。</li>
+<li><strong>热点数据永不过期 + 主动刷新</strong>。</li>
+</ul>
+<p><strong>形态二：Redis 整体不可用</strong></p>
+<ul>
+<li><strong>多级缓存</strong>：Caffeine 本地缓存 → Redis → DB。本地缓存能在 Redis 挂掉时顶一段时间。</li>
+<li><strong>熔断降级限流</strong>：Sentinel/Resilience4j 熔断，DB 前加限流，非核心功能降级。</li>
+<li><strong>Redis 高可用</strong>：哨兵/Cluster + 多可用区部署。</li>
+<li><strong>提前预热</strong>：大促前把热点数据灌入缓存，且 TTL 要长于大促时长。</li>
+</ul>
+<p><strong>监控是预防的关键</strong>：缓存命中率是雪崩的先行指标（从 99% 掉到 60% 就要告警）；DB 的 QPS、连接数、慢查询也要设阈值。</p>
+</div></details>
+
+<details class="qa"><summary>如何保证缓存和数据库的一致性？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p><strong>先分级再说方案</strong>（这是高分的关键）：</p>
+<ul>
+<li><strong>强一致</strong>：任何时刻读到最新值 → 用分布式锁串行化，或干脆不用缓存（用 DB 行锁）。<strong>代价是牺牲缓存的性能优势</strong>。</li>
+<li><strong>最终一致</strong>：<strong>99% 的业务场景</strong>，用 Cache Aside / 延时双删 / Canal。<strong>核心是把「不一致窗口」压缩到业务可接受的范围。</strong></li>
+<li><strong>弱一致</strong>：可接受较长旧数据 → 定时刷新 / 逻辑过期。</li>
+</ul>
+<p><strong>为什么「先更新 DB 再删缓存」是最优解</strong>：</p>
+<p>产生脏数据需要同时满足「读请求读 DB 在 UPDATE 之前」+「读请求写缓存在 DEL 之后」，即「读的整链路比写的整链路还慢」。而写 DB（加锁、落盘）通常远慢于读 DB，所以这个条件概率极低。</p>
+<p><strong>三种方案</strong>：</p>
+<ol>
+<li><strong>Cache Aside + 删除失败重试</strong>：先更新 DB 再删缓存，删除失败丢 MQ 重试。<strong>最简单，首选。</strong></li>
+<li><strong>延时双删 + 版本号</strong>：删缓存 → 更新 DB → 延迟后（200ms-1s）再删。用版本号比对避免「延迟时间靠猜」。</li>
+<li><strong>Canal 订阅 binlog</strong>：业务只写 DB，Canal 订阅 binlog 异步同步到 Redis。<strong>零侵入、最可靠、适合大型系统</strong>，代价是引入 Canal + MQ，延迟上升。</li>
+</ol>
+<p><strong>无论哪种都要加的三样</strong>：① 缓存过期时间（最终自愈兜底）；② 命中率监控；③ 关键业务对账。</p>
+</div></details>
+
+<details class="qa"><summary>为什么是「删除缓存」而不是「更新缓存」？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p><strong>三个理由</strong>：</p>
+<ol>
+<li><strong>避免并发覆盖</strong>：两个写请求 A、B 依次更新 DB（DB 最终是 B 的值）。但如果是「更新缓存」，A 和 B 更新缓存的操作可能<strong>交错</strong>——B 先写缓存、A 后写缓存，导致缓存里是 A 的旧值。<strong>删除就不会有这个交错问题。</strong></li>
+<li><strong>懒惰重建，避免无用功</strong>：如果某数据「写多读少」，每次写都去更新缓存，可能更新了几十次却没人读——纯属浪费。<strong>删除缓存后，只有真正有人读的时候才重建。</strong></li>
+<li><strong>避免「值计算复杂」的问题</strong>：有些缓存值是多张表 join 或聚合出来的，更新时重新计算成本高，甚至可能算错。删除缓存让「读时重建」用统一逻辑，更安全。</li>
+</ol>
+<p><strong>延伸</strong>：如果是「写少读多 + 数据量大」的场景（如商品详情），也可以考虑「更新缓存」，但必须配合版本号或加锁。所以标准答案是：<strong>默认删除，特殊场景可考虑更新（但要额外机制保证）。</strong></p>
+</div></details>
+
+<details class="qa"><summary>延时双删的「延时」应该设多久？<span class="lvl lv4">专家</span></summary>
+<div class="qa-b">
+<p><strong>理论答案</strong>：大于「一次读请求的完整耗时」（读缓存 + 读 DB + 写缓存）。</p>
+<p><strong>工程答案</strong>：<strong>没有精确值，只能靠压测和经验</strong>，一般取 200ms ~ 1s。原因：</p>
+<ul>
+<li>延迟太短（如 50ms）→ 读请求可能还没走完就被删除，它随后又把旧值写回来。</li>
+<li>延迟太长（如 5s）→ 不一致窗口过长，业务可能不接受。</li>
+<li>而且「写请求的耗时」和「读请求的耗时」都是<strong>分布</strong>，不是定值。为了覆盖极端情况，理论上应该取 P99.9，那延迟就太长了。</li>
+</ul>
+<p><strong>更精确的替代方案（加分点）</strong>：</p>
+<ol>
+<li><strong>版本号比对</strong>：缓存 value 里带上 DB 的 version / update_time。第二次删除前先比对版本，只有「缓存版本落后」才删。这样不依赖时间猜测。</li>
+<li><strong>分布式锁</strong>：对同一个 key 的读写加锁串行化，从根本上消除竞态。<strong>代价是性能。</strong></li>
+<li><strong>Canal</strong>：从「时间推断」升级为「基于 binlog 事件驱动」，是更彻底的方案。</li>
+</ol>
+<p><strong>结论话术</strong>：「延时双删的『延时』是一个<strong>靠工程经验给出的近似值，不是精确保证</strong>。所以我会用它，但一定会配合『缓存过期 + 命中率监控 + 对账』这几层兜底。如果业务真的要求严格，我会直接上版本号或 Canal。」</p>
+</div></details>
+
+<details class="qa"><summary>缓存和数据库一致性能不能做到强一致？<span class="lvl lv4">专家</span></summary>
+<div class="qa-b">
+<p><strong>能，但不值。</strong> 这是这个问题的正确切入角度。</p>
+<p><strong>能做到强一致的方案</strong>：</p>
+<ol>
+<li><strong>不用缓存</strong>：直接用 DB 事务和行锁。<strong>最简单也最可靠，代价是性能。</strong></li>
+<li><strong>分布式锁 / 读写串行化</strong>：对同一 key 的所有读写加同一把锁。能做到强一致，但吞吐量大幅下降（锁竞争）。</li>
+<li><strong>2PC / 分布式事务</strong>：DB 和 Redis 做两阶段提交。但 Redis 不支持真正的 2PC，实现起来非常脆弱。</li>
+<li><strong>Redis 作为唯一数据源</strong>：库存放 Redis，DB 只异步落库。<strong>Redis 单线程保证原子性，此时 Redis 就是「强一致的」，但一致性范围变成了「Redis 内部」，还要处理 Redis 挂机丢数据的问题（AOF always + 多副本）。</strong></li>
+</ol>
+<p><strong>为什么「不值得」</strong>：</p>
+<ul>
+<li>缓存的全部价值在于「用更低的成本、更高的性能扛读流量」。<strong>一旦要求强一致，就必须加锁/串行化，性能优势被吃掉，这时候「用缓存」就失去了意义</strong>——还不如直接上更好的 DB。</li>
+<li>分布式锁本身也有可用性问题（锁服务挂了），引入了新的失败模式。</li>
+</ul>
+<p><strong>正确的工程思路</strong>：</p>
+<ol>
+<li><strong>承认最终一致</strong>，然后把不一致窗口压缩到业务能接受的范围（如 100ms）。</li>
+<li><strong>用「业务兜底」弥补</strong>：比如下单时读缓存拿价格，但<strong>支付前再用 DB 校验一次</strong>——把强一致要求局限在最关键的那一步。</li>
+<li><strong>对账机制</strong>：定时任务比对缓存和 DB，发现偏差自动修复 + 告警。</li>
+</ol>
+<p><strong>面试话术</strong>：「一致性是可以『分层』的——让 95% 的普通读走缓存（最终一致），把强一致的要求收敛到「扣减/支付」这类关键动作上，用 DB 事务保证。<strong>这比全局强一致要好得多：既拿到了缓存的性能，又保证了关键业务的正确性。</strong>」</p>
+</div></details>
+
+<details class="qa"><summary>讲讲你项目里怎么用缓存的（场景题）<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p>这是「项目场景题」的典型问法。给一个可复用的回答框架（<strong>建议结合你自己的项目改写</strong>）：</p>
+<p><strong>一、缓存分层</strong></p>
+<p>「我们做的是多级缓存：<strong>本地缓存（Caffeine）→ Redis 集群 → DB</strong>。本地缓存存最热的、变化极少的配置类数据（TTL 5 分钟 + 主动失效）；Redis 存业务数据。」</p>
+<p><strong>二、读写策略</strong></p>
+<p>「写操作统一走 <strong>Cache Aside</strong>：先更新 DB，再删缓存；删除失败丢 MQ 重试，超过 3 次告警。变更频繁、涉及多张表的（比如商品信息聚合了 SKU、库存、价格），走 <strong>Canal 订阅 binlog</strong>，避免业务代码里到处写删缓存逻辑。」</p>
+<p><strong>三、防三大问题</strong></p>
+<p>「穿透：接口层做参数校验 + 布隆过滤器（商品 ID 全集）+ 空值缓存（60s）。<br>
+击穿：我们商品详情的 QPS 高，用的是<strong>逻辑过期 + 异步重建</strong>；排行榜之类的用互斥锁。<br>
+雪崩：所有 TTL 都加 ±20% 随机扰动；大促前用预热脚本分批灌数据，TTL 设成大促时长的 2 倍；另外配了<strong>命中率告警</strong>，从 99% 跌到 90% 就触发。」</p>
+<p><strong>四、监控与兜底</strong></p>
+<p>「缓存命中率、大 key、热 key、慢查询都接进了监控大盘。核心链路有<strong>降级开关</strong>——Redis 不可用时，非核心数据直接返回兜底值，核心数据降级到直查 DB（DB 有连接池限流保护）。」</p>
+<p><strong>五、一个具体的故障复盘</strong>（关键加分项，讲一个你经历过的）</p>
+<p>「有一次大促，某爆款商品详情的缓存 key 因为被主动删除（运营改了配置触发了刷新），导致短时间内大量请求穿透。虽然我们有互斥锁，但<strong>重建耗时 800ms</strong>（要 join 5 张表），1 万 QPS 的请求排队等待，接口 P99 直接飙到 3 秒。<br>
+<strong>改进措施</strong>：① 商品详情做了字段级的缓存拆分，把「变化少的基础信息」和「变化频繁的价格库存」分开缓存，重建耗时降到 50ms 内；② 加了本地缓存做二级兜底；③ 把重建逻辑改成异步预计算，不阻塞主请求。」</p>
+<p><strong>为什么这样回答</strong>：有分层、有方案、有数字、有故障、有改进——这是面试官在 10 年+ 岗位上真正想听的。</p>
+</div></details>
+
+<details class="qa"><summary>Redis 和 DB 的数据不一致，线上怎么发现和修复？<span class="lvl lv4">专家</span></summary>
+<div class="qa-b">
+<p><strong>一、怎么发现</strong></p>
+<ol>
+<li><strong>缓存命中率异常</strong>：命中率突降往往意味着大量 key 被删或过期，需要排查原因。</li>
+<li><strong>业务侧对账</strong>：定时任务（如每 5 分钟）抽取最近变更的数据，比对缓存和 DB 的 <code class="inline">update_time</code> / version。<strong>这是最直接的方式。</strong></li>
+<li><strong>用户反馈 / 客服工单</strong>：用户看到旧价格、旧状态，是最直接的信号。</li>
+<li><strong>数据埋点</strong>：在读缓存时记录「缓存版本 vs DB 版本」的差异率，差异率超阈值告警。</li>
+<li><strong>binlog 链路监控</strong>：如果是 Canal 方案，监控 MQ 积压、消费者延迟、处理失败的 key。</li>
+</ol>
+<p><strong>二、怎么修复</strong></p>
+<ol>
+<li><strong>自动修复</strong>：对账任务发现偏差后，<strong>直接删除该 key</strong>（让下次读重建），或按 DB 的值覆盖缓存。<strong>优先删除——因为删除是幂等的，不会引入新的错误。</strong></li>
+<li><strong>手动兜底</strong>：提供运维接口，按 key / 按业务范围批量刷缓存。</li>
+<li><strong>紧急场景</strong>：直接清空整批缓存（如 <code class="inline">SCAN + DEL</code> 或按前缀删除），让缓存自然重建。<strong>要评估这个操作的后果——清空缓存会导致大量请求穿透，必须有 DB 保护。</strong></li>
+</ol>
+<p><strong>三、怎么预防（根治）</strong></p>
+<ul>
+<li><strong>所有缓存都设 TTL</strong>：保证任何不一致都会自愈（最长 TTL 就是不一致的最大窗口）。</li>
+<li><strong>统一缓存写入入口</strong>：不要让多个服务/多处代码各自写缓存，否则「谁写的、什么规则」都说不清。</li>
+<li><strong>版本号/时间戳</strong>：缓存里带上版本，读时校验。</li>
+<li><strong>关键业务不依赖缓存做决策</strong>：读缓存只是「展示」，真正的校验（扣款、发货）还是要走 DB。</li>
+</ul>
+<p><strong>面试收尾</strong>：「我的原则是：<strong>接受最终一致，但要让不一致『可发现、可自愈、有上限』</strong>。可发现靠对账和命中率监控；可自愈靠 TTL 和自动修复；有上限靠『关键动作走 DB 校验』。」</p>
+</div></details>
+
+<h2 id="c10-9">本节自测</h2>
+<div class="track">
+  <label><input type="checkbox" data-k="d4-1"><span>我能清晰区分穿透 / 击穿 / 雪崩的定义、触发条件和方案</span></label>
+  <label><input type="checkbox" data-k="d4-2"><span>我能说出布隆过滤器的原理、零假阴性/有假阳性、误判率公式</span></label>
+  <label><input type="checkbox" data-k="d4-3"><span>我知道 Redis 8.x 已内置 Bloom / Cuckoo / TopK 等模块命令</span></label>
+  <label><input type="checkbox" data-k="d4-4"><span>我能写出互斥锁重建缓存的完整代码（含二次检查、锁释放）</span></label>
+  <label><input type="checkbox" data-k="d4-5"><span>我能说清「逻辑过期」为什么吞吐更高、代价是什么</span></label>
+  <label><input type="checkbox" data-k="d4-6"><span>我能说出雪崩的两种形态及各自的解法</span></label>
+  <label><input type="checkbox" data-k="d4-7"><span>我能论证「先更新 DB 再删缓存」为什么比另外三种策略优</span></label>
+  <label><input type="checkbox" data-k="d4-8"><span>我能说出延时双删的「延时」为什么没有标准答案，以及更好的替代方案</span></label>
+  <label><input type="checkbox" data-k="d4-9"><span>我能画出 Canal 订阅 binlog 的数据流，并说出三个优势与三个代价</span></label>
+  <label><input type="checkbox" data-k="d4-10"><span>我能回答「缓存一致性要不要强一致」并给出分层一致性的思路</span></label>
+  <label><input type="checkbox" data-k="d4-11"><span>我能说出线上发现和修复缓存不一致的完整方法</span></label>
+  <label><input type="checkbox" data-k="d4-12"><span>我能结合自己项目讲一个缓存相关的故障复盘</span></label>
+</div>
+</section>

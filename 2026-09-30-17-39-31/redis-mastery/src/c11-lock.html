@@ -1,0 +1,623 @@
+<section id="c11-lock" class="anchor" data-title="Day4.2 · 分布式锁与 Lua/Function">
+<div class="ch-meta">
+  <span class="ch-num">Day 4 · 第 2 节</span>
+  <span class="badge bg-blue">预计 85 分钟</span>
+  <span class="badge bg-red">面试必考</span>
+</div>
+<h1>Day4.2 · 分布式锁、Lua 脚本与 Functions</h1>
+
+<div class="box b-tip">
+  <div class="box-t">一句话结论</div>
+  <p>分布式锁的演进是一条<strong>「不断补漏洞」的线</strong>：<code class="inline">SETNX</code>（无过期 → 死锁）→ <code class="inline">SET NX PX</code>（过期了但误删别人的锁）→ <code class="inline">value 存唯一标识 + Lua 原子释放</code>（业务超时锁提前释放）→ <strong>Redisson 看门狗自动续期</strong>（基本可用）。</p>
+  <p>面试深水区在三处：<strong>① 为什么释放锁必须用 Lua；② 看门狗续期的原理与它自身的缺陷；③ Redlock 到底「对不对」——这题没有标准答案，考官要的是你能说清双方的论据和适用边界。</strong></p>
+</div>
+
+<h2 id="c11-1">1. 从零开始：SETNX 的四个坑</h2>
+
+<div class="box b-big">
+  <div class="box-t">✅ 第一版：SETNX（Set if Not eXists）</div>
+  <p>最朴素的想法：用一个 key 表示锁，谁能 SET 成功谁就拿到锁。</p>
+  <pre style="margin:8px 0"><code class="lang-bash">SETNX lock:order:1001 "1"
+<span class="cm"># 返回 1 = 抢到锁；返回 0 = 别人持锁</span>
+<span class="cm"># 用完删除</span>
+DEL lock:order:1001</code></pre>
+  <p><strong>致命缺陷</strong>：如果持锁的进程<strong>在 DEL 之前崩溃了</strong>（宕机、被 kill、网络断开），这个 key 永远存在 → <strong>死锁</strong>，后续所有请求都拿不到锁。</p>
+</div>
+
+<div class="box b-big">
+  <div class="box-t">✅ 第二版：SET NX EX（加过期时间）</div>
+  <pre style="margin:8px 0"><code class="lang-bash"><span class="cm"># 抢锁的同时设置 30 秒过期（必须是一条命令，保证原子性！）</span>
+SET lock:order:1001 "1" NX EX 30
+
+<span class="cm"># ⚠️ 反例：分成两条命令 — 中间崩溃就会死锁</span>
+SETNX lock:order:1001 "1"
+EXPIRE lock:order:1001 30     <span class="cm"># ← 如果上一句成功、这一句没执行，就死锁了</span></code></pre>
+  <p><strong>解决了</strong>死锁问题（最多 30 秒后自动释放）。</p>
+  <p><strong>又引入新问题（坑 2）</strong>：<strong>误删别人的锁</strong>。</p>
+  <p>场景：</p>
+  <ol>
+  <li>线程 A 抢到锁，设置 30 秒过期。</li>
+  <li>线程 A 的业务执行了 35 秒（比如发生了 Full GC、或者下游接口特别慢）。</li>
+  <li>30 秒时锁<strong>自动过期</strong>，被 B 抢到。</li>
+  <li>A 执行完，执行 <code class="inline">DEL lock</code> —— <strong>把 B 的锁删掉了！</strong></li>
+  <li>C 又抢到了锁，此时 B 和 C 同时持有锁，<strong>互斥性被破坏</strong>。</li>
+  </ol>
+</div>
+
+<div class="box b-big">
+  <div class="box-t">✅ 第三版：value 存唯一标识 + Lua 原子释放</div>
+  <p><strong>解法</strong>：锁的 value 存一个「只有自己知道」的唯一标识（UUID + 线程 ID）。删除时必须<strong>先校验这个标识是不是自己的</strong>。</p>
+  <p><strong>为什么必须用 Lua</strong>（关键面试点）：</p>
+  <pre style="margin:8px 0"><code class="lang-java"><span class="cm">// ❌ 错误：判断和删除不是原子的，中间有时间窗口</span>
+String id = redis.get(lockKey);
+<span class="kw">if</span> (myId.equals(id)) {       <span class="cm">// ← 此刻锁可能刚好过期、被别人抢到</span>
+    redis.del(lockKey);       <span class="cm">// ← 删掉的是"别人的锁"！</span>
+}</code></pre>
+  <p>虽然这个窗口极小（两条命令之间），但「极小概率」在生产的高并发下也会发生（想想每秒几万次的锁获取释放，一天就是几十亿次，百万分之一的概率也会命中）。<strong>而用 Lua 脚本，Redis 保证脚本执行的原子性（单线程执行整个脚本，中间不会被其他命令插入）</strong>，所以「判断 + 删除」成为一个不可分割的操作。</p>
+</div>
+
+<pre><code class="lang-lua"><span class="cm">-- unlock.lua：只有持有者才能释放锁</span>
+<span class="cm">-- KEYS[1] = 锁的 key, ARGV[1] = 客户端唯一标识</span>
+<span class="kw">if</span> redis.call(<span class="st">'GET'</span>, KEYS[<span class="nu">1</span>]) == ARGV[<span class="nu">1</span>] <span class="kw">then</span>
+    <span class="kw">return</span> redis.call(<span class="st">'DEL'</span>, KEYS[<span class="nu">1</span>])
+<span class="kw">end</span>
+<span class="kw">return</span> <span class="nu">0</span></code></pre>
+
+<pre><code class="lang-java"><span class="cm">/**
+ * 完整的自制分布式锁（第三版）
+ * 这是"能讲清楚原理"的版本，但生产上建议直接用 Redisson
+ */</span>
+<span class="kw">public class</span> <span class="fn">SimpleRedisLock</span> {
+
+    <span class="kw">private static final</span> String UNLOCK_SCRIPT =
+        <span class="st">"if redis.call('GET', KEYS[1]) == ARGV[1] then "</span> +
+        <span class="st">"  return redis.call('DEL', KEYS[1]) "</span> +
+        <span class="st">"else return 0 end"</span>;
+
+    <span class="kw">private final</span> StringRedisTemplate redis;
+    <span class="kw">private final</span> String lockKey;
+    <span class="cm">// 每个锁实例一个唯一 ID（UUID 在构造时生成，代表"这个锁实例"）</span>
+    <span class="kw">private final</span> String clientId = UUID.randomUUID().toString();
+
+    <span class="kw">public</span> <span class="fn">SimpleRedisLock</span>(StringRedisTemplate redis, String bizId) {
+        <span class="kw">this</span>.redis = redis;
+        <span class="kw">this</span>.lockKey = <span class="st">"lock:"</span> + bizId;
+    }
+
+    <span class="kw">public boolean</span> <span class="fn">tryLock</span>(<span class="kw">long</span> timeoutSeconds) {
+        <span class="cm">// SET key value NX EX timeout —— 一条命令，原子</span>
+        Boolean ok = redis.opsForValue()
+            .setIfAbsent(lockKey, clientId, Duration.ofSeconds(timeoutSeconds));
+        <span class="kw">return</span> Boolean.TRUE.equals(ok);
+    }
+
+    <span class="kw">public void</span> <span class="fn">unlock</span>() {
+        <span class="cm">// 用 Lua 保证"判断 + 删除"的原子性</span>
+        redis.execute(<span class="kw">new</span> DefaultRedisScript&lt;&gt;(UNLOCK_SCRIPT, Long.class),
+            Collections.singletonList(lockKey), clientId);
+    }
+}</code></pre>
+
+<div class="box b-warn">
+  <div class="box-t">⚠️ 第四版要解决的问题：业务超时 → 锁提前释放</div>
+  <p>第三版虽然解决了「误删」，但<strong>没解决根本问题</strong>：如果业务执行时间超过锁的过期时间，锁被自动释放、别人拿到锁，此时<strong>两个线程真的在同时执行临界区代码</strong>——互斥性实质上被破坏了。此时你的删除操作不会误删（因为有防误删），但<strong>并发已经发生了</strong>。</p>
+  <p><strong>两种应对思路</strong>：</p>
+  <ol style="margin-bottom:0">
+  <li><strong>把过期时间设得足够长</strong>（比如业务的 P99.9 耗时的 3 倍）。缺点是如果进程真崩了，要等很久才能解锁。</li>
+  <li><strong>自动续期（看门狗）</strong>：后台起一个定时任务，在锁快过期时自动延长。<strong>这就是 Redisson 的做法。</strong></li>
+  </ol>
+</div>
+
+<h2 id="c11-2">2. Redisson：生产级方案</h2>
+
+<div class="box b-big">
+  <div class="box-t">✅ Redisson 加锁的完整流程与看门狗机制</div>
+  <p><strong>加锁</strong>（Redisson 的 Lua 脚本逻辑）：</p>
+  <ol>
+  <li>用 <code class="inline">EXISTS lockKey</code> 判断锁是否存在。</li>
+  <li>不存在 → <code class="inline">HSET lockKey clientId 1</code> + <code class="inline">PEXPIRE lockKey 30000</code>，抢锁成功。</li>
+  <li>存在且是自己的锁（<code class="inline">HEXISTS lockKey clientId</code>）→ <code class="inline">HINCRBY lockKey clientId 1</code>（<strong>重入计数 +1</strong>）。</li>
+  <li>存在且不是自己的 → 返回剩余 TTL，客户端订阅 <code class="inline">__redis__:unlock</code> 消息等待通知，或按剩余时间自旋。</li>
+  </ol>
+  <p><strong>为什么用 Hash 结构而不是 String</strong>：为了支持<strong>可重入</strong>（同一个线程多次加锁）——Hash 的 field 是 clientId，value 是重入次数。</p>
+  <p><strong>看门狗（Watch Dog）机制</strong>：</p>
+  <ul>
+  <li><strong>触发条件</strong>：<strong>只要你不显式指定 <code class="inline">leaseTime</code></strong>，Redisson 就启用看门狗，默认锁超时时间 30 秒（<code class="inline">lockWatchdogTimeout</code>）。</li>
+  <li><strong>原理</strong>：加锁成功后，Redisson 会起一个后台定时任务（<code class="inline">TimerTask</code>），每隔 <code class="inline">30/3 = 10 秒</code>（<code class="inline">lockWatchdogTimeout / 3</code>）检查一次，如果客户端仍持有锁，就把过期时间<strong>重置为 30 秒</strong>。</li>
+  <li><strong>停止条件</strong>：客户端释放锁时，取消定时任务；如果客户端崩溃，定时任务自然消失，锁在 30 秒后自动过期（<strong>这就是为什么它能防死锁，同时又能支持长时间业务</strong>）。</li>
+  </ul>
+  <p><strong>⚠️ 最重要的一条实践经验</strong>：</p>
+  <pre style="margin:8px 0"><code class="lang-java"><span class="cm">// ✅ 不传 leaseTime → 启用看门狗，业务多久都能续期</span>
+RLock lock = redisson.getLock(<span class="st">"lock:order:1001"</span>);
+lock.lock();
+
+<span class="cm">// ❌ 传了 leaseTime → 看门狗不生效！锁到点就释放，业务没做完也会释放！</span>
+lock.lock(<span class="nu">30</span>, TimeUnit.SECONDS);   <span class="cm">// 危险！</span>
+lock.tryLock(<span class="nu">10</span>, <span class="nu">30</span>, TimeUnit.SECONDS);  <span class="cm">// 危险！</span>
+
+<span class="kw">try</span> {
+    <span class="cm">// 业务逻辑</span>
+} <span class="kw">finally</span> {
+    <span class="cm">// ⚠️ 必须判断是不是自己持有的锁再释放</span>
+    <span class="kw">if</span> (lock.isHeldByCurrentThread()) {
+        lock.unlock();
+    }
+}</code></pre>
+  <p><strong>面试必答的这个坑</strong>：很多人在用 <code class="inline">tryLock(waitTime, leaseTime, unit)</code> 时传了 leaseTime，结果以为有看门狗保护，实际上锁会在 leaseTime 后释放——<strong>业务超时就会出现并发</strong>。这是一个非常常见、也非常致命的线上坑。</p>
+</div>
+
+<div class="box b-x">
+  <div class="box-t">🚨 看门狗自身的三个问题</div>
+  <ol style="margin-bottom:0">
+  <li><strong>看门狗依赖客户端存活</strong>：如果客户端发生了长时间的 Full GC（比如 STOP-THE-WORLD 10 秒），看门狗线程也被暂停，无法续期 → 锁可能在这期间过期。<strong>这是 JVM 层面的问题，看门狗救不了。</strong><br>
+  <strong>缓解</strong>：优化 GC（用 G1/ZGC）、把锁粒度做小、把长业务拆短。</li>
+  <li><strong>看门狗会产生额外流量</strong>：每 10 秒一次续期请求。如果有 10 万个并发锁，就是每秒 1 万次续期——<strong>不可忽视</strong>。所以锁的粒度应该尽量小（按业务 ID 而不是全局）。</li>
+  <li><strong>续期失败会导致锁提前释放且不自知</strong>：如果续期时网络抖动、Redis 短暂不可用，续期失败，锁过期了，但客户端以为还持有锁。<br>
+  <strong>缓解</strong>：Redisson 在续期失败时会尝试重试；但最终还是要靠「业务侧的幂等 + 乐观锁」做最后一道防线。</li>
+  </ol>
+</div>
+
+<h2 id="c11-3">3. 用锁的正确姿势：业务侧保护</h2>
+
+<div class="box b-big">
+  <div class="box-t">✅ 分布式锁不是「银弹」：必须配合业务侧保护</div>
+  <p><strong>核心认知</strong>：分布式锁是「<strong>减少并发</strong>」，不是「<strong>彻底消除并发</strong>」。因为锁可能失效（网络分区、GC、Redis 故障），所以<strong>临界区内的操作必须自身是幂等的，或者用乐观锁保证正确性</strong>。</p>
+  <p><strong>三层保护（面试高分点）</strong>：</p>
+  <ol>
+  <li><strong>第一层：分布式锁</strong>（减少并发，提高性能，避免大部分冲突）</li>
+  <li><strong>第二层：数据库乐观锁 / 版本号</strong>（保证即使锁失效，数据也不会错）</li>
+  <li><strong>第三层：唯一索引 / 幂等表</strong>（防止重复插入）</li>
+  </ol>
+</div>
+
+<pre><code class="lang-sql"><span class="cm">-- 第二层：乐观锁，保证即使锁失效也不会超卖</span>
+<span class="kw">UPDATE</span> stock
+<span class="kw">SET</span> num = num - <span class="nu">1</span>, version = version + <span class="nu">1</span>
+<span class="kw">WHERE</span> id = <span class="st">#{id}</span>
+  <span class="kw">AND</span> version = <span class="st">#{expectedVersion}</span>
+  <span class="kw">AND</span> num &gt;= <span class="nu">1</span>;
+<span class="cm">-- 影响行数 = 0 → 说明被别人改了，交易失败（重试或返回失败）</span>
+<span class="cm">-- 关键：即使锁因为意外失效导致两个线程同时进来，这个 SQL 也只会成功一次（行锁 + version 校验）</span></code></pre>
+
+<pre><code class="lang-sql"><span class="cm">-- 第三层：唯一索引防重复</span>
+<span class="kw">CREATE TABLE</span> order_pay_record (
+  id <span class="kw">BIGINT PRIMARY KEY AUTO_INCREMENT</span>,
+  order_no <span class="kw">VARCHAR</span>(<span class="nu">64</span>) <span class="kw">NOT NULL</span>,
+  request_id <span class="kw">VARCHAR</span>(<span class="nu">64</span>) <span class="kw">NOT NULL</span>,
+  <span class="kw">UNIQUE KEY</span> uk_request (request_id)   <span class="cm">-- 同一个请求 ID 只能插一条</span>
+);</code></pre>
+
+<div class="box b-tip">
+  <div class="box-t">💡 一句话总结</div>
+  <p><strong>「分布式锁是为了性能和体验，数据库约束是为了正确性。永远不要指望锁保证正确性。」</strong></p>
+  <p>面试官听到这句话，会知道你不但会用锁，还知道它的边界在哪。</p>
+</div>
+
+<h2 id="c11-4">4. Redlock：争议与真相</h2>
+
+<div class="box b-big">
+  <div class="box-t">✅ Redlock 是什么</div>
+  <p><strong>背景</strong>：单 Redis 实例的锁有个根本问题——<strong>如果 Redis 是主从架构且发生了故障转移，锁可能丢失</strong>：</p>
+  <ol>
+  <li>客户端 A 在 master 上抢到锁。</li>
+  <li>master 在把锁同步到 slave 之前<strong>宕机</strong>。</li>
+  <li>slave 被提升为新 master（它没有这条锁记录）。</li>
+  <li>客户端 B 也能抢到同一把锁 → <strong>两个客户端同时持锁</strong>。</li>
+  </ol>
+  <p><strong>antirez 的方案（Redlock）</strong>：部署 <strong>N（一般 5）个完全独立的 Redis 主节点</strong>（不是 Cluster，是独立的实例）。加锁时：</p>
+  <ol>
+  <li>记录开始时间 T1。</li>
+  <li>依次向这 5 个节点发送加锁请求（每个请求带很短的超时，如 50ms）。</li>
+  <li>如果在<strong>超过半数（≥3 个）</strong>节点上成功加锁，且<strong>总耗时 &lt; 锁的过期时间</strong>，则加锁成功。</li>
+  <li>锁的有效时间 = <strong>初始过期时间 - 加锁总耗时</strong>（避免在「加锁过程中」锁就过期了）。</li>
+  <li>如果失败，则向所有节点发送解锁请求（包括没加成功的）。</li>
+  </ol>
+</div>
+
+<div class="box b-warn">
+  <div class="box-t">⚠️ Martin Kleppmann 的质疑（面试要能说出来）</div>
+  <p>《Designing Data-Intensive Applications》的作者 Martin Kleppmann 写了一篇著名文章 <em>How to do distributed locking</em>，系统性地批评 Redlock。核心论据：</p>
+  <ol>
+  <li><strong>依赖时钟假设</strong>：Redlock 的安全性依赖「所有节点的时钟单调递增且漂移不大」。但现实中 NTP 校时会导致<strong>时钟跳跃</strong>——一个节点的时钟跳快，会让锁提前过期，破坏安全性。<strong>这是最致命的一条。</strong></li>
+  <li><strong>GC / 网络延迟无法避免</strong>：即使时钟没问题，客户端进程发生 STW GC 也会导致它在「锁已过期」的情况下继续执行临界区代码。Redlock <strong>没有解决这个问题</strong>（这个问题的解法是 fencing token，见下文）。</li>
+  <li><strong>性能代价</strong>：Redlock 需要 5 个独立 Redis 实例，而且加锁要串行请求 5 次（或并发但取多数）。<strong>延迟和资源成本都显著上升</strong>，但它提供的「安全性」并不比单实例 + fencing token 更好。</li>
+  <li><strong>用途错配</strong>：Redlock 更适合「<strong>效率型</strong>锁」（防止重复劳动，偶尔失效无所谓）；如果用在「<strong>正确性型</strong>锁」（如扣款，失效会导致资金错误），那它<strong>不够安全</strong>——正确性应该由<strong>fencing token + 存储层的校验</strong>保证。</li>
+  </ol>
+  <p><strong>antirez 的反驳</strong>：Clock 跳变的问题可以通过「不依赖系统时钟、只在锁的有效期内使用墙钟」等方式缓解；且在实际工程中，时钟跳变的概率很小。他还强调 Redlock 的设计目标就是「在大多数故障下可用且安全」，不是「理论上 100% 安全」。</p>
+</div>
+
+<div class="box b-big">
+  <div class="box-t">✅ Fencing Token：真正解决「锁失效」的方案</div>
+  <p><strong>核心思想</strong>：让锁服务为每次加锁分配一个<strong>单调递增的编号（fencing token）</strong>。客户端在访问存储时必须带上这个编号，<strong>存储层拒绝比已记录编号更小的请求</strong>。</p>
+  <p><strong>流程</strong>：</p>
+  <ol>
+  <li>客户端 A 获取锁，拿到 token = 33。</li>
+  <li>A 发生 GC，锁过期，客户端 B 获取锁，拿到 token = 34。</li>
+  <li>B 先写入存储（带 token 34），存储记录「最新 token = 34」。</li>
+  <li>A 从 GC 中恢复，向存储写入（带 token 33）。<strong>存储发现 33 &lt; 34，拒绝写入。</strong> ✅</li>
+  </ol>
+  <p><strong>结论</strong>：fencing token 把「防止并发」的责任<strong>从锁转移到了存储层</strong>，这是唯一能真正保证正确性的方式。<strong>面试里能讲出 fencing token，基本上可以确认你读过 DDIA 或有过认真的分布式系统思考。</strong></p>
+</div>
+
+<div class="box b-tip">
+  <div class="box-t">💡 Redlock 面试话术（这是最稳的回答）</div>
+  <p>「Redlock 的争议本质上是<strong>两种目标的错配</strong>：</p>
+  <ul style="margin-bottom:0">
+  <li>如果锁是用来做<strong>「效率优化」</strong>（比如避免多个线程重复计算、重复发短信），那把偶尔的失效看作可接受的风险，<strong>Redlock 够用，甚至单实例就够用</strong>——因为失效最坏的结果只是「多做了一次无用功」。</li>
+  <li>如果锁是用来保证<strong>「正确性」</strong>（比如扣款不能重复），那<strong>任何基于 Redis 的锁都不够安全</strong>，包括 Redlock。正确做法是 fencing token + 存储层校验，或者干脆用数据库的行锁/唯一索引。</li>
+  </ul>
+  <p>所以我的实际选择是：<strong>生产上用 Redisson 单实例（或哨兵）+ 业务侧幂等/乐观锁</strong>。理由：Redlock 增加的 5 个实例带来的复杂度和延迟，换来的是一个「理论上仍然不完美」的保证——<strong>性价比不高。把同样的精力花在「业务侧幂等设计」上，收益更大。</strong>」</p>
+</div>
+
+<h2 id="c11-5">5. Lua 脚本：原子性操作的瑞士军刀</h2>
+
+<div class="box b-big">
+  <div class="box-t">✅ Lua 脚本的原子性从哪来</div>
+  <p>Redis 在执行 Lua 脚本时，会把<strong>整个脚本当作一个命令来执行</strong>——在脚本执行期间，<strong>不会插入任何其他客户端的命令</strong>。（因为 Redis 的命令执行本身是单线程的，脚本作为一个整体被提交给这个单线程。）</p>
+  <p><strong>所以 Lua 的价值是</strong>：把「读-判断-写」这种本来需要多条命令的操作，<strong>合并成一个原子操作</strong>——避免中间被其他请求插入。</p>
+  <p><strong>⚠️ 重要澄清（面试常考）</strong>：</p>
+  <ul>
+  <li>Lua 的「原子性」<strong>只是「不被其他命令打断」，不是「事务的回滚」</strong>。如果脚本执行到一半<strong>报错</strong>（比如类型错误），<strong>已经执行的命令不会回滚</strong>，后续命令也不会执行。</li>
+  <li>所以 Lua 是「<strong>原子执行</strong>」而非「<strong>原子事务</strong>」。要写出正确的脚本，必须<strong>自己保证「要么全部执行成功，要么在错误前不做任何写操作」</strong>（把校验都放在写操作之前）。</li>
+  <li>另外：<strong>Lua 脚本会阻塞 Redis 主线程</strong>。长时间运行的脚本（比如循环一个大集合）会卡住整个实例。<strong>Redis 7.0 起有 <code class="inline">lua-time-limit</code>（默认 5 秒），超过后其他命令会返回 BUSY 错误，但脚本本身不会自动被杀。</strong></li>
+  </ul>
+</div>
+
+<pre><code class="lang-lua"><span class="cm">-- ⭐ 实战 1：安全的分布式锁释放（前面已见）</span>
+<span class="kw">if</span> redis.call(<span class="st">'GET'</span>, KEYS[<span class="nu">1</span>]) == ARGV[<span class="nu">1</span>] <span class="kw">then</span>
+    <span class="kw">return</span> redis.call(<span class="st">'DEL'</span>, KEYS[<span class="nu">1</span>])
+<span class="kw">end</span>
+<span class="kw">return</span> <span class="nu">0</span></code></pre>
+
+<pre><code class="lang-lua"><span class="cm">-- ⭐ 实战 2：限流（滑动窗口计数器，配合 INCR + EXPIRE 的原子化）</span>
+<span class="cm">-- KEYS[1] = 限流 key（如 rate:ip:1.2.3.4）, ARGV[1] = 窗口秒数, ARGV[2] = 阈值</span>
+<span class="kw">local</span> current = redis.call(<span class="st">'INCR'</span>, KEYS[<span class="nu">1</span>])
+<span class="kw">if</span> current == <span class="nu">1</span> <span class="kw">then</span>
+    <span class="cm">-- 第一次访问才设置过期，避免每次刷新 TTL 导致窗口永不过期</span>
+    redis.call(<span class="st">'EXPIRE'</span>, KEYS[<span class="nu">1</span>], ARGV[<span class="nu">1</span>])
+<span class="kw">end</span>
+<span class="kw">if</span> current &gt; tonumber(ARGV[<span class="nu">2</span>]) <span class="kw">then</span>
+    <span class="kw">return</span> <span class="nu">0</span>   <span class="cm">-- 超限</span>
+<span class="kw">end</span>
+<span class="kw">return</span> <span class="nu">1</span>      <span class="cm">-- 放行</span></code></pre>
+
+<pre><code class="lang-lua"><span class="cm">-- ⭐ 实战 3：批量扣减库存（保证"够扣才扣"，避免超卖）</span>
+<span class="cm">-- KEYS = 多个库存 key, ARGV = 对应的扣减数量</span>
+<span class="kw">local</span> results = {}
+<span class="cm">-- 第一阶段：全部校验（不做任何写操作）</span>
+<span class="kw">for</span> i = <span class="nu">1</span>, #KEYS <span class="kw">do</span>
+    <span class="kw">local</span> stock = tonumber(redis.call(<span class="st">'GET'</span>, KEYS[i]) <span class="kw">or</span> <span class="st">'-1'</span>)
+    <span class="kw">if</span> stock &lt; tonumber(ARGV[i]) <span class="kw">then</span>
+        <span class="kw">return</span> {<span class="nu">0</span>, <span class="st">'insufficient stock at item '</span> .. i}   <span class="cm">-- 有任一不足则整体失败</span>
+    <span class="kw">end</span>
+<span class="kw">end</span>
+<span class="cm">-- 第二阶段：全部执行（此时一定不会失败）</span>
+<span class="kw">for</span> i = <span class="nu">1</span>, #KEYS <span class="kw">do</span>
+    redis.call(<span class="st">'DECRBY'</span>, KEYS[i], ARGV[i])
+<span class="kw">end</span>
+<span class="kw">return</span> {<span class="nu">1</span>, <span class="st">'ok'</span>}</code></pre>
+
+<div class="box b-x">
+  <div class="box-t">🚨 Lua 脚本的四个注意点</div>
+  <ol style="margin-bottom:0">
+  <li><strong>不要写长循环</strong>：Lua 是阻塞的。遍历几万个 key 的脚本会卡死整个 Redis。批量操作应该分批（比如每次 100 个）。</li>
+  <li><strong>不要在脚本里做复杂计算</strong>：Lua 的性能不如原生 C。复杂逻辑应该放到应用侧。</li>
+  <li><strong><code class="inline">redis.call</code> vs <code class="inline">redis.pcall</code></strong>：前者在命令出错时会中断脚本并抛错；后者会捕获错误并返回错误对象，脚本继续执行。<strong>需要「优雅处理错误」时用 pcall。</strong></li>
+  <li><strong>脚本要预先加载（SCRIPT LOAD）+ EVALSHA</strong>：每次都传完整脚本会浪费带宽。生产上应该先 <code class="inline">SCRIPT LOAD</code> 拿到 SHA1，之后用 <code class="inline">EVALSHA</code> 调用。<strong>但要注意 <code class="inline">NOSCRIPT</code> 错误的处理</strong>（Redis 重启后脚本缓存丢失）——客户端应该捕获 NOSCRIPT 并自动重传脚本。</li>
+  </ol>
+</div>
+
+<h3>Java 调用 Lua 的完整封装</h3>
+<pre><code class="lang-java"><span class="cm">/**
+ * Lua 脚本的工程化封装：预加载 + EVALSHA + NOSCRIPT 兜底
+ */</span>
+<span class="kw">@Component</span>
+<span class="kw">public class</span> <span class="fn">RedisLuaExecutor</span> {
+
+    <span class="kw">private final</span> StringRedisTemplate redis;
+    <span class="cm">// 脚本 → SHA1 的缓存</span>
+    <span class="kw">private final</span> Map&lt;String, String&gt; shaCache = <span class="kw">new</span> ConcurrentHashMap&lt;&gt;();
+
+    <span class="kw">public</span> &lt;T&gt; T <span class="fn">execute</span>(String script, Class&lt;T&gt; resultType,
+                                List&lt;String&gt; keys, Object... args) {
+        String sha = shaCache.computeIfAbsent(script, s -&gt; {
+            <span class="cm">// 首次：SCRIPT LOAD 并缓存 SHA</span>
+            <span class="kw">return</span> redis.execute(<span class="kw">new</span> DefaultRedisScript&lt;&gt;(<span class="st">"return redis.sha1hex(ARGV[1])"</span>, String.class),
+                Collections.emptyList(), s);
+        });
+
+        <span class="kw">try</span> {
+            DefaultRedisScript&lt;T&gt; redisScript = <span class="kw">new</span> DefaultRedisScript&lt;&gt;(script, resultType);
+            redisScript.setSha1(sha);
+            <span class="kw">return</span> redis.execute(redisScript, keys, args);
+        } <span class="kw">catch</span> (RedisSystemException e) {
+            <span class="cm">// NOSCRIPT：Redis 重启/脚本被清空 → 重新加载并重试</span>
+            <span class="kw">if</span> (e.getCause() <span class="kw">instanceof</span> RedisCommandExecutionException
+                &amp;&amp; e.getCause().getMessage() != <span class="kw">null</span>
+                &amp;&amp; e.getCause().getMessage().contains(<span class="st">"NOSCRIPT"</span>)) {
+                shaCache.remove(script);
+                <span class="kw">return</span> execute(script, resultType, keys, args);
+            }
+            <span class="kw">throw</span> e;
+        }
+    }
+}
+
+<span class="cm">// 使用示例</span>
+<span class="kw">private static final</span> String UNLOCK =
+    <span class="st">"if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end"</span>;
+
+<span class="kw">public void</span> <span class="fn">unlock</span>(String lockKey, String clientId) {
+    luaExecutor.execute(UNLOCK, Long.class, Collections.singletonList(lockKey), clientId);
+}</code></pre>
+
+<h2 id="c11-6">6. Redis Functions（7.0+）：Lua 的替代者</h2>
+
+<div class="box b-big">
+  <div class="box-t">✅ Functions 解决了 Lua 脚本的什么问题</div>
+  <p>Lua 脚本（EVAL）的三个痛点：</p>
+  <ol>
+  <li><strong>脚本内容每次都要传输</strong>（虽然 EVALSHA 能缓解，但要客户端缓存 SHA，还要处理 NOSCRIPT）。</li>
+  <li><strong>脚本由客户端管理</strong>：不同客户端可能上传同名但不同逻辑的脚本，<strong>难以统一版本</strong>。运维无法知道线上跑了哪些脚本。</li>
+  <li><strong>不支持复用</strong>：脚本之间无法互相调用，公共逻辑要重复写。</li>
+  </ol>
+  <p><strong>Functions 的设计</strong>：把脚本作为<strong>库（Library）注册到 Redis 服务端</strong>，持久化在 RDB/AOF 里，随实例一起复制到从节点。调用时用 <code class="inline">FCALL 函数名 参数</code>，<strong>不需要传输脚本内容</strong>。</p>
+  <p><strong>核心命令</strong>：</p>
+  <ul>
+  <li><code class="inline">FUNCTION LOAD [REPLACE] &lt;code&gt;</code> — 加载一个函数库</li>
+  <li><code class="inline">FCALL &lt;function&gt; &lt;numkeys&gt; &lt;key...&gt; &lt;arg...&gt;</code> — 调用函数</li>
+  <li><code class="inline">FCALL_RO</code> — 只读版本的调用（可路由到从节点）</li>
+  <li><code class="inline">FUNCTION LIST [LIBRARYNAME x] [WITHCODE]</code> — 列出已注册的库</li>
+  <li><code class="inline">FUNCTION DELETE &lt;lib&gt;</code> — 删除库</li>
+  <li><code class="inline">FUNCTION DUMP / RESTORE</code> — 备份与恢复</li>
+  <li><code class="inline">FUNCTION STATS</code> — 运行统计</li>
+  </ul>
+</div>
+
+<pre><code class="lang-bash"><span class="cm">########## 定义一个函数库 ##########</span>
+<span class="cm"># 语法：redis.register_function('函数名', function(keys, args) ... end)</span>
+
+FUNCTION LOAD <span class="st">"#!lua name=mylib
+redis.register_function('my_unlock', function(keys, args)
+    if redis.call('GET', keys[1]) == args[1] then
+        return redis.call('DEL', keys[1])
+    end
+    return 0
+end)
+
+redis.register_function('my_rate_limit', function(keys, args)
+    local current = redis.call('INCR', keys[1])
+    if current == 1 then
+        redis.call('EXPIRE', keys[1], args[1])
+    end
+    if current &gt; tonumber(args[2]) then return 0 end
+    return 1
+end)
+"</span>
+<span class="cm"># 返回库名 mylib</span>
+
+<span class="cm"># 调用（不需要传脚本内容！）</span>
+FCALL my_unlock 1 lock:order:1001 <span class="st">"client-uuid-xxx"</span>
+FCALL my_rate_limit 1 rate:ip:1.2.3.4 60 100
+
+<span class="cm"># 查看已注册的库</span>
+FUNCTION LIST
+FUNCTION LIST LIBRARYNAME mylib WITHCODE
+
+<span class="cm"># 更新库（必须加 REPLACE）</span>
+FUNCTION LOAD REPLACE <span class="st">"#!lua name=mylib ..."</span>
+
+<span class="cm"># 统计</span>
+FUNCTION STATS</code></pre>
+
+<div class="box b-big">
+  <div class="box-t">✅ Lua 脚本 vs Functions 对比</div>
+  <table style="margin:8px 0">
+  <thead><tr><th style="width:18%">维度</th><th>EVAL（Lua 脚本）</th><th>Functions（7.0+）</th></tr></thead>
+  <tbody>
+  <tr><td><strong>脚本存储位置</strong></td><td>客户端（每次传输或缓存 SHA）</td><td><strong>服务端（持久化，随复制传播）</strong></td></tr>
+  <tr><td><strong>调用方式</strong></td><td>EVAL / EVALSHA + 脚本内容或 SHA</td><td><strong>FCALL + 函数名</strong></td></tr>
+  <tr><td><strong>脚本复用</strong></td><td>不能互相调用</td><td><strong>可以互相调用</strong>（同一库内）</td></tr>
+  <tr><td><strong>版本管理</strong></td><td>困难（客户端各自为政）</td><td><strong>服务端统一管理</strong></td></tr>
+  <tr><td><strong>集群支持</strong></td><td>需要保证同槽</td><td>同样需要保证同槽；<code class="inline">FCALL_RO</code> 可路由到从节点</td></tr>
+  <tr><td><strong>持久化</strong></td><td>不持久化（NOSCRIPT 问题）</td><td><strong>会被 RDB/AOF 持久化</strong></td></tr>
+  <tr><td><strong>可观测性</strong></td><td>差</td><td><code class="inline">FUNCTION STATS</code> 提供统计</td></tr>
+  </tbody>
+  </table>
+  <p><strong>结论</strong>：<strong>新项目应该用 Functions</strong>，尤其是有多个服务共用同一套 Redis 的场景。Lua 脚本在「一次性、临时」的场景仍然方便。</p>
+  <p><strong>面试加分</strong>：「Functions 的本质变化是把脚本的<strong>管理权从客户端移到了服务端</strong>——从『每个客户端各自上传脚本』变成『脚本成为 Redis 的一个一等公民，跟数据一起持久化和复制』。这解决了运维上『线上到底跑了哪些脚本』这个黑盒问题。」</p>
+</div>
+
+<h2 id="c11-7">7. 分布式锁方案选型总表</h2>
+<table>
+<thead><tr><th style="width:16%">方案</th><th>可靠性</th><th>性能</th><th>实现复杂度</th><th>适用场景</th></tr></thead>
+<tbody>
+<tr><td><strong>SETNX（无过期）</strong></td><td>❌ 会死锁</td><td>高</td><td>低</td><td>只用来说明原理，<strong>禁止生产使用</strong></td></tr>
+<tr><td><strong>SET NX EX</strong></td><td>⚠️ 会误删</td><td>高</td><td>低</td><td>理论阶段，<strong>不推荐</strong></td></tr>
+<tr><td><strong>SET NX EX + UUID + Lua</strong></td><td>⚠️ 业务超时会并发</td><td>高</td><td>中</td><td>简单场景、业务耗时远小于锁时长</td></tr>
+<tr><td><strong>Redisson（看门狗）</strong><br><span class="badge bg-green">推荐</span></td><td>✅ 较好</td><td>高</td><td>低（用现成库）</td><td><strong>绝大多数场景</strong>（+ 业务侧幂等保护）</td></tr>
+<tr><td><strong>Redlock（5 节点）</strong></td><td>⚠️ 有争议</td><td>中（多次 RTT）</td><td>高</td><td>效率型锁；正确性型锁应配 fencing token</td></tr>
+<tr><td><strong>ZooKeeper 临时顺序节点</strong></td><td>✅ 强（ZAB 保证）</td><td>中低（写要过半确认）</td><td>中</td><td>要求强可靠、已有 ZK 基础设施</td></tr>
+<tr><td><strong>数据库唯一索引 / 行锁</strong></td><td>✅ 强</td><td>低</td><td>低</td><td>低频、强一致的场景</td></tr>
+<tr><td><strong>etcd（Raft + lease + revision）</strong></td><td>✅ 强</td><td>中</td><td>中</td><td>云原生环境，天然支持 fencing token（revision）</td></tr>
+</tbody>
+</table>
+
+<div class="box b-tip">
+  <div class="box-t">💡 Redis 锁 vs ZooKeeper 锁（可能被追问）</div>
+  <table style="margin:8px 0">
+  <thead><tr><th style="width:20%">维度</th><th>Redis</th><th>ZooKeeper</th></tr></thead>
+  <tbody>
+  <tr><td>一致性模型</td><td>AP（默认主从异步复制）</td><td><strong>CP</strong>（ZAB，写要过半确认）</td></tr>
+  <tr><td>可靠性</td><td>极端情况下可能丢锁</td><td><strong>不会丢锁</strong></td></tr>
+  <tr><td>性能</td><td><strong>高</strong>（10 万+ QPS）</td><td>中（几千到上万 QPS）</td></tr>
+  <tr><td>锁释放</td><td>依赖过期时间</td><td><strong>会话断开自动删除</strong>（临时节点）</td></tr>
+  <tr><td>实现</td><td>自己写 / Redisson</td><td>Curator 提供成熟实现</td></tr>
+  <tr><td>死锁</td><td>靠 TTL 兜底</td><td>天然无死锁（会话结束即释放）</td></tr>
+  <tr><td>选型建议</td><td>高并发、允许极小概率失效</td><td>强一致要求、已有 ZK</td></tr>
+  </tbody>
+  </table>
+  <p><strong>注意</strong>：说「ZK 不会丢锁」时最好补一句——<strong>ZK 也会因为客户端 GC 而出现「客户端以为持有锁但实际已失去」的情况（会话超时被判定断开，临时节点被删）</strong>。所以 Again，正确性最终要靠业务侧的 fencing token。</p>
+</div>
+
+<h2 id="c11-8">面试深度问答</h2>
+
+<details class="qa"><summary>怎么用 Redis 实现分布式锁？<span class="lvl lv1">基础</span></summary>
+<div class="qa-b">
+<p><strong>演进路径（这样答能体现深度）</strong>：</p>
+<ol>
+<li><strong>SETNX + DEL</strong>：有死锁风险（持锁进程崩溃后 key 永存）。</li>
+<li><strong>SET key value NX EX 30</strong>：解决了死锁，但会误删别人的锁（业务超时后锁自动释放，自己被唤醒后又 DEL 了别人的锁）。</li>
+<li><strong>value 存唯一标识（UUID+线程ID）+ Lua 原子校验删除</strong>：解决误删。<strong>必须用 Lua，因为「判断 + 删除」两条命令之间有窗口。</strong></li>
+<li><strong>Redisson 看门狗自动续期</strong>：解决「业务超时导致锁提前释放」。</li>
+</ol>
+<p><strong>生产建议</strong>：直接用 <strong>Redisson</strong>，并<strong>注意不要传 leaseTime</strong>（传了看门狗就不生效）。同时业务侧要加<strong>幂等 + 乐观锁</strong>做兜底——因为锁本身在极端情况下（GC、网络分区）会失效。</p>
+</div></details>
+
+<details class="qa"><summary>释放锁为什么必须用 Lua 脚本？<span class="lvl lv2">进阶</span></summary>
+<div class="qa-b">
+<p>因为「<strong>判断锁是不是自己的</strong>」和「<strong>删除锁</strong>」这两步必须是<strong>原子的</strong>。</p>
+<p><strong>如果用两条命令</strong>：</p>
+<pre style="margin:8px 0"><code class="lang-java">String v = redis.get(lockKey);
+<span class="kw">if</span> (myId.equals(v)) {
+    redis.del(lockKey);   <span class="cm">// ← 在这两句之间，锁可能刚好过期并被别人抢到</span>
+}</code></pre>
+<p>极端场景：</p>
+<ol>
+<li>客户端 A 的锁刚好在 <code class="inline">GET</code> 之后、<code class="inline">DEL</code> 之前过期。</li>
+<li>客户端 B 抢到了锁。</li>
+<li>A 执行 <code class="inline">DEL</code> → <strong>删掉了 B 的锁</strong>。</li>
+<li>C 也能抢到锁 → <strong>B 和 C 同时持锁，互斥性破坏</strong>。</li>
+</ol>
+<p>虽然时间窗口极短，但在每秒几万次的锁操作下，一天几十亿次调用，小概率事件必然发生。</p>
+<p><strong>Lua 保证原子性</strong>：Redis 执行脚本时，整个脚本作为一个整体执行，中间不插入其他命令，所以「判断+删除」不可分割。</p>
+<p><strong>加分</strong>：类似地，很多「检查后写入」的场景都需要 Lua（或 <code class="inline">WATCH/MULTI</code> 事务）来保证原子性。这也是 Lua 在 Redis 里最主要的价值。</p>
+</div></details>
+
+<details class="qa"><summary>Redisson 的看门狗机制是什么？<span class="lvl lv2">进阶</span></summary>
+<div class="qa-b">
+<p><strong>目的</strong>：解决「业务执行时间超过锁过期时间」的问题。</p>
+<p><strong>触发条件</strong>：调用 <code class="inline">lock()</code> 或 <code class="inline">tryLock(waitTime, unit)</code>（<strong>不传 leaseTime</strong>）时启用。默认锁超时 30 秒（<code class="inline">lockWatchdogTimeout</code>）。</p>
+<p><strong>原理</strong>：</p>
+<ol>
+<li>加锁成功后，注册一个后台定时任务（基于 Netty 的 <code class="inline">HashedWheelTimer</code>）。</li>
+<li>每隔 <code class="inline">lockWatchdogTimeout / 3</code>（即 10 秒）执行一次续期。</li>
+<li>续期时用 Lua 脚本<strong>先校验锁是否还属于自己</strong>，是则把 TTL 重置为 30 秒。</li>
+<li>释放锁时取消定时任务；客户端崩溃时定时任务随之消失，锁在 30 秒内自动过期（不会死锁）。</li>
+</ol>
+<p><strong>为什么是每 10 秒续一次</strong>：10 秒 = 30/3，即「在锁过期前有两次续期机会」，避免单次失败就丢锁。</p>
+<p><strong>⚠️ 关键坑</strong>：<strong>一旦传了 leaseTime，看门狗就不生效</strong>。<code class="inline">lock(30, TimeUnit.SECONDS)</code> 和 <code class="inline">tryLock(10, 30, TimeUnit.SECONDS)</code> 都会禁用看门狗——锁 30 秒后无条件释放。这是生产上非常常见的误用。</p>
+<p><strong>看门狗的局限</strong>：① 长 Full GC 会让续期线程也暂停（JVM 层问题）；② 续期本身消耗流量（10 万把锁 = 每秒 1 万次续期）；③ 续期失败时客户端可能「不自知地失去锁」。</p>
+</div></details>
+
+<details class="qa"><summary>Redlock 算法了解吗？它可靠吗？<span class="lvl lv4">专家</span></summary>
+<div class="qa-b">
+<p><strong>Redlock 的做法</strong>：N（通常 5）个<strong>独立</strong>的 Redis 主节点。加锁时依次（或并发）请求全部节点，在 <strong>≥ N/2+1 个节点</strong>上成功且<strong>总耗时 &lt; 锁过期时间</strong>才算成功；有效时间 = 初始过期时间 − 加锁耗时。释放时向所有节点发送解锁。</p>
+<p><strong>它能防住什么</strong>：单实例主从切换导致的锁丢失（因为现在有 5 个独立实例，不依赖主从复制）。</p>
+<p><strong>质疑（Martin Kleppmann《How to do distributed locking》）</strong>：</p>
+<ol>
+<li><strong>依赖时钟</strong>：安全性建立在「各节点时钟单调且漂移可控」上，但 NTP 校时可能造成时钟跳跃，导致锁被提前判定过期。<strong>这是最致命的一条。</strong></li>
+<li><strong>GC 暂停无法避免</strong>：客户端 STW 期间锁已过期，但客户端仍在执行临界区——Redlock 对此无能为力。</li>
+<li><strong>性能与复杂度代价高</strong>，但安全性并没有比「单实例 + fencing token」更好。</li>
+<li><strong>用途错配</strong>：只适合「效率型锁」，不适合「正确性型锁」。</li>
+</ol>
+<p><strong>反驳（antirez）</strong>：时钟跳跃可通过约束「不依赖系统时间、用相对时间」来缓解，现实中概率极低；Redlock 的目标是「绝大多数故障下可用且安全」，而非理论上的完美。</p>
+<p><strong>更根本的解法：Fencing Token</strong></p>
+<p>锁服务每次加锁分配<strong>单调递增的编号</strong>，客户端访问存储时带上编号，<strong>存储层拒绝编号更小的请求</strong>。这样即使锁失效，也能保证正确性。<strong>这才是解决「锁失效导致并发」的正道。</strong></p>
+<p><strong>我的结论（面试话术）</strong>：「我会把锁分两类看待——<strong>效率型</strong>（防重复劳动）用 Redisson 单实例就够，失效的代价是多做一次无用功；<strong>正确性型</strong>（扣款、库存）不会指望 Redis 锁，而是靠数据库的<strong>行锁 / 唯一索引 / 乐观锁版本号</strong>来保证，锁只是用来降低冲突的『性能优化』。<strong>Redlock 我基本不用——它多付出 5 个实例的复杂度和延迟，但换来的保证仍然是不完备的。</strong>」</p>
+</div></details>
+
+<details class="qa"><summary>Redis 分布式锁和 ZooKeeper 锁怎么选？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<table>
+<thead><tr><th style="width:18%">维度</th><th>Redis</th><th>ZooKeeper</th></tr></thead>
+<tbody>
+<tr><td><strong>一致性模型</strong></td><td>AP（主从异步复制，极端情况可能丢锁）</td><td><strong>CP</strong>（ZAB，写需过半确认）</td></tr>
+<tr><td><strong>性能</strong></td><td><strong>高</strong>（10 万+ QPS）</td><td>中（数千至数万 QPS）</td></tr>
+<tr><td><strong>锁释放</strong></td><td>靠 TTL 过期</td><td><strong>会话断开自动删临时节点</strong></td></tr>
+<tr><td><strong>死锁</strong></td><td>靠 TTL 兜底</td><td>天然无死锁</td></tr>
+<tr><td><strong>实现成本</strong></td><td>低（Redisson 开箱即用）</td><td>中（Curator）</td></tr>
+<tr><td><strong>运维</strong></td><td>一般已有 Redis 集群</td><td>需维护 ZK 集群</td></tr>
+</tbody>
+</table>
+<p><strong>选型逻辑</strong>：</p>
+<ul>
+<li><strong>选 Redis</strong>：并发量高、属于「效率型锁」（能容忍极小概率失效）、已有 Redis 基础设施。<strong>绝大多数互联网场景属于这一类。</strong></li>
+<li><strong>选 ZooKeeper</strong>：对可靠性要求高、已维护 ZK、且并发量不极端。<strong>老一代的分布式系统（如 Dubbo、Kafka 早期）常用 ZK 做选主和锁。</strong></li>
+</ul>
+<p><strong>关键洞察（加分）</strong>：<strong>ZK 也不是绝对安全</strong>——客户端 GC 导致会话超时，临时节点被删，客户端却以为还持有锁，同样会出现并发。所以「哪把锁更安全」这个问题的正确答案是：<strong>不管用哪把锁，正确性都不能只靠锁，必须配合业务侧的 fencing token / 幂等 / 乐观锁。</strong></p>
+</div></details>
+
+<details class="qa"><summary>Lua 脚本为什么能保证原子性？它的事务回滚吗？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p><strong>原子性的来源</strong>：Redis 执行命令本身是单线程的（命令执行阶段）。Lua 脚本被当作<strong>一个整体命令</strong>提交给这个单线程执行——<strong>脚本执行期间不会穿插其他客户端的命令</strong>。所以「读-判断-写」这一串操作对外表现为一个不可分割的整体。</p>
+<p><strong>⚠️ 但它不是「事务」，不会回滚</strong>：</p>
+<ul>
+<li>这是高频易错点。Lua 脚本执行中途如果报错（比如 <code class="inline">INCR</code> 一个字符串），<strong>已经执行的命令不会撤销</strong>，后面的命令也不会执行。</li>
+<li>所以正确写法是「<strong>把所有校验/失败可能性都放在写操作之前</strong>」——校验全部通过后再统一执行写操作（见本节「批量扣减库存」示例）。</li>
+</ul>
+<p><strong>为什么要用 Lua</strong>：为了消除「多条命令之间被其他客户端插入」的窗口。在分布式锁释放、限流、库存扣减这些「检查后写入」的场景，这是必须的。</p>
+<p><strong>和 MULTI/EXEC 事务的区别</strong>：</p>
+<ul>
+<li><code class="inline">MULTI/EXEC</code> 是「打包发送、顺序执行」，<strong>不支持条件判断</strong>（不能在事务里根据读到的值决定下一步），也没有回滚。</li>
+<li>Lua 支持完整的条件逻辑、循环、变量，能力更强。</li>
+<li>两者都保证「不被打断」，都不支持回滚。</li>
+</ul>
+<p><strong>性能注意</strong>：脚本阻塞主线程。<strong>不要写长循环</strong>；批量操作要分批；<code class="inline">lua-time-limit</code> 默认 5 秒，超时后其他命令返回 BUSY。</p>
+</div></details>
+
+<details class="qa"><summary>Redis Functions 和 Lua 脚本有什么区别？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p>Functions（7.0+）是把脚本作为<strong>一等公民注册到服务端</strong>，Lua 脚本（EVAL）是客户端临时提交。</p>
+<table>
+<thead><tr><th style="width:20%">维度</th><th>EVAL（Lua 脚本）</th><th>Functions</th></tr></thead>
+<tbody>
+<tr><td>存储位置</td><td>客户端（每次传内容或用 EVALSHA）</td><td><strong>服务端（持久化 + 随主从复制）</strong></td></tr>
+<tr><td>调用</td><td>EVAL / EVALSHA + SHA</td><td><strong>FCALL 函数名</strong></td></tr>
+<tr><td>复用</td><td>不支持互相调用</td><td><strong>支持库内互相调用</strong></td></tr>
+<tr><td>版本管理</td><td>黑盒（各客户端各自为政）</td><td><strong>服务端统一管理，FUNCTION LIST 可见</strong></td></tr>
+<tr><td>持久化</td><td>不持久化（NOSCRIPT 问题）</td><td><strong>RDB/AOF 持久化</strong></td></tr>
+<tr><td>可观测性</td><td>无</td><td><code class="inline">FUNCTION STATS</code></td></tr>
+<tr><td>只读调用</td><td>无</td><td><code class="inline">FCALL_RO</code>（可路由到从节点）</td></tr>
+</tbody>
+</table>
+<p><strong>选型</strong>：新项目、多服务共用 Redis → <strong>Functions</strong>；一次性脚本、临时调试 → EVAL。</p>
+<p><strong>面试加分</strong>：「Functions 的关键进步是把脚本的<strong>管理权从客户端移到服务端</strong>——脚本成为 Redis 的一等公民，和 key 数据一起持久化、复制、备份。这解决了『线上到底有哪些脚本在跑』这个运维黑盒问题，也让脚本的版本升级变得可控（<code class="inline">FUNCTION LOAD REPLACE</code>）。」</p>
+</div></details>
+
+<details class="qa"><summary>项目里怎么用分布式锁？举一个具体场景<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p><strong>场景一：防止重复下单 / 幂等提交</strong></p>
+<p>「用户重复点击提交订单。我们在 <code class="inline">userId + productId</code> 维度加锁：<code class="inline">lock:order:{userId}:{productId}</code>，用 Redisson 的 <code class="inline">tryLock(0, 10, TimeUnit.SECONDS)</code>——等待 0 秒（拿不到就快速失败返回『请勿重复提交』）。<br>
+<strong>关键点</strong>：这里的锁是「<strong>效率型</strong>」——即使锁失效导致两次请求都进去了，我们也靠<strong>订单表的唯一索引（user_id + product_id + 活动ID）</strong>保证最终只生成一单。锁只是用来改善用户体验（快速失败），不承担正确性责任。」</p>
+<p><strong>场景二：定时任务防重复执行</strong></p>
+<p>「我们有多个实例同时跑定时任务。用 <code class="inline">lock:job:dailySettle</code>，Redisson 的 <code class="inline">tryLock(0, -1, null)</code>——<strong>不设 leaseTime，启用看门狗</strong>，因为结算任务耗时不定（可能几分钟）。<br>
+<strong>关键点</strong>：① 必须在 <code class="inline">finally</code> 里释放，且判断 <code class="inline">isHeldByCurrentThread()</code>；② 任务本身要**幂等**（用「任务执行记录表」记录 status，重复执行直接跳过）——因为如果实例网络抖动导致锁丢失，两个实例可能同时跑。」</p>
+<p><strong>场景三：缓存重建的互斥（Day4.1 提过）</strong></p>
+<p>「热点 key 失效时用锁保证只有一个线程去查 DB 重建。这里用 <code class="inline">tryLock(0, 5, SECONDS)</code>——因为重建耗时短（几十毫秒），5 秒足够；拿不到锁的线程自旋等待并读缓存。」</p>
+<p><strong>场景四：分布式环境下的「唯一性」操作</strong></p>
+<p>「比如给用户生成唯一的邀请码、唯一的短链。用 <code class="inline">lock:invite:{userId}</code> 保证同一用户不会并发生成多个。<strong>但更重要的是 DB 的唯一索引兜底。</strong>」</p>
+<div class="box b-warn" style="margin-top:12px">
+  <div class="box-t">⚠️ 一段可以背的总结</div>
+  <p>「我在项目里用分布式锁的原则是：<strong>锁只用来『减少冲突、提升体验』，正确性一律交给数据库约束和幂等设计。</strong> 具体来说：① 锁 key 的粒度要细（按业务 ID，不要全局）；② 优先用 <code class="inline">tryLock</code> 快速失败而不是无限等待（避免线程堆积）；③ 需要长时间执行的任务不传 leaseTime（用看门狗）；④ 每个用锁的地方都要问自己『如果这把锁完全失效，我的数据会错吗』——如果答案是『会』，那说明兜底没做好。」</p>
+</div>
+</div></details>
+
+<h2 id="c11-9">本节自测</h2>
+<div class="track">
+  <label><input type="checkbox" data-k="d4-13"><span>我能说出 SETNX 分布式锁的四代演进及每代解决/引入的问题</span></label>
+  <label><input type="checkbox" data-k="d4-14"><span>我能解释为什么释放锁必须用 Lua（而非 GET + DEL）</span></label>
+  <label><input type="checkbox" data-k="d4-15"><span>我能说清 Redisson 看门狗的触发条件、续期间隔（30/3=10秒）和停止条件</span></label>
+  <label><input type="checkbox" data-k="d4-16"><span>我知道「传了 leaseTime 看门狗就不生效」这个生产级大坑</span></label>
+  <label><input type="checkbox" data-k="d4-17"><span>我能说出看门狗自身的三个局限（GC / 流量 / 续期失败）</span></label>
+  <label><input type="checkbox" data-k="d4-18"><span>我能说明「三层保护」（锁 + 乐观锁 + 唯一索引）的设计思路</span></label>
+  <label><input type="checkbox" data-k="d4-19"><span>我能描述 Redlock 的算法流程</span></label>
+  <label><input type="checkbox" data-k="d4-20"><span>我能说出 Kleppmann 的至少三条质疑，以及 antirez 的反驳</span></label>
+  <label><input type="checkbox" data-k="d4-21"><span>我能解释 fencing token 的原理，以及它为什么是根本解法</span></label>
+  <label><input type="checkbox" data-k="d4-22"><span>我能说出「效率型锁 vs 正确性型锁」的区分，并据此选型</span></label>
+  <label><input type="checkbox" data-k="d4-23"><span>我能写出一个批量扣减库存的 Lua 脚本（校验前置）</span></label>
+  <label><input type="checkbox" data-k="d4-24"><span>我能说出 Lua 「原子执行但不回滚」的区别，以及 EVALSHA/NOSCRIPT 的处理</span></label>
+  <label><input type="checkbox" data-k="d4-25"><span>我能对比 Redis Functions 与 Lua 脚本，并说出 Functions 的核心优势</span></label>
+  <label><input type="checkbox" data-k="d4-26"><span>我能结合项目说出至少两个用锁的具体场景和兜底设计</span></label>
+</div>
+</section>

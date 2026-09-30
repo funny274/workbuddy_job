@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Redis 大师之路 · 5天速成 · 大厂级深度教程</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧠</text></svg>">
+<style>
+:root{
+  --bg:#ffffff; --bg-soft:#f7f8fa; --bg-side:#fbfbfd; --bg-code:#f6f8fa;
+  --fg:#1f2328; --fg-soft:#59636e; --fg-dim:#8b949e;
+  --border:#e3e6ea; --border-soft:#eef1f4;
+  --accent:#d92b2b; --accent-soft:#fdecec; --accent-2:#0969da;
+  --green:#1a7f37; --green-soft:#e7f6ec; --amber:#9a6700; --amber-soft:#fff8e5;
+  --purple:#8250df; --purple-soft:#f4eefd;
+  --code-kw:#cf222e; --code-str:#0a3069; --code-cm:#6e7781; --code-num:#0550ae; --code-fn:#8250df;
+  --shadow:0 1px 3px rgba(0,0,0,.06),0 8px 24px rgba(0,0,0,.05);
+  --sidebar-w:308px; --radius:12px;
+}
+html[data-theme="dark"]{
+  --bg:#0d1117; --bg-soft:#161b22; --bg-side:#0b0f14; --bg-code:#161b22;
+  --fg:#e6edf3; --fg-soft:#9aa7b4; --fg-dim:#6e7681;
+  --border:#243040; --border-soft:#1b2432;
+  --accent:#ff6b6b; --accent-soft:#2a1416; --accent-2:#58a6ff;
+  --green:#3fb950; --green-soft:#0f2417; --amber:#d29922; --amber-soft:#241d09;
+  --purple:#bc8cff; --purple-soft:#1d1630;
+  --code-kw:#ff7b72; --code-str:#a5d6ff; --code-cm:#8b949e; --code-num:#79c0ff; --code-fn:#d2a8ff;
+  --shadow:0 1px 3px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.35);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0; background:var(--bg); color:var(--fg);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  font-size:15.5px; line-height:1.78; -webkit-font-smoothing:antialiased;
+}
+a{color:var(--accent-2); text-decoration:none}
+a:hover{text-decoration:underline}
+
+/* ---------- 顶部栏 ---------- */
+#topbar{
+  position:fixed; top:0; left:0; right:0; height:56px; z-index:60;
+  background:color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter:blur(12px); border-bottom:1px solid var(--border);
+  display:flex; align-items:center; gap:14px; padding:0 18px;
+}
+#brand{display:flex; align-items:center; gap:9px; font-weight:700; font-size:15px; white-space:nowrap}
+#brand .dot{width:11px; height:11px; border-radius:50%; background:var(--accent); box-shadow:0 0 0 4px var(--accent-soft)}
+#brand small{font-weight:500; color:var(--fg-dim); font-size:12px; margin-left:2px}
+#search{
+  flex:1; max-width:360px; height:34px; border-radius:9px; border:1px solid var(--border);
+  background:var(--bg-soft); color:var(--fg); padding:0 11px; font-size:13.5px; outline:none;
+}
+#search:focus{border-color:var(--accent-2); background:var(--bg)}
+#search::placeholder{color:var(--fg-dim)}
+.top-actions{margin-left:auto; display:flex; align-items:center; gap:8px}
+.btn{
+  height:34px; padding:0 12px; border-radius:9px; border:1px solid var(--border); background:var(--bg-soft);
+  color:var(--fg); font-size:13px; cursor:pointer; display:inline-flex; align-items:center; gap:6px; white-space:nowrap;
+}
+.btn:hover{border-color:var(--fg-dim)}
+#hamburger{display:none}
+
+/* 阅读进度条 */
+#progress{position:fixed; top:0; left:0; height:2.5px; width:0; background:var(--accent); z-index:70; transition:width .1s linear}
+
+/* ---------- 布局 ---------- */
+#layout{display:flex; padding-top:56px; min-height:100vh}
+#sidebar{
+  width:var(--sidebar-w); flex:0 0 var(--sidebar-w); height:calc(100vh - 56px);
+  position:sticky; top:56px; overflow-y:auto; background:var(--bg-side);
+  border-right:1px solid var(--border); padding:16px 10px 60px;
+}
+#sidebar::-webkit-scrollbar{width:9px}
+#sidebar::-webkit-scrollbar-thumb{background:var(--border); border-radius:5px}
+.side-h{
+  font-size:11.5px; font-weight:700; letter-spacing:.09em; text-transform:uppercase;
+  color:var(--fg-dim); padding:14px 12px 7px;
+}
+.nav-link{
+  display:block; padding:7px 12px; margin:1px 0; border-radius:8px; font-size:13.6px;
+  color:var(--fg-soft); border-left:2.5px solid transparent; transition:all .12s;
+}
+.nav-link:hover{background:var(--bg-soft); color:var(--fg); text-decoration:none}
+.nav-link.active{background:var(--accent-soft); color:var(--accent); font-weight:650; border-left-color:var(--accent)}
+
+#content{flex:1; min-width:0; max-width:1000px; padding:34px 52px 140px; margin:0 auto}
+
+/* ---------- 排版 ---------- */
+h1{font-size:31px; line-height:1.3; margin:6px 0 14px; letter-spacing:-.4px}
+h2{
+  font-size:23px; margin:44px 0 14px; padding-bottom:9px; border-bottom:1px solid var(--border);
+  letter-spacing:-.2px; scroll-margin-top:76px;
+}
+h3{font-size:18px; margin:30px 0 10px; scroll-margin-top:76px}
+h4{font-size:15.5px; margin:22px 0 8px; color:var(--fg-soft)}
+p{margin:11px 0}
+ul,ol{padding-left:23px; margin:11px 0}
+li{margin:5px 0}
+strong{font-weight:700}
+hr{border:0; border-top:1px solid var(--border); margin:34px 0}
+
+code.inline{
+  background:var(--bg-soft); border:1px solid var(--border-soft); border-radius:5px;
+  padding:1.5px 5px; font-size:13px; font-family:"JetBrains Mono",Consolas,Menlo,monospace;
+  color:var(--accent); white-space:nowrap;
+}
+pre{
+  background:var(--bg-code); border:1px solid var(--border); border-radius:var(--radius);
+  padding:14px 16px; overflow-x:auto; margin:14px 0; position:relative;
+  font-size:13.2px; line-height:1.65;
+}
+pre code{font-family:"JetBrains Mono","Cascadia Code",Consolas,Menlo,monospace; color:var(--fg); white-space:pre}
+.cm{color:var(--code-cm); font-style:italic}
+.kw{color:var(--code-kw)}
+.st{color:var(--code-str)}
+.nu{color:var(--code-num)}
+.fn{color:var(--code-fn)}
+.copy-btn{
+  position:absolute; top:9px; right:9px; height:25px; padding:0 9px; font-size:11.5px;
+  border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--fg-soft);
+  cursor:pointer; opacity:0; transition:opacity .15s;
+}
+pre:hover .copy-btn{opacity:1}
+.copy-btn:hover{color:var(--fg)}
+
+/* ---------- 组件 ---------- */
+.card{background:var(--bg-soft); border:1px solid var(--border); border-radius:var(--radius); padding:16px 19px; margin:16px 0}
+.box{border-radius:var(--radius); padding:14px 18px; margin:16px 0; border:1px solid; border-left-width:4px}
+.box p:first-child{margin-top:0} .box p:last-child{margin-bottom:0}
+.box .box-t{font-weight:700; font-size:14px; margin-bottom:5px; display:flex; align-items:center; gap:7px}
+.b-tip{background:var(--accent-2); border-color:var(--accent-2); color:var(--fg)}
+.box.b-tip{border-color:#cfe3fb; border-left-color:var(--accent-2); background:color-mix(in srgb, var(--accent-2) 7%, var(--bg))}
+.box.b-warn{border-color:#f2d999; border-left-color:var(--amber); background:var(--amber-soft)}
+.box.b-x{border-color:#f5b5b5; border-left-color:var(--accent); background:var(--accent-soft)}
+.box.b-big{border-color:#bfe6c9; border-left-color:var(--green); background:var(--green-soft)}
+.box.b-int{border-color:#dcc9f7; border-left-color:var(--purple); background:var(--purple-soft)}
+.box.b-int .box-t{color:var(--purple)}
+
+table{width:100%; border-collapse:collapse; margin:16px 0; font-size:13.6px; display:block; overflow-x:auto}
+table thead th{
+  background:var(--bg-soft); text-align:left; padding:9px 12px; border:1px solid var(--border);
+  font-weight:700; font-size:13px; white-space:nowrap;
+}
+table td{padding:8px 12px; border:1px solid var(--border); vertical-align:top}
+table tbody tr:nth-child(even){background:color-mix(in srgb, var(--bg-soft) 45%, var(--bg))}
+
+.badge{display:inline-block; padding:1.5px 8px; border-radius:20px; font-size:11.5px; font-weight:650; line-height:1.6; white-space:nowrap}
+.bg-red{background:var(--accent-soft); color:var(--accent)}
+.bg-blue{background:color-mix(in srgb,var(--accent-2) 13%,var(--bg)); color:var(--accent-2)}
+.bg-green{background:var(--green-soft); color:var(--green)}
+.bg-amber{background:var(--amber-soft); color:var(--amber)}
+.bg-purple{background:var(--purple-soft); color:var(--purple)}
+.bg-gray{background:var(--bg-soft); color:var(--fg-soft)}
+
+.grid2{display:grid; grid-template-columns:1fr 1fr; gap:15px; margin:16px 0}
+.grid3{display:grid; grid-template-columns:repeat(3,1fr); gap:13px; margin:16px 0}
+.grid2>*,.grid3>*{margin:0}
+@media(max-width:860px){.grid2,.grid3{grid-template-columns:1fr}}
+
+/* 面试题折叠 */
+.qa{border:1px solid var(--border); border-radius:var(--radius); margin:13px 0; overflow:hidden; background:var(--bg)}
+.qa>summary{
+  cursor:pointer; padding:12px 16px; font-weight:650; font-size:14.5px; list-style:none;
+  display:flex; align-items:flex-start; gap:9px; background:var(--bg-soft); transition:background .12s;
+}
+.qa>summary::-webkit-details-marker{display:none}
+.qa>summary:hover{background:color-mix(in srgb,var(--accent-soft) 55%,var(--bg-soft))}
+.qa>summary::before{content:"Q"; flex:0 0 auto; width:20px; height:20px; border-radius:6px; background:var(--accent); color:#fff; font-size:12px; display:flex; align-items:center; justify-content:center; margin-top:2px}
+.qa[open]>summary{border-bottom:1px solid var(--border)}
+.qa .qa-b{padding:14px 18px 16px 45px; font-size:14.4px}
+.qa .qa-b>:first-child{margin-top:0}
+.qa .qa-b>:last-child{margin-bottom:0}
+.lvl{font-size:11px; padding:1px 7px; border-radius:5px; margin-left:auto; flex:0 0 auto; font-weight:650}
+.lv1{background:var(--green-soft); color:var(--green)}
+.lv2{background:var(--amber-soft); color:var(--amber)}
+.lv3{background:var(--accent-soft); color:var(--accent)}
+.lv4{background:var(--purple-soft); color:var(--purple)}
+
+/* 步骤 */
+.steps{counter-reset:s; margin:18px 0}
+.step{position:relative; padding:0 0 20px 44px; border-left:2px solid var(--border); margin-left:13px}
+.step:last-child{border-left-color:transparent; padding-bottom:0}
+.step::before{
+  counter-increment:s; content:counter(s); position:absolute; left:-14px; top:-2px;
+  width:26px; height:26px; border-radius:50%; background:var(--accent); color:#fff;
+  font-size:13px; font-weight:700; display:flex; align-items:center; justify-content:center;
+}
+.step>.st-t{font-weight:700; font-size:15px; margin:0 0 6px}
+.step p{margin:7px 0}
+
+/* 章节头 */
+.ch-meta{display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:0 0 18px}
+.ch-num{
+  display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:700;
+  color:var(--accent); background:var(--accent-soft); padding:3px 11px; border-radius:20px;
+}
+.hero{
+  background:linear-gradient(135deg, color-mix(in srgb,var(--accent) 9%,var(--bg)), color-mix(in srgb,var(--accent-2) 8%,var(--bg)));
+  border:1px solid var(--border); border-radius:16px; padding:26px 30px; margin:0 0 26px;
+}
+.hero h1{margin-top:0}
+.hero .sub{color:var(--fg-soft); font-size:15px}
+
+/* 目录树（首页） */
+.toc-tree{border:1px solid var(--border); border-radius:var(--radius); padding:8px; background:var(--bg-soft); margin:16px 0}
+.toc-day{border-bottom:1px dashed var(--border); padding:12px 14px}
+.toc-day:last-child{border-bottom:0}
+.toc-day .d-t{font-weight:750; font-size:15px; margin-bottom:7px; display:flex; align-items:center; gap:9px}
+.toc-day .d-t .pill{background:var(--accent); color:#fff; font-size:11.5px; padding:2px 9px; border-radius:20px}
+.toc-day ol{margin:0; padding-left:22px; font-size:13.8px}
+.toc-day ol li{margin:3px 0}
+
+/* 进度勾选 */
+.track{display:flex; flex-direction:column; gap:7px; margin:14px 0}
+.track label{display:flex; gap:10px; align-items:flex-start; padding:8px 12px; border:1px solid var(--border); border-radius:9px; background:var(--bg-soft); cursor:pointer; font-size:14px}
+.track input{margin-top:4px; accent-color:var(--accent); width:15px; height:15px; flex:0 0 auto}
+.track input:checked+span{text-decoration:line-through; color:var(--fg-dim)}
+
+/* 命令行模拟器 */
+.term{background:#0c1017; border:1px solid #1e2836; border-radius:var(--radius); margin:16px 0; overflow:hidden; font-family:"JetBrains Mono",Consolas,monospace}
+.term-bar{background:#141b26; padding:8px 13px; font-size:11.5px; color:#8b98a8; display:flex; gap:7px; align-items:center}
+.term-bar i{width:10px;height:10px;border-radius:50%;display:inline-block;background:#ff5f57}
+.term-bar i:nth-child(2){background:#febc2e}.term-bar i:nth-child(3){background:#28c840}
+.term-bar span{margin-left:8px}
+.term-body{padding:13px 16px; font-size:13px; line-height:1.75; color:#c8d3e0; overflow-x:auto; white-space:pre}
+.term-body .p{color:#4dd07a}
+.term-body .r{color:#e8e8e8}
+.term-body .c{color:#5d6b7d}
+.term-body .k{color:#ff8b8b}
+
+mark{background:color-mix(in srgb,var(--accent) 22%,transparent); color:inherit; border-radius:3px; padding:0 2px}
+.kbd{display:inline-block; padding:1px 7px; border:1px solid var(--border); border-bottom-width:2px; border-radius:5px; background:var(--bg-soft); font-size:12.5px; font-family:monospace}
+.hide{display:none !important}
+.anchor{scroll-margin-top:76px}
+.footer-note{margin-top:50px; padding-top:20px; border-top:1px solid var(--border); font-size:13px; color:var(--fg-dim)}
+
+/* 回到顶部 */
+#toTop{
+  position:fixed; right:24px; bottom:26px; width:42px; height:42px; border-radius:50%;
+  border:1px solid var(--border); background:var(--bg); color:var(--fg); cursor:pointer;
+  box-shadow:var(--shadow); font-size:17px; display:none; z-index:50;
+}
+#toTop.show{display:block}
+
+@media(max-width:1100px){
+  #content{padding:26px 26px 120px}
+}
+@media(max-width:860px){
+  #hamburger{display:inline-flex}
+  #sidebar{position:fixed; left:0; top:56px; z-index:55; transform:translateX(-102%); transition:transform .2s; box-shadow:var(--shadow)}
+  #sidebar.open{transform:translateX(0)}
+  #search{max-width:150px}
+  h1{font-size:25px} h2{font-size:20px}
+  #content{padding:20px 16px 110px}
+  #brand small{display:none}
+}
+@media print{
+  #topbar,#sidebar,#toTop,.copy-btn{display:none}
+  #content{max-width:none; padding:0}
+}
+</style>
+</head>
+<body>
+<div id="progress"></div>
+
+<header id="topbar">
+  <div id="brand"><span class="dot"></span>Redis 大师之路<small>5天速成 · 大厂深度</small></div>
+  <button class="btn" id="hamburger" title="目录">☰</button>
+  <input id="search" type="search" placeholder="搜索课程内容…（按 / 聚焦）" autocomplete="off">
+  <div class="top-actions">
+    <button class="btn" id="expandAll" title="展开/折叠所有面试题">展开问答</button>
+    <button class="btn" id="themeBtn" title="切换主题">🌙 深色</button>
+  </div>
+</header>
+
+<div id="layout">
+  <nav id="sidebar">
+    <div class="side-h">课程目录</div>
+    <!--NAV-->
+    <div class="side-h">外部权威参考</div>
+    <a class="nav-link" href="https://redis.io/docs/latest/" target="_blank" rel="noopener">Redis 官方文档 ↗</a>
+    <a class="nav-link" href="https://redis.io/docs/latest/commands/" target="_blank" rel="noopener">命令速查表 ↗</a>
+    <a class="nav-link" href="https://github.com/redis/redis/releases" target="_blank" rel="noopener">版本发布记录 ↗</a>
+    <a class="nav-link" href="https://redis.io/blog/" target="_blank" rel="noopener">Redis 官方博客 ↗</a>
+    <a class="nav-link" href="https://redis.ac.cn/docs/latest/" target="_blank" rel="noopener">Redis 中文文档 ↗</a>
+  </nav>
+
+  <main id="content">
+<!--CONTENT-->
+    <div class="footer-note">
+      <p><strong>关于本教程</strong>：全站为离线单文件 HTML，无需联网即可阅读（外部链接除外）。所有命令、配置、Java 代码均按可在本机或 Docker 中直接复现的标准编写，默认基于 <strong>Redis 8.6</strong>（2026-02 GA），兼容 7.x / 8.x。</p>
+      <p>内容按「5 天速成」编排：Day1 会用 → Day2 懂原理 → Day3 会架构 → Day4 会治问题 → Day5 会面试。每一节都有可执行案例，每章末尾都有面试深度问答与自测清单。</p>
+      <p style="margin-top:14px;color:var(--fg-dim)">建议学习方式：先照着做一遍（命令敲一遍），再回来看原理图，最后合上文档自述一遍——能讲出来才算掌握。</p>
+    </div>
+  </main>
+</div>
+
+<button id="toTop" title="回到顶部">↑</button>
+
+<script>
+(function(){
+  /* ---------- 主题 ---------- */
+  var root=document.documentElement, tb=document.getElementById('themeBtn');
+  var saved=null; try{saved=localStorage.getItem('redis-tut-theme')}catch(e){}
+  function applyTheme(t){
+    root.setAttribute('data-theme',t);
+    tb.textContent = t==='dark' ? '☀️ 浅色' : '🌙 深色';
+  }
+  applyTheme(saved||'light');
+  tb.addEventListener('click',function(){
+    var t = root.getAttribute('data-theme')==='dark' ? 'light':'dark';
+    applyTheme(t); try{localStorage.setItem('redis-tut-theme',t)}catch(e){}
+  });
+
+  /* ---------- 侧边栏：滚动高亮 ---------- */
+  var links=[].slice.call(document.querySelectorAll('.nav-link[data-target]'));
+  var secs=links.map(function(l){return document.getElementById(l.dataset.target)}).filter(Boolean);
+  function hl(){
+    var y=window.scrollY+120, cur=secs[0];
+    for(var i=0;i<secs.length;i++){ if(secs[i].offsetTop<=y) cur=secs[i]; }
+    links.forEach(function(l){ l.classList.toggle('active', l.dataset.target===cur.id); });
+    var p=document.getElementById('progress');
+    var h=document.body.scrollHeight-window.innerHeight;
+    p.style.width=(h>0?Math.min(100,window.scrollY/h*100):0)+'%';
+    document.getElementById('toTop').classList.toggle('show',window.scrollY>600);
+  }
+  window.addEventListener('scroll',hl,{passive:true});
+  window.addEventListener('resize',hl);
+  hl();
+
+  /* ---------- 移动端抽屉 ---------- */
+  var sb=document.getElementById('sidebar');
+  document.getElementById('hamburger').addEventListener('click',function(e){e.stopPropagation();sb.classList.toggle('open')});
+  sb.addEventListener('click',function(e){ if(e.target.classList.contains('nav-link')) sb.classList.remove('open'); });
+  document.addEventListener('click',function(e){
+    if(window.innerWidth<=860 && sb.classList.contains('open') && !sb.contains(e.target)) sb.classList.remove('open');
+  });
+
+  /* ---------- 代码复制 ---------- */
+  [].slice.call(document.querySelectorAll('#content pre')).forEach(function(pre){
+    var b=document.createElement('button'); b.className='copy-btn'; b.textContent='复制';
+    b.addEventListener('click',function(){
+      var t=pre.querySelector('code'); var txt=t?t.innerText:pre.innerText;
+      var done=function(){b.textContent='已复制 ✓'; setTimeout(function(){b.textContent='复制'},1400)};
+      if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(txt).then(done,function(){fb()}) } else { fb() }
+      function fb(){
+        var ta=document.createElement('textarea'); ta.value=txt; ta.style.position='fixed'; ta.style.opacity='0';
+        document.body.appendChild(ta); ta.select(); try{document.execCommand('copy')}catch(e){} document.body.removeChild(ta); done();
+      }
+    });
+    pre.appendChild(b);
+  });
+
+  /* ---------- 展开/折叠所有问答 ---------- */
+  var ea=document.getElementById('expandAll'), openAll=false;
+  ea.addEventListener('click',function(){
+    openAll=!openAll;
+    [].slice.call(document.querySelectorAll('details.qa')).forEach(function(d){d.open=openAll});
+    ea.textContent = openAll ? '折叠问答' : '展开问答';
+  });
+
+  /* ---------- 搜索过滤侧边栏 ---------- */
+  var sc=document.getElementById('search');
+  sc.addEventListener('input',function(){
+    var q=sc.value.trim().toLowerCase();
+    links.forEach(function(l){
+      var hit = !q || l.textContent.toLowerCase().indexOf(q)>=0;
+      l.classList.toggle('hide',!hit);
+    });
+  });
+  document.addEventListener('keydown',function(e){
+    if(e.key==='/' && document.activeElement!==sc && !/INPUT|TEXTAREA/.test(document.activeElement.tagName)){ e.preventDefault(); sc.focus(); }
+    if(e.key==='Escape' && document.activeElement===sc){ sc.value=''; sc.dispatchEvent(new Event('input')); sc.blur(); }
+  });
+
+  document.getElementById('toTop').addEventListener('click',function(){window.scrollTo({top:0,behavior:'smooth'})});
+
+  /* ---------- 学习进度勾选（localStorage） ---------- */
+  [].slice.call(document.querySelectorAll('.track input[type=checkbox]')).forEach(function(cb){
+    var id='redis-tut-'+cb.dataset.k;
+    try{ if(localStorage.getItem(id)==='1') cb.checked=true; }catch(e){}
+    cb.addEventListener('change',function(){ try{localStorage.setItem(id,cb.checked?'1':'0')}catch(e){} });
+  });
+})();
+</script>
+</body>
+</html>

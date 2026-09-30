@@ -1,0 +1,828 @@
+<section id="c15-tuning" class="anchor" data-title="Day5.2 · 性能调优与可观测性">
+<div class="ch-meta">
+  <span class="ch-num">Day 5 · 第 2 节</span>
+  <span class="badge bg-blue">预计 90 分钟</span>
+  <span class="badge bg-red">SRE / 运维视角</span>
+</div>
+<h1>Day5.2 · 性能调优与可观测性</h1>
+
+<div class="box b-tip">
+  <div class="box-t">一句话结论</div>
+  <p>调优的闭环是<strong>「度量 → 定位 → 优化 → 验证」</strong>。<strong>度量</strong>靠 <code class="inline">INFO</code> 全量指标 + <code class="inline">SLOWLOG</code> + <code class="inline">LATENCY</code> + <code class="inline">--latency</code>；<strong>定位</strong>靠命令级统计 + 大 key/热 key 分析；<strong>优化</strong>分三层——<strong>系统层（内核参数、网卡）→ 配置层（maxmemory、持久化、连接数）→ 应用层（命令、批量、Pipeline）</strong>；<strong>验证</strong>靠基准压测 + 灰度对比。</p>
+  <p>面试深水区：<strong>① 你能说出哪些 <code class="inline">INFO</code> 指标最关键、各自异常代表什么；② 内核参数该怎么调（THP、overcommit、somaxconn）；③ 慢查询怎么定位到具体的业务代码。</strong></p>
+</div>
+
+<h2 id="c15-1">1. INFO 全量指标解读（监控体系的基础）</h2>
+
+<div class="box b-big">
+  <div class="box-t">✅ INFO 的九大分类（每个都要知道看什么）</div>
+  <table style="margin:8px 0">
+  <thead><tr><th style="width:16%">分类</th><th>核心指标</th><th>异常信号与含义</th></tr></thead>
+  <tbody>
+  <tr>
+    <td><strong>Server</strong></td>
+    <td><code class="inline">redis_version</code>、<code class="inline">uptime_in_days</code>、<code class="inline">process_id</code></td>
+    <td>版本确认；uptime 突然变小说明<strong>重启过</strong>（要查为什么）</td>
+  </tr>
+  <tr>
+    <td><strong>Clients</strong></td>
+    <td><code class="inline">connected_clients</code>、<code class="inline">blocked_clients</code>、<code class="inline">maxclients</code></td>
+    <td><code class="inline">connected_clients</code> 接近 maxclients → <strong>连接打满</strong>；<code class="inline">blocked_clients</code> 持续高 → 有大量阻塞命令（BLPOP）</td>
+  </tr>
+  <tr>
+    <td><strong>Memory</strong></td>
+    <td><code class="inline">used_memory</code>、<code class="inline">used_memory_rss</code>、<code class="inline">mem_fragmentation_ratio</code>、<code class="inline">maxmemory</code>、<code class="inline">maxmemory_policy</code></td>
+    <td><strong>ratio &gt; 1.5</strong> 碎片严重；<strong>ratio &lt; 1</strong> 内存被 swap（延迟飙升！）；<code class="inline">used_memory</code> 持续接近 <code class="inline">maxmemory</code> → 频繁淘汰</td>
+  </tr>
+  <tr>
+    <td><strong>Persistence</strong></td>
+    <td><code class="inline">rdb_last_bgsave_status</code>、<code class="inline">rdb_last_fork_usec</code>、<code class="inline">aof_last_write_status</code>、<code class="inline">aof_rewrite_in_progress</code>、<code class="inline">rdb_changes_since_last_save</code></td>
+    <td><strong>fork_usec 突增</strong> → fork 阻塞变长（大内存 + THP）；<code class="inline">bgsave_status:err</code> → 持久化失败（可能是磁盘满）</td>
+  </tr>
+  <tr>
+    <td><strong>Stats</strong></td>
+    <td><code class="inline">total_connections_received</code>、<code class="inline">total_commands_processed</code>、<code class="inline">instantaneous_ops_per_sec</code>、<code class="inline">expired_keys</code>、<code class="inline">evicted_keys</code>、<code class="inline">keyspace_hits</code>、<code class="inline">keyspace_misses</code>、<code class="inline">rejected_connections</code></td>
+    <td><strong>命中率 = hits/(hits+misses)</strong>，&lt; 90% 要警惕；<code class="inline">evicted_keys</code> 快速增长 → 内存不足在淘汰；<code class="inline">rejected_connections</code> &gt; 0 → <strong>连接被拒（超 maxclients）</strong></td>
+  </tr>
+  <tr>
+    <td><strong>Replication</strong></td>
+    <td><code class="inline">role</code>、<code class="inline">master_link_status</code>、<code class="inline">master_repl_offset</code>、<code class="inline">slave_repl_offset</code>、<code class="inline">slave_read_only</code></td>
+    <td><strong>复制延迟 = master_offset − slave_offset</strong>；<code class="inline">master_link_status:down</code> → 主从断连（严重）</td>
+  </tr>
+  <tr>
+    <td><strong>CPU</strong></td>
+    <td><code class="inline">used_cpu_sys</code>、<code class="inline">used_cpu_user</code>、<code class="inline">used_cpu_sys_children</code></td>
+    <td>把「主进程 CPU」和「子进程 CPU（fork 的）」分开看；子进程 CPU 高说明在做 RDB/AOF</td>
+  </tr>
+  <tr>
+    <td><strong>Cluster</strong></td>
+    <td><code class="inline">cluster_enabled</code>、<code class="inline">cluster_state</code></td>
+    <td><code class="inline">cluster_state:fail</code> → <strong>集群不可用</strong></td>
+  </tr>
+  <tr>
+    <td><strong>Keyspace</strong></td>
+    <td><code class="inline">db0:keys=xxx,expires=xxx,avg_ttl=xxx</code></td>
+    <td>看每个 db 的 key 数和「设了过期时间的 key 占比」；<strong>avg_ttl 为 0 或极大都需注意</strong></td>
+  </tr>
+  </tbody>
+  </table>
+</div>
+
+<pre><code class="lang-bash"><span class="cm">########## 单次获取全部 INFO ##########</span>
+redis-cli INFO
+
+<span class="cm">########## 只取某一分类（减少输出）##########</span>
+redis-cli INFO memory
+redis-cli INFO stats
+redis-cli INFO replication
+
+<span class="cm">########## 只取某个字段 ##########</span>
+redis-cli INFO memory | grep used_memory_human
+redis-cli INFO stats | grep keyspace
+
+<span class="cm">########## ⭐ 计算缓存命中率 ##########</span>
+<span class="cm"># 命中率 = keyspace_hits / (keyspace_hits + keyspace_misses)</span>
+redis-cli INFO stats | awk -F: '
+  /keyspace_hits/   { hits=$2 }
+  /keyspace_misses/ { misses=$2 }
+  END {
+    total = hits + misses;
+    if (total &gt; 0)
+      printf "命中率 = %.2f%% (hits=%d, misses=%d)\n", hits*100/total, hits, misses
+  }'
+
+<span class="cm">########## ⭐ 计算主从复制延迟（字节）##########</span>
+<span class="cm"># 在主节点：</span>
+master_offset=$(redis-cli -h MASTER INFO replication | grep master_repl_offset | cut -d: -f2 | tr -d '\r')
+<span class="cm"># 在从节点：</span>
+slave_offset=$(redis-cli -h SLAVE INFO replication | grep slave_repl_offset | cut -d: -f2 | tr -d '\r')
+echo "复制延迟 = $((master_offset - slave_offset)) 字节"
+
+<span class="cm">########## 监控上看什么（每秒采样）##########</span>
+<span class="cm"># instantaneous_ops_per_sec   → 当前 QPS</span>
+<span class="cm"># instantaneous_input_kbps    → 入向流量</span>
+<span class="cm"># instantaneous_output_kbps   → 出向流量 ⭐ 突增常是大 key 造成</span>
+<span class="cm"># keyspace_hits/misses 的增量 → 实时命中率</span>
+<span class="cm"># evicted_keys 的增量          → 淘汰速率</span></code></pre>
+
+<div class="box b-warn">
+  <div class="box-t">⚠️ 六个「一眼看出问题」的指标（背下来）</div>
+  <ol style="margin-bottom:0">
+  <li><strong><code class="inline">mem_fragmentation_ratio &lt; 1</code></strong> → 部分内存被 swap 到磁盘。<strong>延迟会飙到几十毫秒以上，是最危险的信号之一。</strong>原因：物理内存不足。<strong>必须立刻扩容。</strong></li>
+  <li><strong><code class="inline">evicted_keys</code> 持续增长</strong> → 内存不足，在不断淘汰 key。<strong>意味着缓存命中率会持续下降，业务性能退化。</strong></li>
+  <li><strong><code class="inline">rejected_connections &gt; 0</code></strong> → 有连接被拒绝（超过 <code class="inline">maxclients</code>）。<strong>客户端已经在报错了。</strong></li>
+  <li><strong><code class="inline">blocked_clients &gt; 0</code> 持续</strong> → 有阻塞命令（BLPOP/BRPOP/WAIT）在等待。如果业务没用这些命令，说明有异常代码。</li>
+  <li><strong><code class="inline">rdb_last_fork_usec</code> 突增</strong> → fork 耗时变长。<strong>直接原因是实例内存大 + 开启了 THP。</strong>fork 期间会阻塞主线程。</li>
+  <li><strong><code class="inline">keyspace_hits/misses</code> 推导的命中率跌破 90%</strong> → 要么 key 被大量淘汰/过期，要么 key 设计有问题（大量一次性查询）。</li>
+  </ol>
+</div>
+
+<h2 id="c15-2">2. 慢查询：SLOWLOG 与延迟监控</h2>
+
+<div class="box b-big">
+  <div class="box-t">✅ SLOWLOG 配置与使用</div>
+  <pre style="margin:8px 0"><code class="lang-bash"><span class="cm"># 两个参数控制慢日志</span>
+<span class="kw">slowlog-log-slower-than</span> <span class="nu">10000</span>    <span class="cm"># 超过 10000 微秒（=10ms）的命令记录为慢查询</span>
+<span class="kw">slowlog-max-len</span> <span class="nu">512</span>             <span class="cm"># 慢日志队列长度（超出后旧记录被挤出）</span>
+
+<span class="cm"># 动态修改（不用重启）</span>
+CONFIG SET slowlog-log-slower-than 10000
+CONFIG SET slowlog-max-len 1024
+
+<span class="cm"># ⭐ 实践建议：</span>
+<span class="cm">#   生产建议设为 10000（10ms）——因为 Redis 正常命令都在 1ms 内，10ms 已经是明显的异常</span>
+<span class="cm">#   如果发现慢日志刷屏，说明有问题命令，先治理再调阈值</span>
+<span class="cm">#   如果把阈值设为 0，会记录所有命令 → 性能影响大，禁止生产使用</span>
+
+<span class="cm">########## 查看慢日志 ##########</span>
+SLOWLOG GET 10        <span class="cm"># 取最近 10 条</span>
+SLOWLOG LEN           <span class="cm"># 慢日志总数</span>
+SLOWLOG RESET         <span class="cm"># 清空（治理后重置，便于观察是否还有新的）</span>
+
+<span class="cm"># 输出格式（每条的字段）：
+#  1) (integer) 14                 ← 日志 ID
+#  2) (integer) 1759161600         ← 时间戳（Unix）
+#  3) (integer) 25000              ← 执行耗时（微秒，这里是 25ms）
+#  4) 1) "HGETALL"                 ← 命令及参数
+#     2) "product:detail:1001"
+#  5) "10.0.0.5:54321"             ← 客户端地址
+#  6) "app-worker-3"               ← 客户端名称（如果设置了 CLIENT SETNAME）</span></code></pre>
+  <p><strong>⭐ 关键实践：给客户端设置名字</strong></p>
+  <pre style="margin:8px 0"><code class="lang-java"><span class="cm">// Java 客户端设置连接名，这样慢日志里能看出是哪个应用/线程做的</span>
+<span class="cm">// 用 Lettuce 的 ClientOptions：</span>
+ClientOptions.builder()
+    .clientName(<span class="st">"order-service-worker-3"</span>)
+    .build();
+
+<span class="cm">// 或直接发命令（每个连接只需执行一次）</span>
+<span class="cm">// CLIENT SETNAME order-service-worker-3</span></code></pre>
+  <p><strong>为什么这很重要</strong>：慢日志里能看到「哪条命令慢」，但<strong>不知道是哪个应用发出来的</strong>。设置了 client name 后，就能直接定位到具体的应用和实例——<strong>这是从「发现问题」到「找到责任方」的关键一步</strong>。</p>
+</div>
+
+<div class="box b-x">
+  <div class="box-t">🚨 SLOWLOG 的三个重要认知</div>
+  <ol style="margin-bottom:0">
+  <li><strong>SLOWLOG 只记录「命令执行时间」，不含网络传输时间</strong>。<br>
+  所以一个「查询大 key 但网络慢」的操作，可能 SLOWLOG 里只显示 5ms，但客户端感受到 200ms。<strong>要区分「Redis 侧慢」和「网络侧慢」，需要对比客户端的埋点和 SLOWLOG。</strong></li>
+  <li><strong>SLOWLOG 记录的是「命令执行完」之后写入的</strong>。<br>
+  如果命令执行时间极长（比如 5 秒的 <code class="inline">KEYS</code>），它会在执行完才写入慢日志。<strong>所以它不能用来「实时发现」正在阻塞的命令。</strong>发现正在阻塞的要用 <code class="inline">CLIENT LIST</code> 看 <code class="inline">cmd</code> 字段。</li>
+  <li><strong>慢日志是采样性的、有容量上限的</strong>。<br>
+  <code class="inline">slowlog-max-len</code> 满了以后旧记录被挤出。<strong>所以如果慢日志持续刷屏，可能会丢失更早的关键记录——应该加大 max-len 或用外部工具持续采集入库。</strong></li>
+  </ol>
+</div>
+
+<pre><code class="lang-bash"><span class="cm">########## 定位「正在阻塞」的命令（SLOWLOG 做不到的）##########</span>
+CLIENT LIST
+<span class="cm"># 输出字段（部分）：
+#   id=123 addr=10.0.0.5:54321 name=order-service-3 age=3600 idle=0
+#   flags=N db=0 sub=0 psub=0 ssub=0 multi=-1 qbuf=0 qbuf-free=20448
+#   argv-mem=0 multi-mem=0 rbs=1024 rbp=0 obl=0 oll=0 omem=0 tot-mem=20520
+#   events=r cmd=hgetall user=default redir=-1 resp=2</span>
+
+<span class="cm"># ⭐ 关注这几个字段：
+#   cmd        当前正在执行的命令（如果长时间不变 → 就是在执行这个慢命令）
+#   age        连接存活时间
+#   idle       连接空闲时间（很大说明连接没在用）
+#   omem       output buffer 内存 ⭐ 很大说明有个"消费不过来的客户端"</span>
+
+<span class="cm"># 找出所有正在执行"危险命令"的客户端</span>
+CLIENT LIST | grep -E "cmd=(keys|hgetall|smembers|flushall|sort)"
+
+<span class="cm"># 找出 output buffer 异常的客户端（可能是被推送打爆的订阅者）</span>
+redis-cli CLIENT LIST | awk '{for(i=1;i&lt;=NF;i++){if($i ~ /^omem=/){split($i,a,"=");if(a[2]&gt;10485760) print}}}'
+
+<span class="cm">########## 延迟监控（LATENCY）##########</span>
+<span class="cm"># Redis 的延迟监控子系统：记录"耗时超过阈值的事件"</span>
+CONFIG SET latency-monitor-threshold 100    <span class="cm"># 超过 100ms 的事件记录下来</span>
+
+LATENCY LATEST      <span class="cm"># 查看最近的事件（每个事件类型只保留最后一次）</span>
+<span class="cm"># 输出：event-name, timestamp, latest-latency, max-latency</span>
+<span class="cm"># 常见事件类型：
+#   command    — 命令处理耗时
+#   fork       — fork 子进程耗时 ⭐
+#   expire-cycle      — 过期删除循环
+#   eviction-cycle    — 内存淘汰循环
+#   aof-write         — AOF 写入
+#   aof-fsync-always  — AOF always 策略的 fsync</span>
+
+LATENCY HISTORY fork      <span class="cm"># 查看 fork 事件的历史（趋势）</span>
+LATENCY RESET             <span class="cm"># 清空</span>
+
+<span class="cm"># ⭐ fork 事件如果频繁超过 100ms，说明 fork 阻塞严重</span>
+<span class="cm">#    原因通常是：实例内存大（fork 要复制页表）+ 开启 THP</span>
+<span class="cm">#    解法：控制单实例内存（≤10-16GB）+ 关闭 THP</span></code></pre>
+
+<div class="box b-big">
+  <div class="box-t">✅ 客户端侧延迟测量：redis-cli --latency（区分「Redis 慢」和「网络慢」）</div>
+  <pre style="margin:8px 0"><code class="lang-bash"><span class="cm">########## 1. --latency：持续测量 PING 的延迟 ##########</span>
+redis-cli -h 10.0.0.5 --latency
+<span class="cm"># 输出：min: 0, max: 1, avg: 0.15 (1234 samples)
+# 这个值包含"网络 RTT + Redis 处理 PING 的时间"
+# Redis 处理 PING 极快（微秒级），所以这个值基本 = 网络 RTT</span>
+
+<span class="cm">########## 2. --latency-history：按时间窗口展示延迟变化趋势 ⭐ ##########</span>
+redis-cli -h 10.0.0.5 --latency-history -i 5
+<span class="cm"># 每 5 秒输出一个统计窗口，观察延迟是否随时间波动
+# 能看出"周期性抖动"（如果有，可能是定时任务/持久化导致）</span>
+
+<span class="cm">########## 3. --latency-dist：延迟分布直方图 ⭐⭐ 最有用 ##########</span>
+redis-cli -h 10.0.0.5 --latency-dist
+<span class="cm"># 用色块展示延迟分布，能直观看出"长尾"
+# 如果 P99 很高但均值正常，说明有偶发的长尾延迟
+# 长尾的常见原因：fork、慢命令、网络抖动、CPU 争抢</span>
+
+<span class="cm">########## 4. --intrinsic-latency：测量"宿主环境本身"的延迟基线 ⭐⭐⭐ ##########</span>
+redis-cli --intrinsic-latency 100
+<span class="cm"># 让 Redis 忙等 100 秒，测量"不做事时"的调度延迟
+# 这是【判断宿主机是否适合跑 Redis 的关键依据】
+#
+# 输出示例：
+# Max latency so far: 1 microseconds
+# Max latency so far: 8 microseconds
+# Max latency so far: 127 microseconds      ← 超过 100 微秒就要注意了
+# ...
+# 15324 total runs (avg latency: 6.5 microseconds / 6527.94 nanoseconds per run)
+# Worst run took 19x longer than the average latency.
+#
+# ⭐ 判断标准（antirez 的建议）：
+#   max latency &lt; 100 微秒  → 环境优良
+#   max latency &gt; 1 毫秒    → 环境有问题（虚拟化/CPU 争抢/超卖）
+#   这种情况再怎么调 Redis 都没用，要换机器</span></code></pre>
+  <p><strong>这四个命令的区别（面试可能问）</strong>：</p>
+  <table style="margin:8px 0">
+  <thead><tr><th style="width:24%">命令</th><th>测什么</th><th>用途</th></tr></thead>
+  <tbody>
+  <tr><td><code class="inline">--latency</code></td><td>网络 RTT + Redis 处理 PING</td><td>快速判断「网络 vs Redis」</td></tr>
+  <tr><td><code class="inline">--latency-history</code></td><td>延迟随时间的趋势</td><td>发现周期性抖动</td></tr>
+  <tr><td><code class="inline">--latency-dist</code></td><td>延迟分布（含长尾）</td><td>看 P99/P999，发现长尾问题</td></tr>
+  <tr><td><code class="inline">--intrinsic-latency</code></td><td><strong>宿主环境本身的调度延迟</strong></td><td><strong>判断机器是否适合跑 Redis</strong></td></tr>
+  </tbody>
+  </table>
+</div>
+
+<h2 id="c15-3">3. 基准压测：redis-benchmark</h2>
+
+<pre><code class="lang-bash"><span class="cm">########## 基础压测 ##########</span>
+<span class="cm"># 默认：50 个客户端，10 万请求，测试常见命令</span>
+redis-benchmark -h 127.0.0.1 -p 6379 -n 100000 -c 50
+
+<span class="cm"># 常用参数</span>
+redis-benchmark \
+  -h 127.0.0.1 \
+  -p 6379 \
+  -a <span class="st">"password"</span> \        <span class="cm"># 密码</span>
+  -n 1000000 \             <span class="cm"># 总请求数</span>
+  -c 100 \                 <span class="cm"># 并发客户端数</span>
+  -P 16 \                  <span class="cm"># ⭐ Pipeline 深度（每批 16 条命令）——最能反映真实吞吐</span>
+  -d 100 \                 <span class="cm"># value 大小（字节）</span>
+  -t set,get,incr,lpush,hset \  <span class="cm"># 只测指定命令</span>
+  -r 100000 \              <span class="cm"># 随机 key 空间</span>
+  -q                       <span class="cm"># 简洁输出</span>
+
+<span class="cm">########## 只测特定命令（更真实）##########</span>
+redis-benchmark -n 1000000 -c 100 -P 16 -t get,set -d 128 -q
+<span class="cm"># 输出：
+# SET: 158730.16 requests per second, p50=0.479 msec
+# GET: 166666.67 requests per second, p50=0.455 msec</span>
+
+<span class="cm">########## 自定义命令压测（限流脚本等）##########</span>
+redis-benchmark -n 100000 -c 50 \
+  eval <span class="st">"return redis.call('GET', KEYS[1])"</span> 1 mykey
+
+<span class="cm">########## ⭐ 关键理解：-P 参数为什么重要 ##########</span>
+<span class="cm"># 不加 -P（Pipeline）：每次请求都是"发命令 → 等响应"，吞吐受 RTT 限制</span>
+<span class="cm">#   → 在 0.1ms RTT 下，单连接理论 QPS ≈ 10000</span>
+<span class="cm"># 加 -P 16：一次发 16 条命令，吞吐能提升 5-10 倍</span>
+<span class="cm">#   → 这才是 Redis 真实的能力上限</span>
+<span class="cm"># ⭐ 所以"Redis 单机 10 万 QPS"这个说法，是指"有 Pipeline 或高并发连接"的情况</span>
+
+<span class="cm">########## 完整压测示例（大厂标准）##########</span>
+<span class="cm"># 场景一：模拟真实业务（读写混合、有 Pipeline）</span>
+redis-benchmark -h redis-host -p 6379 -a $PWD \
+  -n 5000000 -c 200 -P 32 -d 256 -q \
+  -t set,get,incr,hset,hget,lpush,lpop,sadd,zadd
+
+<span class="cm"># 场景二：纯写入（测持久化影响）</span>
+redis-benchmark -n 5000000 -c 100 -P 16 -t set -d 1024 -q
+
+<span class="cm"># 场景三：只读（测纯读能力）</span>
+<span class="cm"># 先灌数据：</span>
+redis-benchmark -n 1000000 -c 50 -t set -r 1000000 -q
+<span class="cm"># 再压读：</span>
+redis-benchmark -n 5000000 -c 200 -P 32 -t get -r 1000000 -q</code></pre>
+
+<div class="box b-warn">
+  <div class="box-t">⚠️ 压测的四个注意事项（否则结果无意义）</div>
+  <ol style="margin-bottom:0">
+  <li><strong>必须在独立的机器上压测</strong>：如果 benchmark 和 Redis 在同一台机器上，两者会争抢 CPU，结果严重失真。<strong>而且压测机本身也可能成为瓶颈。</strong></li>
+  <li><strong>压测前要清理环境</strong>：<br>
+  · <code class="inline">FLUSHALL</code> 清空数据（否则测的是「已有大量数据」的状态，可能触发淘汰）<br>
+  · 确认没有其他业务在跑<br>
+  · 关闭或记录持久化状态（RDB/AOF 会显著影响写性能）</li>
+  <li><strong>压测机本身也不能是瓶颈</strong>：压测机要够强（CPU 核数、网卡带宽），否则压不出 Redis 的上限。<strong>建议用多台压测机。</strong></li>
+  <li><strong>要监控压测期间的服务端指标</strong>：CPU、内存、网络、<code class="inline">SLOWLOG</code>、<code class="inline">LATENCY</code>。<strong>只知道 QPS 数字没有意义——必须知道「在这个 QPS 下，延迟是多少、资源用了多少」。</strong></li>
+  </ol>
+</div>
+
+<div class="box b-tip">
+  <div class="box-t">💡 面试话术：怎么评估一套 Redis 实例的能力</div>
+  <p>「我会做三件事：</p>
+  <ol style="margin-bottom:0">
+  <li><strong>测基线</strong>：<code class="inline">redis-benchmark -P 16/32</code> 测出这台实例在「理想情况」下的吞吐上限，作为参考。</li>
+  <li><strong>测业务场景</strong>：用真实的 key 大小、读写比例、Pipeline 深度去压。<strong>因为 Redis 的性能高度依赖于「命令类型」和「value 大小」——一个 10KB 的 GET 和一个 100B 的 GET，吞吐差几十倍。</strong></li>
+  <li><strong>测容量拐点</strong>：逐步加压，找到「延迟开始非线性上升」的拐点。<strong>那个拐点的 70% 才是安全的运行水位。</strong>因为 Redis 是单线程，一旦 CPU 接近饱和，延迟会急剧劣化（没有「慢慢变慢」的缓冲）。</li>
+  </ol>
+  <p>另外我会跑 <code class="inline">--intrinsic-latency</code> 确认宿主机环境本身没问题——如果宿主机的调度延迟就有问题，那压测结果再好也没有意义。」</p>
+</div>
+
+<h2 id="c15-4">4. 系统层调优（内核参数）</h2>
+
+<div class="box b-big">
+  <div class="box-t">✅ 必须调整的 Linux 内核参数</div>
+  <pre style="margin:8px 0"><code class="lang-bash"><span class="cm">########## 1. 禁用透明大页（THP）—— 最重要的一条 ⭐⭐⭐ ##########</span>
+<span class="cm"># 查看当前状态</span>
+cat /sys/kernel/mm/transparent_hugepage/enabled
+<span class="cm"># [always] madvise never     ← 方括号表示当前值，如果在 always 就是问题！</span>
+
+<span class="cm"># 临时关闭</span>
+echo never &gt; /sys/kernel/mm/transparent_hugepage/enabled
+
+<span class="cm"># 永久关闭（加到 /etc/rc.local 或 systemd 服务）</span>
+<span class="cm"># 在 /etc/rc.local 里加：</span>
+echo never &gt; /sys/kernel/mm/transparent_hugepage/enabled
+echo never &gt; /sys/kernel/mm/transparent_hugepage/defrag
+
+<span class="cm"># ⭐ 为什么必须关（面试必答）：</span>
+<span class="cm">#  ① Redis 做 RDB/AOF 时会 fork 子进程，用的是 COW（写时复制）</span>
+<span class="cm">#  ② COW 的复制单位是【内存页】。普通页 4KB，THP 页是 2MB</span>
+<span class="cm">#  ③ 使用 THP 时，只要父进程改了 2MB 页里的任意一个字节，</span>
+<span class="cm">#     整个 2MB 页都要复制！</span>
+<span class="cm">#  ④ 结果：COW 复制的内存量可能暴增几十倍（进而触发 OOM 或严重阻塞）</span>
+<span class="cm">#  ⑤ 另外 THP 做页的合并/拆分本身也有延迟，会造成不可预测的停顿</span>
+<span class="cm">#  → 所以官方强烈建议关闭 THP</span>
+
+<span class="cm">########## 2. 内存 overcommit（允许 fork 时超量分配）##########</span>
+<span class="cm"># 查看</span>
+cat /proc/sys/vm/overcommit_memory
+<span class="cm"># 0 = 启发式（默认，可能拒绝 fork）</span>
+<span class="cm"># 1 = 总是允许超量分配 ⭐ 推荐</span>
+<span class="cm"># 2 = 严格模式（禁止超量）</span>
+
+<span class="cm"># 临时设置</span>
+echo 1 &gt; /proc/sys/vm/overcommit_memory
+<span class="cm"># 永久（/etc/sysctl.conf）</span>
+<span class="cm">vm.overcommit_memory = 1</span>
+
+<span class="cm"># ⭐ 为什么：fork 时子进程虽然共享父进程内存（COW），但内核需要</span>
+<span class="cm">#    分配页表等结构。如果 overcommit_memory=0 且内存紧张，</span>
+<span class="cm">#    fork 会被拒绝 → RDB/BGSAVE 失败 → 无法持久化</span>
+
+<span class="cm">########## 3. 网络相关参数 ##########</span>
+<span class="cm"># 全连接队列大小（提高高并发下的建连成功率）</span>
+<span class="kw">net.core.somaxconn</span> = <span class="nu">65535</span>              <span class="cm"># 默认 128，高并发下不够</span>
+<span class="cm"># Redis 的 tcp-backlog 配置要 &lt;= 这个值</span>
+
+<span class="cm"># 半连接队列</span>
+<span class="kw">net.ipv4.tcp_max_syn_backlog</span> = <span class="nu">65535</span>
+
+<span class="cm"># TCP 连接复用（TIME_WAIT 快速回收要慎用，可能影响 NAT 环境）</span>
+<span class="kw">net.ipv4.tcp_tw_reuse</span> = <span class="nu">1</span>             <span class="cm"># 允许复用 TIME_WAIT 的连接</span>
+<span class="cm"># net.ipv4.tcp_tw_recycle = 1</span>        <span class="cm"># ⚠️ NAT 环境禁用（4.12+ 内核已移除）</span>
+
+<span class="cm"># 文件描述符上限 ⭐ 必调</span>
+<span class="kw">fs.file-max</span> = <span class="nu">1000000</span>
+<span class="cm"># 进程级 limit（Redis maxclients 受此限制）</span>
+<span class="cm"># /etc/security/limits.conf：</span>
+redis soft nofile 65535
+redis hard nofile 65535
+
+<span class="cm">########## 4. 应用持久化配置（/etc/sysctl.conf 汇总）##########</span>
+<span class="kw">vm.overcommit_memory</span> = <span class="nu">1</span>
+<span class="kw">vm.swappiness</span> = <span class="nu">1</span>                    <span class="cm"># ⭐ 尽量不用 swap（默认 60 太激进）</span>
+<span class="kw">net.core.somaxconn</span> = <span class="nu">65535</span>
+<span class="kw">net.ipv4.tcp_max_syn_backlog</span> = <span class="nu">65535</span>
+<span class="kw">net.ipv4.tcp_tw_reuse</span> = <span class="nu">1</span>
+<span class="kw">fs.file-max</span> = <span class="nu">1000000</span>
+
+<span class="cm"># 应用</span>
+sysctl -p</code></pre>
+</div>
+
+<div class="box b-x">
+  <div class="box-t">🚨 关于 swap（交换分区）：为什么必须避免</div>
+  <p><strong>问题</strong>：Redis 是内存数据库，对延迟极其敏感。如果物理内存不足，操作系统会把部分内存页<strong>换出到磁盘（swap）</strong>。当 Redis 访问到这些被换出的页时，需要<strong>从磁盘读回来</strong>——磁盘延迟是内存的<strong>十万倍</strong>（微秒级 vs 毫秒级）。</p>
+  <p><strong>后果</strong>：延迟从 0.1ms 飙到几十毫秒，甚至秒级。<strong><code class="inline">mem_fragmentation_ratio &lt; 1</code> 就是这个信号——used_memory（Redis 自己算的）大于 RSS（操作系统给的物理内存），说明有一部分被 swap 出去了。</strong></p>
+  <p><strong>正确做法</strong>：</p>
+  <ul style="margin-bottom:0">
+  <li><strong><code class="inline">vm.swappiness = 1</code></strong>（不是 0）：设成 1 而不是 0，是为了保留「极端情况下的最后一道防线」（0 会导致 OOM Killer 直接杀进程，1 允许极端时少量 swap）。<strong>但这只是缓解——根本解法是保证物理内存充足。</strong></li>
+  <li><strong>监控 <code class="inline">mem_fragmentation_ratio</code></strong>：低于 1 立刻告警。</li>
+  <li><strong>预留内存</strong>：实例内存不要超过物理内存的 70%-80%（给 fork 的 COW 和系统留空间）。</li>
+  <li><strong>容器环境注意</strong>：如果 Redis 在容器里，要确认容器的内存 limit 设置合理，避免被 cgroup OOM Kill。</li>
+  </ul>
+</div>
+
+<h2 id="c15-5">5. Redis 配置层调优</h2>
+
+<pre><code class="lang-bash"><span class="cm">########## redis.conf 生产配置清单（关键项）##########</span>
+
+<span class="cm"># ========== 网络与连接 ==========</span>
+<span class="kw">bind</span> 0.0.0.0                       <span class="cm"># 或指定内网 IP（不要暴露公网！）</span>
+<span class="kw">protected-mode</span> <span class="st">yes</span>               <span class="cm"># ✅ 必开（无密码时拒绝外部连接）</span>
+<span class="kw">port</span> <span class="nu">6379</span>
+<span class="kw">tcp-backlog</span> <span class="nu">511</span>                  <span class="cm"># 要 ≤ net.core.somaxconn</span>
+<span class="kw">timeout</span> <span class="nu">300</span>                      <span class="cm"># 空闲连接多久后关闭（0 = 不关）</span>
+<span class="kw">tcp-keepalive</span> <span class="nu">300</span>                <span class="cm"># TCP 保活探测周期</span>
+<span class="kw">maxclients</span> <span class="nu">10000</span>                 <span class="cm"># 最大客户端数（受 OS ulimit -n 限制）</span>
+
+<span class="cm"># ========== 内存 ==========</span>
+<span class="kw">maxmemory</span> <span class="nu">12gb</span>                   <span class="cm"># ⭐ 必须设置！否则内存无限增长直到 OOM</span>
+<span class="cm">#   建议：物理内存的 60%-75%（给 fork COW 和系统留空间）</span>
+<span class="kw">maxmemory-policy</span> <span class="st">allkeys-lru</span>     <span class="cm"># 淘汰策略（见 Day2.3）</span>
+<span class="cm">#   noeviction     — 不淘汰，写入报错（适合当"数据库"用）</span>
+<span class="cm">#   allkeys-lru    — 所有 key 参与 LRU 淘汰（最常见）</span>
+<span class="cm">#   volatile-lru   — 只淘汰设了过期时间的 key</span>
+<span class="cm">#   allkeys-lfu    — 按访问频率淘汰（8.x 还有 allkeys-lrm）</span>
+<span class="kw">maxmemory-samples</span> <span class="nu">5</span>             <span class="cm"># LRU 采样数（越大越精确，CPU 开销越大）</span>
+
+<span class="cm"># ========== 持久化 ==========</span>
+<span class="kw">save</span> <span class="nu">900</span> <span class="nu">1</span>                      <span class="cm"># 900 秒内至少 1 次修改则触发 RDB</span>
+<span class="kw">save</span> <span class="nu">300</span> <span class="nu">10</span>
+<span class="kw">save</span> <span class="nu">60</span> <span class="nu">10000</span>
+<span class="cm"># save ""                       # ⭐ 纯缓存场景可以关闭 RDB</span>
+
+<span class="kw">appendonly</span> <span class="st">yes</span>                  <span class="cm"># 开启 AOF</span>
+<span class="kw">appendfsync</span> <span class="st">everysec</span>           <span class="cm"># 每秒 fsync（性能与安全的平衡，推荐）</span>
+<span class="cm">#   always   — 每条命令都 fsync（最安全，性能最差，QPS 降 10 倍以上）</span>
+<span class="cm">#   everysec — 每秒一次（最多丢 1 秒数据，推荐）</span>
+<span class="cm">#   no       — 交给 OS（可能丢 30 秒，不推荐）</span>
+
+<span class="kw">no-appendfsync-on-rewrite</span> <span class="st">no</span>     <span class="cm"># AOF rewrite 期间是否暂停 fsync</span>
+<span class="cm">#   yes — rewrite 时不 fsync（性能好，但可能丢更多数据）</span>
+<span class="kw">auto-aof-rewrite-percentage</span> <span class="nu">100</span>  <span class="cm"># AOF 文件增长 100% 时触发 rewrite</span>
+<span class="kw">auto-aof-rewrite-min-size</span> <span class="nu">64mb</span>    <span class="cm"># 且文件至少 64MB</span>
+
+<span class="kw">aof-use-rdb-preamble</span> <span class="st">yes</span>         <span class="cm"># ⭐ 混合持久化（7.0 前是默认关的，要显式开）</span>
+<span class="cm">#   rewrite 后的 AOF 前半部分是 RDB 格式（加载快），后半是增量命令</span>
+
+<span class="kw">rdbcompression</span> <span class="st">yes</span>              <span class="cm"># RDB 压缩（CPU 换空间）</span>
+<span class="kw">rdbchecksum</span> <span class="st">yes</span>                 <span class="cm"># RDB 校验和（能发现文件损坏）</span>
+<span class="kw">repl-diskless-sync</span> <span class="st">yes</span>          <span class="cm"># 无盘复制（不落盘直接通过网络传给从节点）</span>
+<span class="kw">repl-diskless-sync-delay</span> <span class="nu">5</span>      <span class="cm"># 等待多个从节点一起同步</span>
+
+<span class="cm"># ========== 安全 ==========</span>
+<span class="kw">requirepass</span> <span class="st">"强密码"</span>              <span class="cm"># ⭐ 必须设密码</span>
+<span class="kw">rename-command</span> <span class="st">FLUSHALL</span> <span class="st">""</span>       <span class="cm"># 禁用危险命令（改名成空 = 禁用）</span>
+<span class="kw">rename-command</span> <span class="st">FLUSHDB</span> <span class="st">""</span>
+<span class="kw">rename-command</span> <span class="st">KEYS</span> <span class="st">""</span>            <span class="cm"># ⭐ 直接禁用 KEYS（防止误用）</span>
+<span class="kw">rename-command</span> <span class="st">CONFIG</span> <span class="st">"CONFIG_BIZ"</span>  <span class="cm"># 改名而非禁用（运维还需要用）</span>
+
+<span class="cm"># ========== 慢查询与延迟 ==========</span>
+<span class="kw">slowlog-log-slower-than</span> <span class="nu">10000</span>   <span class="cm"># 10ms</span>
+<span class="kw">slowlog-max-len</span> <span class="nu">1024</span>
+<span class="kw">latency-monitor-threshold</span> <span class="nu">100</span>  <span class="cm"># 100ms 以上的事件记录</span>
+
+<span class="cm"># ========== lazyfree（异步删除）==========</span>
+<span class="kw">lazyfree-lazy-eviction</span> <span class="st">yes</span>
+<span class="kw">lazyfree-lazy-expire</span> <span class="st">yes</span>
+<span class="kw">lazyfree-lazy-server-del</span> <span class="st">yes</span>
+<span class="kw">lazyfree-lazy-user-del</span> <span class="st">yes</span>        <span class="cm"># DEL 等同 UNLINK</span>
+<span class="kw">lazyfree-lazy-user-flush</span> <span class="st">yes</span>      <span class="cm"># FLUSHALL/FLUSHDB 异步（6.2+）</span>
+
+<span class="cm"># ========== 客户端缓存与输出缓冲 ==========</span>
+<span class="kw">client-output-buffer-limit</span> normal <span class="nu">0 0 0</span>            <span class="cm"># 普通客户端不限（一般安全）</span>
+<span class="kw">client-output-buffer-limit</span> slave <span class="nu">512mb</span> <span class="nu">268435456</span> <span class="nu">60</span>  <span class="cm"># ⭐ 从节点缓冲限制</span>
+<span class="kw">client-output-buffer-limit</span> pubsub <span class="nu">64mb</span> <span class="nu">33554432</span> <span class="nu">60</span>  <span class="cm"># ⭐ 订阅者缓冲限制</span>
+<span class="cm">#   格式：&lt;hard-limit&gt; &lt;soft-limit&gt; &lt;soft-seconds&gt;</span>
+<span class="cm">#   超过 hard limit 立即断开；超过 soft limit 持续 soft-seconds 也断开</span>
+<span class="cm">#   ⭐ 这是防止"慢消费者"打爆 Redis 内存的关键配置！</span>
+
+<span class="cm"># ========== 其他 ==========</span>
+<span class="kw">activedefrag</span> <span class="st">yes</span>                  <span class="cm"># 在线碎片整理（4.0+）</span>
+<span class="kw">active-defrag-ignore-bytes</span> <span class="nu">100mb</span>
+<span class="kw">active-defrag-threshold-lower</span> <span class="nu">10</span>
+<span class="kw">notify-keyspace-events</span> <span class="st">""</span>         <span class="cm"># key 事件通知（按需开启，有性能开销）</span>
+<span class="kw">io-threads</span> <span class="nu">4</span>                     <span class="cm"># 6.0+ IO 多线程（建议 = CPU 核数，最多 8）</span>
+<span class="kw">io-threads-do-reads</span> <span class="st">yes</span>            <span class="cm"># 读也走多线程</span></code></pre>
+
+<div class="box b-big">
+  <div class="box-t">✅ io-threads：I/O 多线程该怎么配（面试考点）</div>
+  <p><strong>原理回顾</strong>：Redis 6.0 引入 I/O 多线程——<strong>网络数据的读写（socket read/write）由多个 IO 线程并行处理，但命令的解析和执行仍然是单线程</strong>。</p>
+  <p><strong>配置建议</strong>：</p>
+  <ul>
+  <li><code class="inline">io-threads 4</code>：<strong>经验值 = 机器 CPU 核数的 3/4，最多 8</strong>。官方建议 4-8 核的机器配 2-3 个，8 核以上配 4-6 个。</li>
+  <li><code class="inline">io-threads-do-reads yes</code>：默认是 no（只对写多线程）。开启后读也并行。<strong>一般建议开启。</strong></li>
+  </ul>
+  <p><strong>⚠️ 关键认知</strong>：</p>
+  <ul>
+  <li><strong>io-threads 不会提升单命令的延迟</strong>，它提升的是「高并发下的整体吞吐」——因为减少了主线程在 socket 读写上的等待。</li>
+  <li><strong>如果瓶颈是 CPU（命令执行），io-threads 帮助有限。</strong>因为命令执行还是单线程。这种情况只能靠「读写分离」或「Cluster 分片」。</li>
+  <li><strong>不要盲目调大</strong>：线程数超过实际需要的会带来上下文切换开销。<strong>调大后要压测验证。</strong></li>
+  <li><strong>8.0 对 I/O 线程做了重构</strong>，效率更高（在同样线程数下吞吐更好）。</li>
+  </ul>
+  <p><strong>面试话术</strong>：「io-threads 解决的是『网络 IO 成为瓶颈』的问题——比如大 value 的读写、高并发下的 socket 处理。<strong>但如果命令本身是 CPU 密集，或者瓶颈在命令执行上，IO 多线程帮不上忙</strong>，那时候要靠分片。所以我会先看瓶颈在哪（<code class="inline">INFO cpu</code> 看 CPU 是用户态还是系统态占用高，用户态高说明命令执行是瓶颈），再决定要不要调 io-threads。」</p>
+</div>
+
+<h2 id="c15-6">6. 监控告警体系：该监控什么</h2>
+
+<table>
+<thead><tr><th style="width:18%">维度</th><th>关键指标</th><th>告警阈值建议</th></tr></thead>
+<tbody>
+<tr>
+  <td><strong>可用性</strong></td>
+  <td>PING 是否响应、<code class="inline">cluster_state</code>、<code class="inline">master_link_status</code></td>
+  <td>PING 失败 > 3 次；<code class="inline">cluster_state:fail</code>；<code class="inline">master_link_status:down</code> — <strong>P0 告警</strong></td>
+</tr>
+<tr>
+  <td><strong>性能</strong></td>
+  <td>QPS（<code class="inline">instantaneous_ops_per_sec</code>）、P99 延迟、慢日志数量</td>
+  <td>P99 > 10ms 告警；慢日志增速 > 10/分钟</td>
+</tr>
+<tr>
+  <td><strong>资源</strong></td>
+  <td>CPU 使用率、内存使用率、网络带宽、连接数</td>
+  <td>CPU > 70%；内存 > 80% of maxmemory；连接数 > 80% of maxclients</td>
+</tr>
+<tr>
+  <td><strong>内存健康</strong></td>
+  <td><code class="inline">mem_fragmentation_ratio</code>、<code class="inline">evicted_keys</code> 增量、<code class="inline">expired_keys</code> 增量</td>
+  <td><strong>ratio &lt; 1 立即告警（swap！）</strong>；ratio > 1.5 告警；evicted_keys 持续增长告警</td>
+</tr>
+<tr>
+  <td><strong>持久化</strong></td>
+  <td><code class="inline">rdb_last_bgsave_status</code>、<code class="inline">rdb_last_fork_usec</code>、<code class="inline">aof_last_write_status</code>、AOF 文件大小</td>
+  <td>bgsave/aof 状态 err；fork_usec > 500ms；AOF 未按期 rewrite</td>
+</tr>
+<tr>
+  <td><strong>主从/集群</strong></td>
+  <td>复制延迟（offset 差值）、从节点数量、<code class="inline">cluster_slots_fail</code></td>
+  <td>延迟 > 10MB 或 > 1 秒；从节点数量减少；<code class="inline">slots_fail > 0</code></td>
+</tr>
+<tr>
+  <td><strong>缓存效果</strong></td>
+  <td>命中率（hits/(hits+misses)）</td>
+  <td>命中率 < 90% 告警（<strong>雪崩的先行指标</strong>）</td>
+</tr>
+<tr>
+  <td><strong>大 key / 热 key</strong></td>
+  <td>定期扫描结果、单 key QPS</td>
+  <td>新增大 key 告警；单 key QPS > 5000 告警</td>
+</tr>
+<tr>
+  <td><strong>客户端</strong></td>
+  <td>连接池活跃/空闲/等待数、<code class="inline">rejected_connections</code>、<code class="inline">blocked_clients</code></td>
+  <td>等待连接 > 0 持续；<code class="inline">rejected_connections</code> > 0</td>
+</tr>
+</tbody>
+</table>
+
+<div class="box b-tip">
+  <div class="box-t">💡 告警设计的三条原则</div>
+  <ol style="margin-bottom:0">
+  <li><strong>分层告警</strong>：P0（服务不可用，立即电话）→ P1（性能劣化，10 分钟内响应）→ P2（趋势异常，工作时间处理）。<strong>不要把「慢日志多了一条」也搞成电话告警——告警疲劳会让人忽略真正重要的信号。</strong></li>
+  <li><strong>关注「变化率」而不是「绝对值」</strong>：<br>
+  「慢日志 100 条」这个绝对值没有意义，但「慢日志从 0 涨到 100 条/分钟」是明确的问题信号。<br>
+  「内存用了 8GB」要看相对于 maxmemory 的比例和增长趋势，而不是绝对值。</li>
+  <li><strong>每个告警都要有明确的处理动作（Runbook）</strong>：<br>
+  告警触发时，值班同学应该知道「先做什么、再做什么」。比如「P99 延迟告警 → ① 查看 SLOWLOG → ② 查大 key → ③ 检查是否有 fork/AOF」。</li>
+  </ol>
+</div>
+
+<h2 id="c15-7">7. 性能优化的实操清单（按投入产出排序）</h2>
+
+<table>
+<thead><tr><th style="width:8%">优先级</th><th style="width:26%">优化项</th><th>预期收益</th><th>成本</th></tr></thead>
+<tbody>
+<tr><td><strong>P0</strong></td><td><strong>禁用 THP</strong></td><td>消除 fork 造成的延迟尖刺（可能从 500ms 降到 50ms）</td><td>极低（改一个内核参数）</td></tr>
+<tr><td><strong>P0</strong></td><td><strong>设置 maxmemory + 合理淘汰策略</strong></td><td>避免 OOM / 内存无限增长</td><td>极低</td></tr>
+<tr><td><strong>P0</strong></td><td><strong>禁用/重命名危险命令</strong>（KEYS/flushall）</td><td>避免误操作导致的事故</td><td>极低</td></tr>
+<tr><td><strong>P0</strong></td><td><strong>客户端设置 timeout + maxWait</strong></td><td>避免线程无限等待导致的雪崩</td><td>极低</td></tr>
+<tr><td><strong>P1</strong></td><td><strong>治理大 key / 热 key</strong></td><td>消除主线程阻塞，可能有数倍性能提升</td><td>中（需要改业务代码）</td></tr>
+<tr><td><strong>P1</strong></td><td><strong>批量操作用 Pipeline（分批）</strong></td><td>批量场景吞吐提升 5-10 倍</td><td>低</td></tr>
+<tr><td><strong>P1</strong></td><td><strong>local cache（本地缓存）</strong></td><td>热 key 场景 Redis 压力下降 90%+</td><td>中（一致性复杂度）</td></tr>
+<tr><td><strong>P1</strong></td><td><strong>开启 lazyfree</strong></td><td>大 key 删除不再阻塞</td><td>极低</td></tr>
+<tr><td><strong>P2</strong></td><td><strong>调整 io-threads</strong></td><td>高并发下吞吐提升 20%-50%</td><td>低（需压测验证）</td></tr>
+<tr><td><strong>P2</strong></td><td><strong>关闭 RDB（纯缓存场景）</strong> 或调整 save 策略</td><td>减少 fork 次数和 IO</td><td>低（但要评估数据可丢失性）</td></tr>
+<tr><td><strong>P2</strong></td><td><strong>读写分离（从节点分担读）</strong></td><td>读能力横向扩展</td><td>中（需要客户端配置，注意一致性）</td></tr>
+<tr><td><strong>P2</strong></td><td><strong>客户端输出缓冲限制</strong>（output-buffer-limit）</td><td>防止慢消费者打爆内存</td><td>极低</td></tr>
+<tr><td><strong>P3</strong></td><td><strong>Cluster 分片</strong></td><td>容量和吞吐线性扩展</td><td>高（架构改造、跨槽限制）</td></tr>
+<tr><td><strong>P3</strong></td><td><strong>升级 8.x（用 SLOT-STATS/HOTKEYS）</strong></td><td>运维可观测性提升</td><td>中（升级风险）</td></tr>
+<tr><td><strong>P3</strong></td><td><strong>内核改造 / 自研代理</strong></td><td>解决极端场景</td><td>极高</td></tr>
+</tbody>
+</table>
+
+<div class="box b-warn">
+  <div class="box-t">⚠️ 调优的三个反模式（常见错误）</div>
+  <ol style="margin-bottom:0">
+  <li><strong>没有度量就调优</strong>：不知道瓶颈在哪就改参数。<strong>结果：改了没效果，甚至引入新问题。</strong><br>
+  <strong>正确</strong>：先 <code class="inline">INFO</code> + <code class="inline">SLOWLOG</code> + <code class="inline">--latency-dist</code> + 压测，定位瓶颈，再针对性优化。</li>
+  <li><strong>一次改多个参数</strong>：无法知道哪个改动起了作用（或哪个引入了问题）。<br>
+  <strong>正确</strong>：<strong>每次只改一个变量，改完压测验证，再改下一个。</strong></li>
+  <li><strong>照搬网上的「最优配置」</strong>：不同业务场景（读多写少 vs 写多、缓存 vs 数据库、小 value vs 大 value）的最优配置完全不同。<br>
+  <strong>正确</strong>：理解每个参数的<strong>权衡</strong>（如 <code class="inline">appendfsync always</code> 最安全但最慢），根据自己的业务约束选择。</li>
+  </ol>
+</div>
+
+<h2 id="c15-8">面试深度问答</h2>
+
+<details class="qa"><summary>Redis 性能怎么优化？<span class="lvl lv2">进阶</span></summary>
+<div class="qa-b">
+<p>按<strong>「度量 → 定位 → 三层优化」</strong>的结构回答：</p>
+<p><strong>一、先度量（不要盲调）</strong></p>
+<ul>
+<li><code class="inline">INFO</code> 看全局指标（CPU、内存、命中率、连接数、淘汰数）。</li>
+<li><code class="inline">SLOWLOG</code> 看慢命令。</li>
+<li><code class="inline">--latency-dist</code> 看延迟分布（长尾）。</li>
+<li><code class="inline">--intrinsic-latency</code> 确认宿主机环境没问题。</li>
+</ul>
+<p><strong>二、三层优化</strong></p>
+<p><strong>① 系统层</strong>：</p>
+<ul>
+<li><strong>禁用 THP</strong>（最重要）——避免 fork 时 COW 复制整个 2MB 页。</li>
+<li><code class="inline">vm.overcommit_memory = 1</code>（避免 fork 被拒）。</li>
+<li><code class="inline">vm.swappiness = 1</code>（避免 swap，swap 会让延迟飙升）。</li>
+<li><code class="inline">somaxconn</code> / <code class="inline">file-max</code> / <code class="inline">ulimit -n</code> 调大。</li>
+</ul>
+<p><strong>② 配置层</strong>：</p>
+<ul>
+<li><code class="inline">maxmemory</code> + 合理淘汰策略（物理内存的 60-75%）。</li>
+<li>开启 lazyfree（异步删除）。</li>
+<li>客户端输出缓冲限制（防慢消费者）。</li>
+<li><code class="inline">io-threads</code>（如果瓶颈在网络 IO）。</li>
+<li>持久化策略权衡（纯缓存可关 RDB；用 <code class="inline">everysec</code> 而非 <code class="inline">always</code>）。</li>
+</ul>
+<p><strong>③ 应用层（收益往往最大）</strong>：</p>
+<ul>
+<li><strong>治理大 key</strong>（消除主线程阻塞）。</li>
+<li><strong>治理热 key</strong>（本地缓存/多副本）。</li>
+<li><strong>批量操作改 Pipeline</strong>（分批）。</li>
+<li><strong>禁用危险命令</strong>（KEYS、全量 HGETALL）。</li>
+<li><strong>合理的 key 设计</strong>（避免大 value、避免 key 数量爆炸）。</li>
+</ul>
+<p><strong>三、验证</strong>：每次改一个变量，压测对比。</p>
+<p><strong>关键洞察</strong>：「<strong>大部分性能问题不在 Redis 配置上，而在应用怎么用它。</strong> 一个 <code class="inline">KEYS *</code> 或者一个 100MB 的大 key，就能让再好的配置也没用。<strong>所以我会先排查应用层的命令和数据结构问题，再去调优配置。</strong>」</p>
+</div></details>
+
+<details class="qa"><summary>为什么必须关闭 THP（透明大页）？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p><strong>THP 是什么</strong>：Linux 的透明大页机制，把传统的 4KB 内存页合并成 <strong>2MB 的大页</strong>，目的是减少 TLB miss、提升内存访问效率。</p>
+<p><strong>为什么对 Redis 有害（核心论证）</strong>：</p>
+<ol>
+<li><strong>Redis 做 RDB/AOF rewrite 时会 <code class="inline">fork</code> 子进程</strong>，依靠 <strong>COW（写时复制）</strong> 让父子进程共享内存。</li>
+<li><strong>COW 的复制单位是「内存页」</strong>。普通页 4KB，THP 页是 2MB。</li>
+<li><strong>关键问题</strong>：使用 THP 时，只要父进程修改了 2MB 页里的<strong>任意一个字节</strong>，整个 <strong>2MB 页都要被复制</strong>。</li>
+<li><strong>后果</strong>：COW 需要复制的内存量可能暴增几十到几百倍 → ① 内存暴涨可能触发 OOM；② 大量内存复制导致严重的延迟尖刺（<code class="inline">fork</code> 事件延迟飙升）。</li>
+<li><strong>额外问题</strong>：THP 的页合并/拆分（<code class="inline">khugepaged</code>）在后台运行，也会造成不可预测的停顿。</li>
+</ol>
+<p><strong>配置</strong>：</p>
+<pre style="margin:8px 0"><code class="lang-bash">echo never &gt; /sys/kernel/mm/transparent_hugepage/enabled
+echo never &gt; /sys/kernel/mm/transparent_hugepage/defrag</code></pre>
+<p><strong>验证</strong>：<code class="inline">cat /sys/kernel/mm/transparent_hugepage/enabled</code> 应该显示 <code class="inline">always madvise [never]</code>（方括号在 never 上）。</p>
+<p><strong>面试加分</strong>：「这个问题的本质是『<strong>COW 的粒度被 THP 放大了</strong>』。Redis 官方文档专门强调了这一点，也是我在任何新机器上部署 Redis 时<strong>第一件要检查的事</strong>——比调 <code class="inline">maxmemory</code> 还优先，因为它是『静默杀手』：平时看不出来，但每次 RDB/AOF 时就可能造成秒级的延迟尖刺。」</p>
+</div></details>
+
+<details class="qa"><summary>SLOWLOG 怎么用？它有什么局限？<span class="lvl lv2">进阶</span></summary>
+<div class="qa-b">
+<p><strong>配置</strong>：</p>
+<pre style="margin:8px 0"><code class="lang-bash">CONFIG SET slowlog-log-slower-than 10000   # 超过 10ms 记录
+CONFIG SET slowlog-max-len 1024            # 队列长度
+SLOWLOG GET 10                             # 查看最近 10 条
+SLOWLOG LEN / SLOWLOG RESET</code></pre>
+<p><strong>输出字段</strong>：日志 ID、时间戳、<strong>执行耗时（微秒）</strong>、命令及参数、客户端地址、<strong>客户端名称</strong>。</p>
+<p><strong>⭐ 实践关键</strong>：给客户端设置 <code class="inline">CLIENT SETNAME</code>（如 <code class="inline">order-service-worker-3</code>），这样慢日志里能直接定位到具体应用。<strong>这是从「发现问题」到「找到责任方」的关键一步。</strong></p>
+<p><strong>三个局限（面试爱追问）</strong>：</p>
+<ol>
+<li><strong>不含网络传输时间</strong>：只记录「命令在 Redis 里执行的时间」。大 key 的网络传输慢不会体现在 SLOWLOG 里。<strong>所以要对比客户端埋点和 SLOWLOG，区分「Redis 慢」和「网络慢」。</strong></li>
+<li><strong>是「事后记录」</strong>：命令执行完才写入。所以无法用来实时发现「正在阻塞」的命令——那个要用 <code class="inline">CLIENT LIST</code> 看 <code class="inline">cmd</code> 字段。</li>
+<li><strong>有容量上限</strong>：<code class="inline">slowlog-max-len</code> 满了会挤出旧记录。持续刷屏时会丢失历史。<strong>要加大 max-len 或用外部工具持续采集入库。</strong></li>
+</ol>
+<p><strong>配套用的命令</strong>：</p>
+<ul>
+<li><code class="inline">INFO commandstats</code>：<strong>累计统计</strong>，能看出「哪类命令总耗时最多」（比 SLOWLOG 更能发现系统性问题）。</li>
+<li><code class="inline">INFO latencystats</code>（7.0+）：各命令的<strong>延迟分位数</strong>（P50/P99/P999）。</li>
+<li><code class="inline">LATENCY LATEST</code>：系统级事件延迟（fork、expire-cycle、aof-write 等）。</li>
+</ul>
+</div></details>
+
+<details class="qa"><summary>如何区分「Redis 慢」和「网络慢」？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p><strong>核心方法：对比两个视角的测量值。</strong></p>
+<p><strong>视角一：Redis 侧（服务端）</strong></p>
+<ul>
+<li><code class="inline">SLOWLOG</code>：命令在 Redis 内的执行时间。</li>
+<li><code class="inline">INFO latencystats</code>：命令延迟分位数。</li>
+<li><code class="inline">LATENCY LATEST</code>：系统事件延迟。</li>
+</ul>
+<p><strong>视角二：客户端侧</strong></p>
+<ul>
+<li><code class="inline">redis-cli --latency</code>：网络 RTT + PING 处理（PING 很快，所以基本 = RTT）。</li>
+<li><code class="inline">--latency-dist</code>：延迟分布，看长尾。</li>
+<li>应用侧埋点：记录每次 Redis 调用耗时（这个值包含「客户端排队 + 网络 + Redis 处理」）。</li>
+</ul>
+<p><strong>判断逻辑</strong>：</p>
+<table>
+<thead><tr><th>客户端耗时</th><th>SLOWLOG</th><th>结论</th></tr></thead>
+<tbody>
+<tr><td>高</td><td>高</td><td><strong>Redis 真的慢</strong>（慢命令、大 key、阻塞）</td></tr>
+<tr><td>高</td><td>低/无</td><td><strong>不是 Redis 执行慢</strong> → 可能是：① 网络拥塞/大 value 传输；② 客户端连接池排队；③ 应用 GC</td></tr>
+<tr><td>低</td><td>高</td><td>少见。可能是 SLOWLOG 记录了别的时间段的命令（对比时间戳）</td></tr>
+</tbody>
+</table>
+<p><strong>进一步的区分手段</strong>：</p>
+<ul>
+<li><strong>排除网络</strong>：<code class="inline">--latency</code> 显示 RTT 正常 → 网络通；<code class="inline">--intrinsic-latency</code> 正常 → 宿主机没问题。</li>
+<li><strong>排除连接池排队</strong>：看连接池的「等待连接次数 + 平均等待时间」。<strong>如果等待时间占整体耗时的比例高 → 是池太小或有慢命令占着连接。</strong></li>
+<li><strong>排除应用 GC</strong>：看应用的 GC 日志，对比 GC 暂停时间和 Redis 调用耗时的时间戳。</li>
+<li><strong>看大 key</strong>：如果是「GET 一个大 value」的网络传输慢，会体现在 <code class="inline">instantaneous_output_kbps</code> 突增。</li>
+</ul>
+<p><strong>面试话术</strong>：「我一般先看 <code class="inline">--latency</code>——如果 RTT 正常但业务耗时高，那问题就不在网络。然后用连接池的等待指标排除『池排队』，再看应用 GC 日志排除 JVM 问题。<strong>最后剩下的才是 Redis 本身的问题，这时用 SLOWLOG 和 <code class="inline">INFO commandstats</code> 定位具体命令。</strong>」</p>
+</div></details>
+
+<details class="qa"><summary>IO 多线程（io-threads）怎么配？为什么命令执行还是单线程？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p><strong>为什么命令执行仍是单线程</strong>：</p>
+<ul>
+<li><strong>简单</strong>：单线程不用处理并发问题（锁、原子性），代码和逻辑都简单。</li>
+<li><strong>够快</strong>：纯内存操作 + 高效数据结构的瓶颈不在 CPU，而在网络 IO。</li>
+<li><strong>原子性天然保证</strong>：所有命令串行执行，天然满足原子性需求（Lua/MULTI 的原子性正依赖于此）。</li>
+</ul>
+<p><strong>那为什么要 IO 多线程</strong>：随着硬件发展（多核 CPU + 万兆网卡），<strong>网络 IO 成为了瓶颈</strong>——单线程处理所有 socket 的读写（包括数据的拷贝、解析）占用了大量 CPU。所以 6.0 把「socket 读写」这部分并行化。</p>
+<p><strong>配置</strong>：</p>
+<pre style="margin:8px 0"><code class="lang-bash">io-threads 4              # 经验值 = CPU 核数 * 3/4，最多 8
+io-threads-do-reads yes   # 读也走多线程</code></pre>
+<p><strong>关键认知</strong>：</p>
+<ul>
+<li><strong>不会降低单命令延迟</strong>：它提升的是<strong>高并发下的整体吞吐</strong>（减少了主线程在 socket 读写上的等待）。</li>
+<li><strong>如果瓶颈是命令执行（CPU 用户态高），io-threads 帮助有限</strong>。<strong>应付这种情况要靠分片（Cluster）或读写分离。</strong></li>
+<li><strong>不要盲目调大</strong>：线程数过多会带来上下文切换开销。<strong>调大后要压测验证。</strong></li>
+</ul>
+<p><strong>怎么判断该不该开</strong>：</p>
+<ul>
+<li>看 <code class="inline">INFO cpu</code>：如果 <code class="inline">used_cpu_sys</code>（系统态，主要来自 socket 处理）占比高 → 网络 IO 是瓶颈 → 开 io-threads 有帮助。</li>
+<li>如果 <code class="inline">used_cpu_user</code>（用户态，主要来自命令执行）占比高 → 命令执行是瓶颈 → io-threads 帮助有限。</li>
+<li>如果 QPS 高但 CPU 使用率低 → 可能有网络 RTT 瓶颈或客户端排队问题。</li>
+</ul>
+<p><strong>面试话术</strong>：「我会先用 <code class="inline">INFO cpu</code> 区分瓶颈在『系统态（socket 处理）』还是『用户态（命令执行）』。<strong>系统态高才值得开 io-threads；用户态高说明要分片或优化命令。这样调优才有依据，而不是看到有这个参数就随手调大。</strong>」</p>
+</div></details>
+
+<details class="qa"><summary>线上 Redis 该监控哪些指标？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p>按「四层」组织回答：</p>
+<p><strong>第一层：可用性（P0，最关键）</strong></p>
+<ul>
+<li>PING 是否响应；<code class="inline">cluster_state</code>；<code class="inline">master_link_status</code>。</li>
+</ul>
+<p><strong>第二层：性能</strong></p>
+<ul>
+<li>QPS（<code class="inline">instantaneous_ops_per_sec</code>）、P99/P999 延迟、慢日志数量与增速。</li>
+</ul>
+<p><strong>第三层：资源与健康度</strong></p>
+<ul>
+<li><strong>内存</strong>：<code class="inline">used_memory</code> / <code class="inline">maxmemory</code> 比例、<strong><code class="inline">mem_fragmentation_ratio</code>（&lt;1 是 swap，必须告警）</strong>、<code class="inline">evicted_keys</code> 增量。</li>
+<li><strong>CPU</strong>：使用率（>70% 告警）、系统态 vs 用户态分布。</li>
+<li><strong>连接</strong>：<code class="inline">connected_clients</code> / <code class="inline">maxclients</code>、<code class="inline">rejected_connections</code>、<code class="inline">blocked_clients</code>。</li>
+<li><strong>网络</strong>：<code class="inline">instantaneous_output_kbps</code>（突增常是大 key）。</li>
+</ul>
+<p><strong>第四层：持久化与复制</strong></p>
+<ul>
+<li><code class="inline">rdb_last_bgsave_status</code> / <code class="inline">aof_last_write_status</code>；</li>
+<li><code class="inline">rdb_last_fork_usec</code>（fork 阻塞，>500ms 告警）；</li>
+<li>复制延迟（offset 差值）；从节点数量；<code class="inline">cluster_slots_fail</code>。</li>
+</ul>
+<p><strong>业务层指标（容易被忽略但很有用）</strong></p>
+<ul>
+<li><strong>缓存命中率</strong>（<code class="inline">keyspace_hits/(hits+misses)</code>）：<strong>雪崩和 key 设计问题的先行指标</strong>，&lt;90% 告警。</li>
+<li><strong>大 key 扫描结果</strong>：定期扫描，新增大 key 告警。</li>
+<li><strong>热 key</strong>：单 key QPS 超阈值告警。</li>
+<li><strong>客户端连接池</strong>：活跃/空闲/等待数（<strong>这个指标往往比 Redis 侧指标更能提前发现应用问题</strong>）。</li>
+</ul>
+<p><strong>三条告警设计原则</strong>：</p>
+<ol>
+<li><strong>分层告警</strong>（P0 电话 / P1 即时消息 / P2 日报），避免告警疲劳。</li>
+<li><strong>关注变化率而非绝对值</strong>（「慢日志 100 条」无意义，「慢日志从 0 涨到 100/分钟」才是信号）。</li>
+<li><strong>每个告警有 Runbook</strong>（值班看到告警知道该做什么）。</li>
+</ol>
+</div></details>
+
+<h2 id="c15-9">本节自测</h2>
+<div class="track">
+  <label><input type="checkbox" data-k="d5-16"><span>我能说出 INFO 的九大分类，以及每类最该看的指标</span></label>
+  <label><input type="checkbox" data-k="d5-17"><span>我能背出六个「一眼看出问题」的指标（含 ratio&lt;1 是 swap、rejected_connections）</span></label>
+  <label><input type="checkbox" data-k="d5-18"><span>我能用 awk 从 INFO 算出缓存命中率和主从复制延迟</span></label>
+  <label><input type="checkbox" data-k="d5-19"><span>我知道要给客户端设 CLIENT SETNAME，便于慢日志定位责任方</span></label>
+  <label><input type="checkbox" data-k="d5-20"><span>我能说出 SLOWLOG 的三个局限（不含网络时间、事后记录、容量上限）</span></label>
+  <label><input type="checkbox" data-k="d5-21"><span>我知道用 CLIENT LIST 的 cmd 字段找「正在阻塞」的命令</span></label>
+  <label><input type="checkbox" data-k="d5-22"><span>我能区分 --latency / --latency-history / --latency-dist / --intrinsic-latency 四者的用途</span></label>
+  <label><input type="checkbox" data-k="d5-23"><span>我能用 LATENCY LATEST/HISTORY 看 fork、expire-cycle 等事件延迟</span></label>
+  <label><input type="checkbox" data-k="d5-24"><span>我能说清 redis-benchmark 的 -P（Pipeline 深度）为什么重要</span></label>
+  <label><input type="checkbox" data-k="d5-25"><span>我知道压测的四个注意事项（独立机器、清理环境、压测机不能是瓶颈、监控服务端）</span></label>
+  <label><input type="checkbox" data-k="d5-26"><span>我能完整论证「为什么必须关闭 THP」（COW 粒度被放大）</span></label>
+  <label><input type="checkbox" data-k="d5-27"><span>我能说出 overcommit_memory=1 和 swappiness=1 的原因</span></label>
+  <label><input type="checkbox" data-k="d5-28"><span>我知道 mem_fragmentation_ratio &lt; 1 意味着 swap，是最危险的信号之一</span></label>
+  <label><input type="checkbox" data-k="d5-29"><span>我能说出生产 redis.conf 的关键项（maxmemory / lazyfree / output-buffer-limit / 命令重命名）</span></label>
+  <label><input type="checkbox" data-k="d5-30"><span>我知道 client-output-buffer-limit 是防「慢消费者」打爆内存的关键</span></label>
+  <label><input type="checkbox" data-k="d5-31"><span>我能用 INFO cpu 的用户态/系统态判断该不该开 io-threads</span></label>
+  <label><input type="checkbox" data-k="d5-32"><span>我能给出完整的监控指标清单（四层 + 业务层）和告警阈值</span></label>
+  <label><input type="checkbox" data-k="d5-33"><span>我能说出调优的三个反模式（无度量调优、一次改多个、照搬网上的配置）</span></label>
+  <label><input type="checkbox" data-k="d5-34"><span>我能按「度量→定位→三层优化」的结构回答「Redis 性能怎么优化」</span></label>
+</div>
+</section>

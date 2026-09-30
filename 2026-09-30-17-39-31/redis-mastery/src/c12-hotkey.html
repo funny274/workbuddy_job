@@ -1,0 +1,878 @@
+<section id="c12-hotkey" class="anchor" data-title="Day4.3 · 大Key/热Key 与线上治理">
+<div class="ch-meta">
+  <span class="ch-num">Day 4 · 第 3 节</span>
+  <span class="badge bg-blue">预计 90 分钟</span>
+  <span class="badge bg-red">大厂实战核心</span>
+</div>
+<h1>Day4.3 · 大 Key / 热 Key 与线上治理</h1>
+
+<div class="box b-tip">
+  <div class="box-t">一句话结论</div>
+  <p><strong>大 Key = 单个 key 的「体积/元素数」过大</strong>，危害是<strong>阻塞主线程</strong>（一次操作要几毫秒到几秒）、<strong>拖慢故障转移</strong>、<strong>引发内存不均</strong>。<strong>热 Key = 单个 key 的「访问频率」过高</strong>，危害是<strong>把单个分片的 CPU/带宽打满</strong>，且扩容（加机器）解决不了问题。</p>
+  <p>这是 10 年+ 岗位最容易拉开差距的章节：<strong>面试官问的不是「什么是大 key」，而是「线上 QPS 突然飙升、某个分片 CPU 打满，你怎么定位、怎么在不影响业务的前提下治理」。</strong>这一节会把京东、得物、B站的三套真实方案讲透。</p>
+</div>
+
+<h2 id="c12-1">1. 大 Key：定义、危害与量化标准</h2>
+
+<div class="box b-big">
+  <div class="box-t">✅ 什么算「大 Key」（量化标准）</div>
+  <p>「大」有两个维度：<strong>元素数量</strong>和<strong>value 体积</strong>。行业通用经验值：</p>
+  <table style="margin:8px 0">
+  <thead><tr><th style="width:16%">数据类型</th><th>元素数量告警线</th><th>体积告警线</th><th>说明</th></tr></thead>
+  <tbody>
+  <tr><td><strong>String</strong></td><td>—</td><td><strong>&gt; 10 KB</strong>（严格 &gt; 1 MB 必须处理）</td><td>单个 value 过大，网络传输 + 序列化开销大</td></tr>
+  <tr><td><strong>Hash / List / Set / ZSet</strong></td><td><strong>&gt; 5,000</strong>（严格 &gt; 10,000）</td><td>&gt; 1 MB</td><td>元素数过多，整体操作（HGETALL/SMEMBERS）会阻塞</td></tr>
+  <tr><td><strong>Stream</strong></td><td>&gt; 10,000 条</td><td>&gt; 10 MB</td><td>需配合 MAXLEN 裁剪</td></tr>
+  </tbody>
+  </table>
+  <p><strong>阿里云 / 腾讯云 Redis 的官方建议</strong>：单实例中大于 10KB 的 key 不超过 1000 个（不同厂商略有差异，但量级一致）。</p>
+</div>
+
+<div class="box b-x">
+  <div class="box-t">🚨 大 Key 的五大危害（每条都要能说清机理）</div>
+  <ol>
+  <li><strong>阻塞主线程（最核心的危害）</strong><br>
+  Redis 命令执行是单线程的。一次 <code class="inline">HGETALL</code> 一个 100 万元素的 Hash，需要序列化并返回几 MB 数据——<strong>执行时间可能几百毫秒甚至几秒</strong>。这期间<strong>所有其他请求全部排队等待</strong>。假设正常 QPS 是 10 万，一次 500ms 的阻塞就意味着 <strong>5 万个请求被延迟</strong>。<br>
+  <strong>关键</strong>：这不只是「这个请求慢」，而是「<strong>整个实例卡住</strong>」。</li>
+
+  <li><strong>网络带宽打满</strong><br>
+  读一个 10MB 的 key，单次就要传 10MB。<strong>如果 QPS 是 100，就是 1GB/s 的带宽需求</strong>——直接打满万兆网卡。而且大 key 的传输会挤压其他正常请求的带宽。</li>
+
+  <li><strong>加剧删除时的阻塞</strong><br>
+  删除大 key（<code class="inline">DEL</code>）时需要<strong>释放大量内存</strong>，这个释放过程是<strong>同步的</strong>，会阻塞主线程。一个 100 万元素的 Hash 删除可能耗时几十到几百毫秒。<br>
+  <strong>解法</strong>：用 <strong><code class="inline">UNLINK</code></strong>（异步删除，把 key 从 keyspace 摘掉后，把内存释放交给后台线程）。</li>
+
+  <li><strong>拖慢持久化与故障转移</strong><br>
+  <strong>RDB</strong>：大 key 会让 fork 出的子进程写盘量暴增，延长 RDB 时间。<br>
+  <strong>主从全量同步</strong>：一个 1GB 的大 key 通过网络传输到从节点，耗时长、易超时、可能反复重试。<br>
+  <strong>Cluster 槽迁移</strong>：MIGRATE 一个大 key 会阻塞两个节点。</li>
+
+  <li><strong>内存分布不均（Cluster 场景）</strong><br>
+  如果大 key 都集中在少数几个槽上，会导致<strong>某些节点内存远超其他节点</strong>，甚至触发 OOM 淘汰，而其他节点还很空闲。<strong>扩容（加节点）也没用，因为槽的分布是固定的。</strong></li>
+  </ol>
+</div>
+
+<div class="box b-warn">
+  <div class="box-t">⚠️ 大 Key 最常见的三种成因</div>
+  <ol style="margin-bottom:0">
+  <li><strong>设计错误：把「集合」当成「大集合」用</strong>。<br>
+  典型：用 <code class="inline">SET order:all:users</code> 存所有下单用户（几百万人）；用 <code class="inline">HASH user:all</code> 存所有用户信息。<strong>根因是没有按业务维度拆分。</strong></li>
+  <li><strong>无上限增长：忘了设置清理逻辑</strong>。<br>
+  典型：用 <code class="inline">LIST</code> 做消息队列但从不 <code class="inline">LTRIM</code>；用 <code class="inline">ZSET</code> 做排行榜但从不清理历史数据；用 <code class="inline">Hash</code> 记录用户行为日志，一直 <code class="inline">HSET</code> 不删。</li>
+  <li><strong>业务自然增长：一开始很小，慢慢变大</strong>。<br>
+  典型：某商品详情页的「评论列表」缓存，一个大爆款商品积累了 500 万条评论。<strong>这种最难发现，因为上线时是正常的。</strong></li>
+  </ol>
+</div>
+
+<h2 id="c12-2">2. 怎么发现大 Key（四种手段）</h2>
+
+<h3>手段一：redis-cli --bigkeys（最常用）</h3>
+<pre><code class="lang-bash"><span class="cm">########## 扫描大 key ##########</span>
+redis-cli -h 10.0.0.5 -p 6379 --bigkeys
+
+<span class="cm"># 输出示例：</span>
+<span class="cm"># ------- summary -------
+# Sampled 1000000 keys in the keyspace!
+# Total key length in bytes is 25000000 (avg len 25.00)
+#
+# Biggest string found 'user:profile:999999' has 1048576 bytes
+# Biggest list   found 'feed:timeline:888888' has 500000 items
+# Biggest hash   found 'order:detail:777777' has 200000 fields
+# Biggest set    found 'activity:users:666666' has 1000000 members
+# Biggest zset   found 'rank:global' has 3000000 members
+#
+# 0 lists with 0 items (00.00% of keys, avg size 0.00)
+# 1 lists with 500000 items (00.00% of keys, avg size 500000.00)</span>
+
+<span class="cm"># ⚠️ 工作原理与注意事项：</span>
+<span class="cm">#  ① 它用 SCAN 遍历整个 keyspace，对每个 key 用 STRLEN/LLEN/HLEN/... 判断大小</span>
+<span class="cm">#  ② 只报告「每种类型最大的那个 key」，不是所有大 key</span>
+<span class="cm">#  ③ 会对每个 key 执行一次类型判断，对线上有一定压力（建议在从节点执行）</span>
+<span class="cm">#  ④ 4.0+ 支持 --bigkeys 用 SCAN 实现，不会阻塞（不像 KEYS *）</span>
+
+<span class="cm">########## 同族命令：--memkeys（7.0+）##########</span>
+redis-cli --memkeys
+<span class="cm"># 按"内存占用"排序，比 --bigkeys 更准确（--bigkeys 只看元素数/字符串长度）</span>
+redis-cli --memkeys --memkeys-samples 100
+<span class="cm"># --memkeys-samples 控制每种类型的采样元素数（默认 0 = 全部采样，慢；建议设 100）</span></code></pre>
+
+<h3>手段二：MEMORY USAGE（精确查询单个 key）</h3>
+<pre><code class="lang-bash"><span class="cm"># 精确计算某个 key 占用的内存（含数据结构开销，不只是 value 长度）</span>
+MEMORY USAGE user:profile:999999
+<span class="cm"># 返回：1048600（字节）</span>
+
+<span class="cm"># 加上 SAMPLES 参数（默认 5）：采样计算，更快但可能有误差</span>
+MEMORY USAGE big:hash SAMPLES 0     <span class="cm"># 0 = 精确计算全部元素（慢但准）</span>
+MEMORY USAGE big:hash SAMPLES 100   <span class="cm"># 采样 100 个元素估算（快）</span>
+
+<span class="cm"># 注意：MEMORY USAGE 对超大 key 本身也可能耗时（要遍历元素），</span>
+<span class="cm">#      线上建议用 SAMPLES 采样，或直接在从节点执行</span></code></pre>
+
+<h3>手段三：SCAN + 批量分析（自定义脚本，最实用）</h3>
+<pre><code class="lang-bash"><span class="cm">#!/bin/bash</span>
+<span class="cm"># ============================================</span>
+<span class="cm"># 大 Key 扫描脚本（生产可用）</span>
+<span class="cm"># 特点：分批 SCAN，统计所有大 key（不只是最大的），可导出报告</span>
+<span class="cm"># 建议在【从节点】执行，避免影响主节点</span>
+<span class="cm"># ============================================</span>
+
+HOST=${1:-127.0.0.1}
+PORT=${2:-6379}
+THRESHOLD=${3:-5000}          <span class="cm"># 元素数阈值</span>
+cursor=0
+total_keys=0
+big_keys=0
+report="/tmp/redis-bigkey-report-$(date +%Y%m%d%H%M%S).csv"
+
+echo "type,key,size,detail" > "$report"
+
+while : ; do
+  # SCAN 每次取 500 个 key（COUNT 只是提示，不保证精确）
+  reply=$(redis-cli -h $HOST -p $PORT SCAN $cursor COUNT 500)
+  cursor=$(echo "$reply" | head -1)
+  keys=$(echo "$reply" | tail -n +2)
+
+  for key in $keys; do
+    total_keys=$((total_keys+1))
+    type=$(redis-cli -h $HOST -p $PORT TYPE "$key")
+
+    size=0
+    case "$type" in
+      string) size=$(redis-cli -h $HOST -p $PORT STRLEN "$key") ;;
+      list)   size=$(redis-cli -h $HOST -p $PORT LLEN "$key") ;;
+      hash)   size=$(redis-cli -h $HOST -p $PORT HLEN "$key") ;;
+      set)    size=$(redis-cli -h $HOST -p $PORT SCARD "$key") ;;
+      zset)   size=$(redis-cli -h $HOST -p $PORT ZCARD "$key") ;;
+      stream) size=$(redis-cli -h $HOST -p $PORT XLEN "$key") ;;
+      *) continue ;;
+    esac
+
+    if [ "$size" -gt "$THRESHOLD" ]; then
+      big_keys=$((big_keys+1))
+      echo "$type,$key,$size," >> "$report"
+      echo "[BIG] $type $key -> $size"
+    fi
+  done
+
+  [ "$cursor" = "0" ] && break
+done
+
+echo "==============================="
+echo "扫描完成：共 $total_keys 个 key，发现 $big_keys 个大 key"
+echo "报告文件：$report"</code></pre>
+
+<h3>手段四：MEMORY DOCTOR + INFO memory（看整体健康度）</h3>
+<pre><code class="lang-bash"><span class="cm"># MEMORY DOCTOR：Redis 自己给出的"体检报告"</span>
+MEMORY DOCTOR
+<span class="cm"># 输出示例：
+# Hi Sam, this instance is empty or is using very little memory.
+# Sam, I detected a few issues in this Redis instance memory implants:
+#
+#  * High allocator fragmentation: This instance has an allocator external
+#    fragmentation greater than 1.10. This can be caused by a mix of different
+#    allocation sizes...</span>
+
+<span class="cm"># INFO memory：核心内存指标</span>
+INFO memory
+<span class="cm"># used_memory:1073741824                 ← Redis 分配器视角的内存
+# used_memory_rss:1610612736             ← 操作系统视角的物理内存
+# used_memory_peak:1200000000            ← 峰值
+# mem_fragmentation_ratio:1.50           ← RSS/used，> 1.5 说明碎片严重 ⚠️
+# mem_allocator:jemalloc-5.3.0
+# maxmemory:4294967296                   ← 最大内存限制
+# maxmemory_policy:allkeys-lru</span>
+
+<span class="cm"># mem_fragmentation_ratio 的解读：</span>
+<span class="cm">#   1.0 ~ 1.5  正常</span>
+<span class="cm">#   > 1.5      碎片率高，需要重启或开启 activedefrag</span>
+<span class="cm">#   < 1.0      说明部分内存被 swap 到磁盘了 ⚠️ 极度危险（延迟飙升）</span>
+
+<span class="cm"># 开启在线碎片整理（4.0+）</span>
+CONFIG SET activedefrag yes
+CONFIG SET active-defrag-ignore-bytes 100mb
+CONFIG SET active-defrag-threshold-lower 10</code></pre>
+
+<div class="box b-tip">
+  <div class="box-t">💡 生产建议：怎么扫描才安全</div>
+  <ul style="margin-bottom:0">
+  <li><strong>在从节点扫描</strong>：主从架构下，大 key 扫描会对实例产生压力，<strong>优先在从节点做</strong>（从节点数据一致）。</li>
+  <li><strong>低峰期执行</strong>：凌晨 2-5 点。</li>
+  <li><strong>控制频率</strong>：每天/每周一次，不要高频扫描。</li>
+  <li><strong>用云厂商的工具</strong>：阿里云 DAS、腾讯云 DBbrain 都有一键大 key 分析，比自研脚本更可靠。<strong>面试时提到这个会加分（说明你有云上生产经验）。</strong></li>
+  <li><strong>日常也要有告警</strong>：不要等出故障才扫。可以对 <code class="inline">MEMORY USAGE</code> 做定期抽样监控，或者用 <code class="inline">redis-cli --bigkeys</code> 的输出做趋势对比。</li>
+  </ul>
+</div>
+
+<h2 id="c12-3">3. 大 Key 的治理：从预防到存量清理</h2>
+
+<div class="box b-big">
+  <div class="box-t">✅ 治理总原则：预防为主，存量分批平滑处理</div>
+  <p><strong>核心原则</strong>：</p>
+  <ol>
+  <li><strong>预防优于治疗</strong>：设计阶段就把「大集合」拆开，比事后清理成本低得多。</li>
+  <li><strong>存量清理必须「分批 + 限速 + 可中断」</strong>：绝对不能用一个 <code class="inline">DEL bigkey</code> 直接删——那本身就是一次几百毫秒的阻塞。</li>
+  <li><strong>不要用 <code class="inline">KEYS *</code> 找 key</strong>：<code class="inline">KEYS</code> 会遍历整个 keyspace 并一次性返回所有 key，<strong>生产上绝对是事故</strong>。必须用 <code class="inline">SCAN</code>（游标式渐进遍历，不阻塞）。</li>
+  </ol>
+</div>
+
+<h3>3.1 预防：设计阶段就避开大 Key</h3>
+<table>
+<thead><tr><th style="width:22%">反模式</th><th style="width:30%">问题</th><th>正确做法</th></tr></thead>
+<tbody>
+<tr>
+  <td><code class="inline">SET all:users</code>（一个 Set 存所有用户）</td>
+  <td>几百万元素，SMEMBERS 直接卡死</td>
+  <td><strong>按业务分片</strong>：<code class="inline">set:users:active</code>、<code class="inline">set:users:vip</code>；或按 ID 区间 <code class="inline">set:users:{0-9999}</code></td>
+</tr>
+<tr>
+  <td><code class="inline">HASH user:all</code>（一个 Hash 存所有用户）</td>
+  <td>几百万人，HGETALL 卡死</td>
+  <td><strong>一用户一 Hash</strong>：<code class="inline">user:1001</code>、<code class="inline">user:1002</code>；或按 ID 分片：<code class="inline">user:shard:{1001%100}</code></td>
+</tr>
+<tr>
+  <td><code class="inline">LIST feed</code>（无限追加，从不裁剪）</td>
+  <td>无上限增长，最终变成亿级 List</td>
+  <td><strong>必须 LTRIM</strong>：<code class="inline">LPUSH feed x; LTRIM feed 0 999</code>（只保留最近 1000 条）</td>
+</tr>
+<tr>
+  <td><code class="inline">ZSET rank:all</code>（全局排行榜，无清理）</td>
+  <td>数据无限增长</td>
+  <td><strong>定期重建/按周期分 key</strong>：<code class="inline">rank:daily:20260930</code>；或只保留 Top N</td>
+</tr>
+<tr>
+  <td>String 存整个 JSON 列表</td>
+  <td>单个 value 几十 MB</td>
+  <td><strong>拆成「列表 + 明细」</strong>：<code class="inline">order:list:uid</code> 存 ID 数组（小），<code class="inline">order:detail:oid</code> 存单条详情</td>
+</tr>
+<tr>
+  <td>用 Redis 存大文件 / 大对象</td>
+  <td>value 几百 MB</td>
+  <td><strong>Redis 只存元数据 + 指针</strong>，大文件放 OSS/S3 等对象存储</td>
+</tr>
+</tbody>
+</table>
+
+<div class="box b-x">
+  <div class="box-t">🚨 一个反例对比：商品评论缓存的设计演进</div>
+  <p><strong>V1（原始设计，容易出事）</strong>：</p>
+  <pre style="margin:8px 0"><code class="lang-bash"><span class="cm"># 一个 key 存所有评论</span>
+LPUSH comment:product:1001 "评论JSON1" "评论JSON2" ...   <span class="cm"># 持续增长</span>
+LRANGE comment:product:1001 0 -1                        <span class="cm"># 取出所有评论 → 卡死！</span></code></pre>
+  <p><strong>V2（分页 + 裁剪）</strong>：</p>
+  <pre style="margin:8px 0"><code class="lang-bash"><span class="cm"># 只保留最近 500 条 + 分页读取</span>
+LPUSH comment:product:1001 "{...}"
+LTRIM comment:product:1001 0 499        <span class="cm"># 每次写完裁剪，保证不超过 500 条</span>
+LRANGE comment:product:1001 0 19        <span class="cm"># 只取前 20 条（分页）</span></code></pre>
+  <p><strong>V3（大厂标准做法：热点与冷数据分离）</strong>：</p>
+  <pre style="margin:8px 0"><code class="lang-bash"><span class="cm"># Redis 只缓存"热评前 100 条"，完整数据在 DB / ES</span>
+ZADD comment:hot:1001 score "评论ID"     <span class="cm"># 按热度排序，只保留 Top 100</span>
+ZREMRANGEBYRANK comment:hot:1001 0 -101  <span class="cm"># 裁剪，保持最多 100 条</span>
+
+<span class="cm"># 用户要翻更多评论 → 走 DB 分页（或 ES 搜索）</span>
+<span class="cm"># 这样：① Redis 里永远只有 100 条，不会变大；② 用户看到的是最有价值的评论</span></code></pre>
+  <p><strong>面试可说</strong>：「缓存大 key 治理的常见套路是<strong>『热数据进缓存，全量数据留 DB』</strong>——缓存的定位就是『加速热点访问』，不是『当数据库用』。这个认知一旦建立，很多大 key 问题在设计中就自然避免了。」</p>
+</div>
+
+<h3>3.2 存量清理：安全的删除方案</h3>
+
+<div class="box b-big">
+  <div class="box-t">✅ 删除大 Key 的四种方法（按安全性排序）</div>
+  <p><strong>方法一：UNLINK（4.0+，最简单的正确解法）</strong></p>
+  <pre style="margin:8px 0"><code class="lang-bash"><span class="cm"># UNLINK 是异步删除：主线程只负责把 key 从 keyspace 摘除（O(1)），</span>
+<span class="cm"># 实际的内存释放交给后台线程完成，不阻塞主线程</span>
+UNLINK big:hash:key
+
+<span class="cm"># ⚠️ 注意：</span>
+<span class="cm">#  ① 需要 lazyfree-lazy-user-del 或显式用 UNLINK</span>
+<span class="cm">#  ② 后台线程释放内存也要时间，但主线程已"看不见"这个 key 了</span>
+<span class="cm">#  ③ lazyfree 相关配置：</span>
+<span class="kw">lazyfree-lazy-eviction</span> <span class="st">yes</span>      <span class="cm"># 淘汰时异步释放</span>
+<span class="kw">lazyfree-lazy-expire</span> <span class="st">yes</span>        <span class="cm"># 过期时异步释放</span>
+<span class="kw">lazyfree-lazy-server-del</span> <span class="st">yes</span>    <span class="cm"># 隐式删除（如 RENAME）时异步</span>
+<span class="kw">lazyfree-lazy-user-del</span> <span class="st">yes</span>      <span class="cm"># 用户 DEL 也异步（4.0+，启用后 DEL 等同 UNLINK）</span>
+<span class="kw">lazyfree-lazy-user-flush</span> <span class="st">yes</span>     <span class="cm"># FLUSHALL/FLUSHDB 异步（6.2+）</span></code></pre>
+
+  <p><strong>方法二：分批次删除元素（最精细的控制）</strong></p>
+  <p>如果连 UNLINK 的「后台释放压力」都不放心（比如实例内存很紧张），可以<strong>自己分批删元素</strong>：</p>
+  <pre style="margin:8px 0"><code class="lang-lua"><span class="cm">-- 每次删除 Hash 的 100 个 field（配合循环调用，每次间隔 10ms）</span>
+<span class="kw">local</span> fields = redis.call(<span class="st">'HKEYS'</span>, KEYS[<span class="nu">1</span>])
+<span class="kw">local</span> count = <span class="nu">0</span>
+<span class="kw">for</span> i = <span class="nu">1</span>, math.min(#fields, tonumber(ARGV[<span class="nu">1</span>])) <span class="kw">do</span>
+    redis.call(<span class="st">'HDEL'</span>, KEYS[<span class="nu">1</span>], fields[i])
+    count = count + <span class="nu">1</span>
+<span class="kw">end</span>
+<span class="kw">if</span> redis.call(<span class="st">'HLEN'</span>, KEYS[<span class="nu">1</span>]) == <span class="nu">0</span> <span class="kw">then</span>
+    redis.call(<span class="st">'DEL'</span>, KEYS[<span class="nu">1</span>])
+<span class="kw">end</span>
+<span class="kw">return</span> count</code></pre>
+  <p><strong>适用场景</strong>：超大 key（百万级元素）且内存非常紧张，需要「极平滑」地释放。</p>
+
+  <p><strong>方法三：SCAN 系列命令遍历删除（针对 Collection）</strong></p>
+  <pre style="margin:8px 0"><code class="lang-bash"><span class="cm"># Hash：HSCAN 游标遍历 + HDEL</span>
+<span class="cm"># Set： SSCAN + SREM</span>
+<span class="cm"># ZSet：ZSCAN + ZREM</span>
+<span class="cm"># List：没有 SCAN，用 LTRIM 逐段裁剪</span>
+
+<span class="cm"># 示例：分批删除一个大 Hash</span>
+cursor=0
+while : ; do
+  result=$(redis-cli HSCAN big:hash $cursor COUNT 200)
+  cursor=$(echo "$result" | head -1)
+  fields=$(echo "$result" | tail -n +2 | awk 'NR%2==1')
+  [ -n "$fields" ] && redis-cli HDEL big:hash $fields &gt; /dev/null
+  [ "$cursor" = "0" ] && break
+  sleep 0.01        # 限速：每批间隔 10ms，避免 CPU 打满
+done</code></pre>
+
+  <p><strong>方法四：重命名 + 异步清理（最稳妥的「平滑下线」）</strong></p>
+  <pre style="margin:8px 0"><code class="lang-bash"><span class="cm"># 思路：先让业务"看不见"这个 key，再慢慢清理</span>
+<span class="cm"># ① 重命名到一个临时名字（业务代码不会再访问到）</span>
+RENAME big:key big:key:deleting:20260930
+
+<span class="cm"># ② 设置一个短的过期时间（让它自然过期，Redis 会异步释放）</span>
+EXPIRE big:key:deleting:20260930 60
+
+<span class="cm"># ③ 或者用 UNLINK 异步删除</span>
+UNLINK big:key:deleting:20260930</code></pre>
+  <p><strong>这个方案的好处</strong>：① <code class="inline">RENAME</code> 是 O(1) 的，瞬间完成；② 业务立刻不再访问到旧 key；③ 清理过程中如果发现问题，还能 <code class="inline">RENAME</code> 回来（<strong>可回滚</strong>）。</p>
+</div>
+
+<h2 id="c12-4">4. 热 Key：为什么扩容解决不了</h2>
+
+<div class="box b-big">
+  <div class="box-t">✅ 热 Key 的本质问题</div>
+  <p><strong>定义</strong>：某个 key 的<strong>访问频率极高</strong>（比如每秒几万到几十万次），导致承载它的那个 Redis 节点（或分片）CPU / 网络被打满。</p>
+  <p><strong>为什么「加机器」没用（关键认知）</strong>：</p>
+  <p>Redis Cluster 用 <code class="inline">CRC16(key) mod 16384</code> 决定 key 落在哪个槽。这意味着<strong>同一个 key 永远落在同一个槽、同一个节点上</strong>——不管你有 3 个节点还是 300 个节点。</p>
+  <p>所以集群扩容只能分散<strong>「不同 key」</strong>的负载，<strong>对「同一个 key」的热度完全无效</strong>。这就是为什么大促时「加了 100 台 Redis，热 key 所在的那个分片还是 100% CPU」。</p>
+  <table style="margin:8px 0">
+  <thead><tr><th style="width:22%">问题</th><th>大 Key</th><th>热 Key</th></tr></thead>
+  <tbody>
+  <tr><td>矛盾焦点</td><td>单个 key 太大 → <strong>阻塞主线程</strong>、内存不均</td><td>单个 key 太热 → <strong>单分片 CPU/带宽打满</strong></td></tr>
+  <tr><td>扩容能解决吗</td><td>❌ 该 key 还是那么大</td><td>❌ 该 key 还是落在同一个节点</td></tr>
+  <tr><td>根本解法</td><td>拆分 key（按维度拆成多个小 key）</td><td><strong>拆分读压力</strong>（本地缓存 / 多副本 key / 读写分离）</td></tr>
+  <tr><td>典型场景</td><td>评论列表、全局用户集合</td><td>爆款商品详情、明星主页、大促配置</td></tr>
+  </tbody>
+  </table>
+</div>
+
+<div class="box b-x">
+  <div class="box-t">🚨 热 Key 的四大危害</div>
+  <ol style="margin-bottom:0">
+  <li><strong>单分片 CPU / 网络打满</strong>：该分片上的所有请求（不只是这个热 key）全部受影响，P99 延迟飙升，甚至触发集群误判节点下线。</li>
+  <li><strong>引发缓存击穿</strong>：热 key 一旦失效，瞬时并发重建的流量会打爆 DB（Day4.1 讲过）。<strong>热 key 和击穿往往是同一个问题的两个面。</strong></li>
+  <li><strong>数据倾斜导致集群不均衡</strong>：热 key 所在的节点负载是其他节点的几十倍，集群整体资源利用率低下。</li>
+  <li><strong>可能引发误故障转移</strong>：热 key 导致节点响应变慢 → Gossip 心跳超时 → 被标记为 PFAIL/FAIL → 触发不必要的故障转移，而故障转移本身又会加剧抖动（<strong>雪上加霜</strong>）。</li>
+  </ol>
+</div>
+
+<h2 id="c12-5">5. 怎么发现热 Key（五种手段）</h2>
+
+<h3>手段一：redis-cli --hotkeys（4.0+，最便捷）</h3>
+<pre><code class="lang-bash"><span class="cm">########## --hotkeys 的原理与限制 ##########</span>
+redis-cli --hotkeys
+
+<span class="cm"># 输出示例：
+# [00.00%] Hot key 'product:detail:1001' found so far with counter 98765
+# [00.00%] Hot key 'rank:global' found so far with counter 54321</span>
+
+<span class="cm"># ⚠️ 关键限制（面试常考）：</span>
+<span class="cm">#  ① 它依赖 maxmemory-policy 是 LFU 系列（allkeys-lfu / volatile-lfu）！</span>
+<span class="cm">#     因为 hotkeys 统计的是"每个对象的 LFU 访问计数器"</span>
+<span class="cm">#  ② 如果是 LRU 策略，--hotkeys 会报错："Hot key detection requires LFU maxmemory policy"</span>
+<span class="cm">#  ③ 它用 SCAN 遍历所有 key，会比较慢，对线上有压力</span>
+<span class="cm">#  ④ 只能发现"当前缓存中"的热 key，已经过期的发现不了</span>
+
+<span class="cm">########## 所以第一步是确认为 LFU 策略 ##########</span>
+CONFIG GET maxmemory-policy
+<span class="cm"># 如果不是 *_lfu，--hotkeys 用不了</span>
+
+<span class="cm">########## 8.x 的 HOTKEYS 命令（原生热 key 检测，无需 LFU）##########</span>
+<span class="cm"># Redis 8.0 引入了原生的 HOTKEYS 命令，不需要 LFU 策略</span>
+HOTKEYS START
+<span class="cm"># 等待一段时间（收集数据）</span>
+HOTKEYS GET
+<span class="cm"># 输出：1) "product:detail:1001"  2) (integer) 98765  3) ...</span>
+HOTKEYS STOP
+HOTKEYS RESET   <span class="cm"># 清空统计</span></code></pre>
+
+<div class="box b-warn">
+  <div class="box-t">⚠️ 重要提醒：--hotkeys 不是万能的</div>
+  <p><code class="inline">redis-cli --hotkeys</code> <strong>在生产上通常不可用</strong>，原因：</p>
+  <ol style="margin-bottom:0">
+  <li>要求 LFU 策略，而很多生产环境用的是 LRU 或 noeviction。</li>
+  <li>即使改了 LFU，也会有<strong>「LFU 计数器初始值」的问题</strong>——新 key 需要被访问多次才会被统计到（这个"预热"过程可能很长）。</li>
+  <li>它是一次性的<strong>事后分析</strong>，<strong>没法实时监控</strong>。</li>
+  </ol>
+  <p><strong>所以真正的生产环境要用『客户端埋点 + 代理层统计 + 内核改造』这三类方案</strong>——这正是下面要讲的京东、得物、B站三大流派。</p>
+  <p>补充：<strong>Redis 8.x 的 <code class="inline">HOTKEYS</code> 命令</strong>是官方给出的答案——不依赖 LFU，通过采样在服务端统计热 key，可以随时 START/GET/STOP。这是 8.x 在热 key 治理上的重要进步。</p>
+</div>
+
+<h3>手段二：客户端埋点统计（成本低，最常用）</h3>
+<pre><code class="lang-java"><span class="cm">/**
+ * 客户端侧热 key 统计：用本地哈希 + 定时上报
+ * 优点：零侵入 Redis，实时性好
+ * 缺点：每个客户端只能看到自己发出的请求（分布式下要聚合）
+ */</span>
+<span class="kw">public class</span> <span class="fn">HotKeyCollector</span> {
+
+    <span class="cm">// 每个客户端实例维护自己的计数（用 LongAdder 减少竞争）</span>
+    <span class="kw">private final</span> ConcurrentHashMap&lt;String, LongAdder&gt; counters = <span class="kw">new</span> ConcurrentHashMap&lt;&gt;();
+    <span class="kw">private static final int</span> MAX_KEYS = <span class="nu">10000</span>;   <span class="cm">// 防止内存溢出</span>
+
+    <span class="cm">/** 每次访问 key 时调用（异步、无锁路径） */</span>
+    <span class="kw">public void</span> <span class="fn">record</span>(String key) {
+        <span class="kw">if</span> (counters.size() &gt; MAX_KEYS) {
+            <span class="cm">// 简单降级：超过上限就不统计新 key（避免内存爆炸）</span>
+            <span class="kw">return</span>;
+        }
+        counters.computeIfAbsent(key, k -&gt; <span class="kw">new</span> LongAdder()).increment();
+    }
+
+    <span class="cm">/** 定时上报（每 10 秒）：把计数推给聚合服务 */</span>
+    <span class="kw">@Scheduled</span>(fixedRate = <span class="nu">10000</span>)
+    <span class="kw">public void</span> <span class="fn">report</span>() {
+        Map&lt;String, Long&gt; snapshot = <span class="kw">new</span> HashMap&lt;&gt;();
+        counters.forEach((k, v) -&gt; {
+            <span class="kw">long</span> count = v.sumThenReset();       <span class="cm">// ⭐ sumThenReset：读取并清零，自然实现"滑动窗口"</span>
+            <span class="kw">if</span> (count &gt; <span class="nu">100</span>) {                  <span class="cm">// 只上报有意义的数据，减少网络开销</span>
+                snapshot.put(k, count);
+            }
+        });
+        <span class="kw">if</span> (!snapshot.isEmpty()) {
+            <span class="cm">// 发给聚合服务（Kafka / 专门的统计服务）</span>
+            kafkaTemplate.send(<span class="st">"redis:hotkey:report"</span>,
+                instanceId + <span class="st">":"</span> + JSON.toJSONString(snapshot));
+        }
+    }
+}</code></pre>
+
+<h3>手段三：代理层统计（监控所有流量，最准确）</h3>
+<p>在客户端和 Redis 之间加一层<strong>代理</strong>（如 Twemproxy、Codis、自研代理），代理能看到<strong>所有</strong>经过它的请求，可以在这里做统一的热 key 统计。</p>
+<pre><code class="lang-bash"><span class="cm">########## 代理层方案的优缺点 ##########</span>
+<span class="cm"># 优点：</span>
+<span class="cm">#   ① 能看到全量流量（不受单客户端视野限制）</span>
+<span class="cm">#   ② 可以在代理层直接做"热 key 本地缓存"（下面会讲）</span>
+<span class="cm">#   ③ 与业务代码解耦</span>
+<span class="cm"># 缺点：</span>
+<span class="cm">#   ① 多一跳网络，增加延迟（通常 0.1~0.5ms）</span>
+<span class="cm">#   ② 代理本身成为需要高可用的组件</span>
+<span class="cm">#   ③ 代理的统计本身有性能开销</span></code></pre>
+
+<h3>手段四：MONITOR 命令（仅限临时排查，禁止生产长期使用）</h3>
+<pre><code class="lang-bash"><span class="cm"># MONITOR 会实时打印所有执行的命令</span>
+redis-cli MONITOR
+
+<span class="cm"># 统计热 key（临时用）</span>
+redis-cli MONITOR | head -n 10000 | awk '{print $4}' | sort | uniq -c | sort -rn | head -20
+
+<span class="cm"># ⚠️⚠️⚠️ 严重警告：</span>
+<span class="cm">#  ① MONITOR 会把每条命令都"回传"给客户端，自身消耗巨大</span>
+<span class="cm">#  ② 会显著降低 Redis 吞吐（可能降低 50% 以上）</span>
+<span class="cm">#  ③ 生产环境【只在紧急排查时短暂使用】，用完立刻 Ctrl+C</span>
+<span class="cm">#  ④ 绝不能用 MONITOR 做长期监控！</span></code></pre>
+
+<h3>手段五：Redis 8.x 原生 HOTKEYS（官方答案）</h3>
+<pre><code class="lang-bash"><span class="cm"># Redis 8.0+ 内置热 key 检测：基于采样，对性能影响小</span>
+HOTKEYS START
+<span class="cm"># 让业务跑一段时间（如 60 秒）</span>
+HOTKEYS GET
+<span class="cm"># 返回 Top 热 key 及其访问计数</span>
+HOTKEYS STOP
+HOTKEYS RESET
+
+<span class="cm"># 配置项（控制采样与内存开销）</span>
+<span class="kw">hotkeys-enabled</span> <span class="st">yes</span>
+<span class="kw">hotkeys-sampling-factor</span> <span class="nu">10</span>            <span class="cm"># 采样因子
+# 更大的值 = 更低的内存开销，但统计精度下降</span></code></pre>
+
+<h2 id="c12-6">6. 热 Key 的治理：三大流派（大厂真实方案）</h2>
+
+<div class="box b-big">
+  <div class="box-t">✅ 治理热 Key 的五种通用手段（先掌握通用层）</div>
+  <ol>
+  <li><strong>本地缓存（最有效的第一招）</strong><br>
+  在应用进程内存里缓存热 key（Caffeine / Guava Cache / 自研），<strong>把大部分读请求拦在 Redis 之前</strong>。比如热 key 每秒 10 万次访问，本地缓存能拦掉 95%，Redis 只剩 5000 次。<br>
+  <strong>代价</strong>：① 本地缓存与 Redis 的一致性问题（需要过期时间 + 主动失效）；② 多实例之间的数据可能有差异；③ 需要预热。<br>
+  <strong>这是大厂处理热 key 最主流的第一道防线。</strong></li>
+
+  <li><strong>热 key 多副本（key 拆分）</strong><br>
+  把一个热 key 复制成 N 份（如 <code class="inline">hotkey:1001:0</code> ~ <code class="inline">hotkey:1001:9</code>），读的时候随机选一份。<strong>这样读压力就分散到 N 个槽（可能在不同节点）了。</strong><br>
+  <strong>代价</strong>：① 写入时要写 N 份（<strong>写放大</strong>）；② 数据一致性维护成本上升；③ 只读场景才适用（写多的 key 不适合）。<br>
+  命令层面 <code class="inline">CLUSTER KEYSLOT</code> 可以用 hash tag 控制分布。</li>
+
+  <li><strong>读写分离 / 从节点分流</strong><br>
+  热 key 的读请求分散到<strong>多个从节点</strong>（<code class="inline">READONLY</code> + 客户端负载均衡）。<br>
+  <strong>代价</strong>：① 主从复制延迟导致可能读到旧数据；② 从节点数量有限，分压能力有限；③ Cluster 下从节点也可以服务读（配合 <code class="inline">READONLY</code>）。</li>
+
+  <li><strong>代理层/服务端做二级缓存</strong><br>
+  在代理层（如自研 Proxy）或 Redis 服务端做「热 key 自动识别 + 本地缓存」。<strong>对业务完全透明</strong>，是 B站/得物这类公司选择的方向（见下文）。</li>
+
+  <li><strong>业务层规避：把热 key 打散到设计里</strong><br>
+  <strong>最根本的一招</strong>：在设计阶段就避免「单一超级热点」。<br>
+  · 秒杀库存 → 拆成 100 个库存桶（<code class="inline">stock:1001:0</code> ~ <code class="inline">stock:1001:99</code>），请求随机落到一个桶扣减，最后汇总。<br>
+  · 大促配置 → 用本地缓存 + 配置中心推送。<br>
+  · 明星微博 → 用「关注列表扇出 + 多级缓存」而不是「单 key 计数器」。</li>
+  </ol>
+</div>
+
+<h3>6.1 京东 JDHotKey：服务端「热 key 自动缓存」</h3>
+<div class="box b-big">
+  <div class="box-t">✅ 京东的方案：在 Redis 前面加一层「热 key 本地缓存」</div>
+  <p><strong>核心思路</strong>：改造客户端（或加 proxy），<strong>自动发现热 key 并把它们缓存到应用本地内存</strong>，后续对该 key 的请求直接本地返回，不再访问 Redis。</p>
+  <p><strong>架构</strong>：</p>
+  <pre style="margin:8px 0"><code class="lang-bash">应用 → [JDHotKey 客户端] → Redis
+              │
+              ├─ ① 请求计数（本地 + 上报到"热 key 计算服务"）
+              ├─ ② 从"热 key 计算服务"接收热 key 名单
+              └─ ③ 命中热 key → 读本地缓存（Caffeine），不访问 Redis</code></pre>
+  <p><strong>关键设计</strong>：</p>
+  <ul>
+  <li><strong>热 key 计算服务</strong>：集中收集所有客户端的访问计数，用滑动窗口（如最近 5 秒）计算，超过阈值的 key 进入「热 key 名单」。</li>
+  <li><strong>推送名单</strong>：把名单推送给所有客户端（一般用长连接 / 配置中心）。</li>
+  <li><strong>客户端本地缓存</strong>：客户端把热 key 的 value 缓存到本地，设置较短的过期时间（如 1-2 秒）或监听变更。</li>
+  <li><strong>退出机制</strong>：key 热度下降后从名单移除，客户端删掉本地缓存。</li>
+  </ul>
+  <p><strong>效果</strong>：热 key 的读请求绝大部分被本地缓存拦截，Redis 端压力大幅下降。</p>
+  <p><strong>代价/注意点</strong>：</p>
+  <ul>
+  <li>本地缓存引入了<strong>一致性延迟</strong>（热 key 更新后，各实例本地缓存需要时间失效）。</li>
+  <li><strong>只适用于「读多写少」且「能容忍秒级延迟」的 key</strong>。库存这种不能这么干。</li>
+  <li>「热 key 名单」的分发本身也要考虑可用性（名单服务挂了，客户端应该降级为「全部走 Redis」）。</li>
+  </ul>
+</div>
+
+<h3>6.2 得物：Redis 内核改造 + 热点探测</h3>
+<div class="box b-big">
+  <div class="box-t">✅ 得物的方向：在 Redis 内核层做热点探测与自动缓存</div>
+  <p><strong>核心思路</strong>：不满足于「在客户端拦截」，而是<strong>改造 Redis 源码</strong>，在服务端实现「热 key 自动识别 + 服务端本地缓存（或转发到其他节点）」。</p>
+  <p><strong>为什么要在内核做</strong>：</p>
+  <ul>
+  <li><strong>客户端方案有盲区</strong>：每个客户端只能看到自己的流量，如果热 key 的流量分散在 100 个客户端上，单看每个客户端都不"热"，聚合才有意义，但聚合又有延迟。</li>
+  <li><strong>内核能看到全量</strong>：Redis 本身就是处理所有请求的地方，在这里统计最准确、最实时。</li>
+  <li><strong>能在服务端直接分流</strong>：识别到热 key 后，可以在服务端做「本地缓存返回」，或者转发给其他有空闲的节点——<strong>不依赖客户端配合</strong>。</li>
+  </ul>
+  <p><strong>典型的技术点</strong>：</p>
+  <ul>
+  <li>在 <code class="inline">lookupKey</code> / 命令处理流程里插入统计逻辑（用近似算法控制开销，如 Count-Min Sketch）。</li>
+  <li>热 key 的 value 在服务端内存里做一层缓存，命中则跳过磁盘/其他开销（对纯内存 Redis 而言主要是减少网络与序列化）。</li>
+  <li>或者实现 <strong>「热 key 请求转发」</strong>：把热 key 的读请求转发到多个从节点，由服务端做负载均衡。</li>
+  </ul>
+  <p><strong>代价</strong>：</p>
+  <ul>
+  <li><strong>维护成本极高</strong>：需要跟着 Redis 版本升级，自己维护分支，编译、测试、灰度。</li>
+  <li><strong>引入 bug 风险</strong>：改内核意味着可能引入内存安全、并发问题。</li>
+  <li>一般只有<strong>体量很大、Redis 是核心基础设施</strong>的公司才这么做（得物、美团、快手等都有类似的内核改造）。</li>
+  </ul>
+</div>
+
+<h3>6.3 B站 HeavyKeeper：用算法解决「统计开销」</h3>
+<div class="box b-big">
+  <div class="box-t">✅ HeavyKeeper 算法：在有限内存里找出高频元素</div>
+  <p><strong>问题背景</strong>：要统计热 key，最朴素的方式是「每个 key 一个计数器」——但如果有 1 亿个 key，就需要 1 亿个计数器，<strong>内存不可接受</strong>。而且统计本身的开销会拖慢 Redis。</p>
+  <p><strong>解决方案</strong>：用<strong>概率数据结构</strong>在「固定的小内存」里找出 Top-K 高频元素。主流算法有三个：</p>
+  <table style="margin:8px 0">
+  <thead><tr><th style="width:20%">算法</th><th>原理</th><th>优点</th><th>缺点</th></tr></thead>
+  <tbody>
+  <tr><td><strong>Count-Min Sketch</strong></td><td>二维计数器数组 + 多个哈希函数，取最小值作为估计</td><td>实现简单、查询 O(k)</td><td>只能「估计频次」，<strong>只高估不低估</strong>，找 Top-K 不够准</td></tr>
+  <tr><td><strong>Space-Saving</strong></td><td>维护固定大小的「候选项表」，新元素替换最小计数的项</td><td><strong>天然输出 Top-K</strong></td><td>低频元素可能被误淘汰</td></tr>
+  <tr><td><strong>HeavyKeeper</strong><br><span class="badge bg-green">B站选择</span></td><td>基于「衰减的桶」+ 哈希指纹：新元素与桶内指纹比较，相同则计数+1，不同则<strong>按概率衰减桶内计数</strong>并可能替换</td><td><strong>比 Count-Min 更准</strong>、能用更小内存找出更精确的 Top-K、有效过滤「长尾噪声」</td><td>实现相对复杂</td></tr>
+  </tbody>
+  </table>
+  <p><strong>HeavyKeeper 的核心机制（面试可以讲这个）</strong>：</p>
+  <ul>
+  <li>维护 <code class="inline">d</code> 个哈希表，每个表 <code class="inline">w</code> 个桶，每个桶存「指纹 + 计数」。</li>
+  <li>新元素到达：用 <code class="inline">d</code> 个哈希函数定位到 <code class="inline">d</code> 个桶。
+  <br>· 如果某个桶的<strong>指纹相同</strong> → 该桶计数 +1。
+  <br>· 如果不相同 → 以概率 <code class="inline">b^(-count)</code> <strong>衰减</strong>该桶的计数（<code class="inline">b</code> 是衰减因子，如 1.08）。计数衰减到 0 时，用新元素替换。</li>
+  <li><strong>为什么这样设计有效</strong>：高频元素会不断命中自己所在的桶，计数持续增长；低频元素即使偶尔命中，也会被其他元素的「衰减」逐渐抹掉。<strong>这样一个桶就能代表「当前最高频的元素」，从而实现「用小内存找 Top-K」。</strong></li>
+  </ul>
+  <p><strong>B站的落地</strong>：把 HeavyKeeper 集成到 Redis 客户端（或 proxy），实时上报热 key 到监控/调度系统，结合「本地缓存 + 副本」做多层治理。<strong>它的价值在于「把热 key 识别的资源开销降到可以常驻运行」</strong>——不再是「出故障了才临时排查」，而是<strong>常态监控</strong>。</p>
+</div>
+
+<div class="box b-tip">
+  <div class="box-t">💡 三大流派对比与选择</div>
+  <table style="margin:8px 0">
+  <thead><tr><th style="width:16%">方案</th><th>京东 JDHotKey</th><th>得物（内核改造）</th><th>B站（HeavyKeeper）</th></tr></thead>
+  <tbody>
+  <tr><td>位置</td><td>客户端</td><td>Redis 内核</td><td>客户端/Proxy + 算法</td></tr>
+  <tr><td>统计范围</td><td>单客户端（需上报聚合）</td><td><strong>全量（最准）</strong></td><td>单节点（聚合后全局）</td></tr>
+  <tr><td>实现成本</td><td><strong>低</strong>（改客户端）</td><td><strong>极高</strong>（改内核）</td><td>中（加算法库）</td></tr>
+  <tr><td>对业务的侵入</td><td>低（SDK 封装后可透明）</td><td><strong>零</strong></td><td>低</td></tr>
+  <tr><td>实时性</td><td>中（依赖聚合延迟）</td><td><strong>高</strong></td><td>中高</td></tr>
+  <tr><td>适用范围</td><td>大多数公司</td><td>超大规模、自建 Redis</td><td>需要常驻监控的公司</td></tr>
+  </tbody>
+  </table>
+  <p><strong>面试话术</strong>：「如果让我选，我会<strong>从成本从低到高做</strong>：</p>
+  <ol style="margin-bottom:0">
+  <li><strong>先用客户端埋点 + 定时上报</strong>（成本最低），配合<strong>本地缓存</strong>这一招——这一招就能解决 80% 的热 key 问题。</li>
+  <li>如果统计精度不够，引入 <strong>HeavyKeeper 类的概率算法</strong>做常态监控。</li>
+  <li>只有当 Redis 是公司级核心基础设施、体量足够大时，才考虑<strong>内核改造</strong>。</li>
+  </ol>
+  <p>因为核心洞察是：<strong>热 key 问题的『发现』有各种成本不同的方案，但『治理』的答案高度一致——本地缓存 + 读写分离 + 业务层打散。把精力放在治理上比放在发现上收益更大。</strong>」</p>
+</div>
+
+<h2 id="c12-7">7. 一个大厂级热 Key 故障复盘</h2>
+
+<div class="box b-x">
+  <div class="box-t">🚨 复盘：大促期间某爆款商品详情导致单分片打满</div>
+  <p><strong>背景</strong>：某电商大促，Redis 3 主 3 从集群（每主 8GB，共 24GB）。大促开始后 10 分钟，监控告警。</p>
+
+  <p><strong>现象</strong>：</p>
+  <ul>
+  <li>集群中 <strong>1 号主节点 CPU 从 30% 飙到 98%</strong>，另外两个主节点只有 40%。</li>
+  <li>1 号节点上的请求 P99 从 1ms 飙到 <strong>450ms</strong>。</li>
+  <li>同时 <strong>MySQL 的 QPS 从 8000 飙到 60000</strong>（说明有大量请求穿透了缓存）。</li>
+  <li>10 分钟后，<strong>1 号节点的从节点被误判为 FAIL</strong>（因为心跳也超时了），触发了故障转移，抖动加剧。</li>
+  </ul>
+
+  <p><strong>排查过程（这是面试要讲的重点）</strong>：</p>
+  <ol>
+  <li><strong>看整体指标</strong>：确认是「单分片问题」而非「全集群问题」——其他两个主节点正常。这直接排除了「网络故障」「整体流量上涨」等假设。</li>
+  <li><strong>看该分片的命令统计</strong>：<code class="inline">redis-cli INFO commandstats</code>，发现 <code class="inline">cmdstat_hgetall</code> 的调用次数异常高，<strong>占该节点总命令数的 65%</strong>。<strong>锁定问题命令是 HGETALL。</strong></li>
+  <li><strong>定位具体 key</strong>：临时用 <code class="inline">redis-cli --hotkeys</code>（提前把策略改成了 LFU）+ 客户端埋点数据交叉验证，发现是 <code class="inline">product:detail:1001</code>（某爆款商品）——<strong>它既是大 key（Hash 有 3 万 field），也是热 key（QPS 4 万）。</strong></li>
+  <li><strong>验证假设</strong>：用 <code class="inline">MEMORY USAGE product:detail:1001 SAMPLES 0</code> 确认占用 12MB；用 <code class="inline">HLEN</code> 确认 3 万 field。同时发现业务代码用 <code class="inline">HGETALL</code> 取全部字段。<strong>根因锁定。</strong></li>
+  <li><strong>为什么 MySQL QPS 也涨了</strong>：因为 <code class="inline">HGETALL</code> 太慢（12MB 序列化 + 传输），应用侧超时后<strong>自动降级去查了 MySQL</strong>，造成了雪崩效应。</li>
+  </ol>
+
+  <p><strong>应急处理（止血，5 分钟内）</strong>：</p>
+  <ol>
+  <li><strong>应用侧紧急降级</strong>：把商品详情的缓存读取开关关掉，直接读 DB（DB 加了限流保护，只放核心流量）。<strong>先止血，再治根。</strong></li>
+  <li><strong>调整该 key 的访问方式</strong>：把 <code class="inline">HGETALL</code> 改为按需取字段（<code class="inline">HMGET field1 field2</code>），或者拆成多个小 key。</li>
+  <li><strong>本地缓存热 key</strong>：把爆款商品的数据加载到应用本地 Caffeine 缓存（TTL 2 秒）。</li>
+  </ol>
+  <p><strong>效果</strong>：1 号节点 CPU 从 98% 降到 35%，MySQL QPS 回落到 12000。</p>
+
+  <p><strong>根治方案（1 周内）</strong>：</p>
+  <ol>
+  <li><strong>拆分数据模型</strong>：<br>
+  · <code class="inline">product:base:1001</code> — 基础信息（详情页展示必需的字段，2KB）<br>
+  · <code class="inline">product:sku:1001</code> — SKU 列表<br>
+  · <code class="inline">product:desc:1001</code> — 富文本描述（单独 key，懒加载）<br>
+  <strong>详情页首屏只需要 base，一次 HGETALL 变成一次 GET（字符串）。</strong></li>
+  <li><strong>建立热 key 常态监控</strong>：接入 B站开源的 HeavyKeeper 方案，<strong>不再依赖出故障后手工排查</strong>。阈值设为「单 key QPS &gt; 5000」，超阈值自动告警并通知业务方。</li>
+  <li><strong>建立「大 key 上线卡点」</strong>：在 CI/CD 流水线中加一道检查——如果新增的 key 设计超过阈值（元素数 &gt; 5000 或 value &gt; 10KB），需要架构组评审。<strong>从流程上防止新的坑。</strong></li>
+  <li><strong>完善降级预案</strong>：明确哪些缓存可以降级、降级后 DB 能承受多少流量、限流阈值多少。<strong>不求「不出问题」，而求「出问题时能优雅降级」。</strong></li>
+  </ol>
+
+  <p><strong>这个复盘的面试价值</strong>：它同时展示了 ① <strong>分层排查的思路</strong>（整体 → 分片 → 命令 → key）；② <strong>止血优先的原则</strong>；③ <strong>从个案到机制的建设</strong>（监控、卡点、预案）。<strong>第三点是 10 年+ 岗位最想听的——你能把一个故障变成组织能力。</strong></p>
+</div>
+
+<h2 id="c12-8">面试深度问答</h2>
+
+<details class="qa"><summary>什么是大 Key？有什么危害？<span class="lvl lv1">基础</span></summary>
+<div class="qa-b">
+<p><strong>定义</strong>：单个 key 的元素数量或 value 体积过大。经验阈值：String &gt; 10KB（严格 &gt; 1MB）；Hash/List/Set/ZSet 元素数 &gt; 5000（严格 &gt; 10000）或体积 &gt; 1MB。</p>
+<p><strong>五大危害</strong>：</p>
+<ol>
+<li><strong>阻塞主线程</strong>（最核心）：Redis 命令单线程执行，一次 <code class="inline">HGETALL</code> 大 Hash 可能耗时几百毫秒，期间<strong>所有请求排队</strong>。</li>
+<li><strong>网络带宽打满</strong>：单次传输几 MB 到几十 MB。</li>
+<li><strong>删除时阻塞</strong>：<code class="inline">DEL</code> 大 key 需要同步释放大量内存 → 用 <code class="inline">UNLINK</code> 异步删除。</li>
+<li><strong>拖慢持久化与主从同步</strong>：RDB 写盘量暴增；全量同步传输大 key 耗时长、易超时。</li>
+<li><strong>Cluster 内存不均</strong>：大 key 集中导致节点间内存倾斜，<strong>扩容也解决不了</strong>。</li>
+</ol>
+<p><strong>发现</strong>：<code class="inline">redis-cli --bigkeys</code>、<code class="inline">--memkeys</code>、<code class="inline">MEMORY USAGE key</code>、<code class="inline">MEMORY DOCTOR</code>、SCAN 自定义脚本、云厂商工具。</p>
+<p><strong>治理</strong>：预防为主（设计时拆 key、给集合设上限/裁剪）；存量用 <code class="inline">UNLINK</code> 或分批删除，<strong>Never 用 DEL 直接删大 key，Never 用 KEYS *</strong>。</p>
+</div></details>
+
+<details class="qa"><summary>怎么发现大 Key？<span class="lvl lv2">进阶</span></summary>
+<div class="qa-b">
+<table>
+<thead><tr><th style="width:22%">方式</th><th>原理</th><th>适用与注意</th></tr></thead>
+<tbody>
+<tr><td><code class="inline">--bigkeys</code></td><td>SCAN 遍历 + 对每个 key 执行 TYPE 和 STRLEN/LLEN/HLEN/...</td><td>最常用；<strong>只报告每种类型最大的一个 key</strong>；建议在从节点、低峰期执行</td></tr>
+<tr><td><code class="inline">--memkeys</code>（7.0+）</td><td>按内存占用排序，比 --bigkeys 更准</td><td>配合 <code class="inline">--memkeys-samples</code> 控制采样</td></tr>
+<tr><td><code class="inline">MEMORY USAGE key [SAMPLES n]</code></td><td>精确/采样计算单个 key 的内存</td><td>查已知怀疑对象；<code class="inline">SAMPLES 0</code> 精确但慢</td></tr>
+<tr><td>SCAN + 脚本</td><td>游标遍历，按业务阈值筛选导出报告</td><td><strong>最实用</strong>，能找出所有大 key 并导出 CSV 做趋势</td></tr>
+<tr><td><code class="inline">MEMORY DOCTOR</code></td><td>Redis 自诊断内存问题</td><td>看整体健康度（碎片率等）</td></tr>
+<tr><td>云厂商工具</td><td>阿里云 DAS / 腾讯云 DBbrain 一键分析</td><td>生产首选，比自研可靠</td></tr>
+</tbody>
+</table>
+<p><strong>⚠️ 绝对禁止</strong>：<code class="inline">KEYS *</code>。<code class="inline">KEYS</code> 会一次性遍历并返回所有 key，<strong>必然阻塞主线程</strong>。要用 <code class="inline">SCAN</code>（游标式渐进遍历）。</p>
+<p><strong>生产建议</strong>：用<strong>从节点 + 低峰期 + 控制频率</strong>；同时建立<strong>常态监控</strong>（定期抽样 + 趋势对比），而不是等出故障才扫。</p>
+</div></details>
+
+<details class="qa"><summary>发现大 Key 后怎么安全处理？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p><strong>核心原则：分批、限速、可中断、可回滚。</strong></p>
+<p><strong>方法一：UNLINK（首选）</strong></p>
+<p><code class="inline">UNLINK</code> 把 key 从 keyspace 摘除是 O(1)，实际内存释放交给后台线程。<strong>不阻塞主线程。</strong> 建议同时开启 <code class="inline">lazyfree-lazy-user-del yes</code>，让 <code class="inline">DEL</code> 也等价于 <code class="inline">UNLINK</code>。</p>
+<p><strong>方法二：分批删元素（最平滑）</strong></p>
+<p>用 <code class="inline">HSCAN/SSCAN/ZSCAN</code> 游标遍历，每次删 100-500 个元素，<strong>每批 sleep 10ms 限速</strong>。适用于内存极度紧张、需要最平滑释放的场景。</p>
+<p><strong>方法三：RENAME + 异步清理（可回滚，最稳妥）</strong></p>
+<pre style="margin:8px 0"><code class="lang-bash">RENAME big:key big:key:deleting:20260930   # O(1)，业务立即不再访问
+EXPIRE big:key:deleting:20260930 60        # 或配合 UNLINK
+# 出问题还能 RENAME 回来 ✅</code></pre>
+<p><strong>方法四：List 用 LTRIM 逐段裁剪</strong>（List 没有 SCAN）</p>
+<p><strong>关键点</strong>：</p>
+<ul>
+<li><strong>不要在生产高峰做</strong>。</li>
+<li><strong>配合监控</strong>：观察主线程延迟（<code class="inline">INFO latencystats</code> / <code class="inline">LATENCY</code>）、CPU、内存。</li>
+<li><strong>同时改设计</strong>：删除只是止血，<strong>必须改造成「不会再变大」的模型</strong>（拆 key / 加裁剪 / 设上限），否则过段时间又会回来。</li>
+</ul>
+</div></details>
+
+<details class="qa"><summary>什么是热 Key？为什么扩容解决不了？<span class="lvl lv2">进阶</span></summary>
+<div class="qa-b">
+<p><strong>定义</strong>：单个 key 的访问频率极高（如每秒几万到几十万次），导致承载它的节点 CPU / 网络被打满。</p>
+<p><strong>为什么扩容无效（核心洞察）</strong>：</p>
+<p>Cluster 用 <code class="inline">CRC16(key) mod 16384</code> 决定 key 的槽位。<strong>同一个 key 永远落在同一个槽、同一个节点</strong>——所以扩到 3 个节点还是 300 个节点，这个热 key 都在同一个节点上。</p>
+<p>扩容只能分散「不同 key」的负载，<strong>对「同一个 key」的热度完全无效</strong>。</p>
+<p><strong>对比大 key</strong>：</p>
+<ul>
+<li>大 key 的矛盾是「<strong>单个 key 太大</strong>」→ 阻塞主线程 → 解法是「<strong>拆 key</strong>」。</li>
+<li>热 key 的矛盾是「<strong>单个 key 太热</strong>」→ 单分片打满 → 解法是「<strong>拆读压力</strong>」（本地缓存 / 多副本 key / 读写分离）。</li>
+</ul>
+<p><strong>四大危害</strong>：① 单分片 CPU/带宽打满，影响该分片所有请求；② 一旦失效会引发缓存击穿打爆 DB；③ 集群资源倾斜；④ 节点变慢可能被误判下线，触发不必要的故障转移（雪上加霜）。</p>
+</div></details>
+
+<details class="qa"><summary>怎么发现热 Key？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<table>
+<thead><tr><th style="width:20%">方式</th><th>优点</th><th>限制</th></tr></thead>
+<tbody>
+<tr><td><code class="inline">--hotkeys</code>（4.0+）</td><td>命令简单</td><td><strong>要求 maxmemory-policy 是 LFU 系列</strong>；SCAN 遍历慢；一次性分析，不能实时监控</td></tr>
+<tr><td><code class="inline">HOTKEYS</code>（8.0+）</td><td><strong>官方原生，不依赖 LFU</strong>，可随时 START/GET/STOP</td><td>需要 8.x；新的 key 需要采样积累</td></tr>
+<tr><td>客户端埋点</td><td>成本低、实时性好</td><td>只见单客户端视野，需要聚合上报</td></tr>
+<tr><td>代理层统计</td><td><strong>能看到全量流量</strong>，可在代理层直接做本地缓存</td><td>多一跳延迟；代理需高可用</td></tr>
+<tr><td><code class="inline">MONITOR</code></td><td>能看到所有命令</td><td><strong>性能影响巨大，仅限紧急排查，绝不可长期使用</strong></td></tr>
+<tr><td>内核改造（得物等）</td><td><strong>最准确、最实时</strong>，能看到全量</td><td>维护成本极高</td></tr>
+<tr><td>HeavyKeeper 类算法（B站）</td><td>用小内存常态监控，能长期跑</td><td>实现较复杂</td></tr>
+</tbody>
+</table>
+<p><strong>推荐组合</strong>：客户端埋点（发现）+ 本地缓存（治理）是最低成本高收益的组合；需要常态监控就加 HeavyKeeper 类算法；只有在自建 Redis 且规模巨大时才做内核改造。</p>
+</div></details>
+
+<details class="qa"><summary>热 Key 怎么治理？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p><strong>五种手段（按性价比排序）</strong>：</p>
+<ol>
+<li><strong>本地缓存（最有效，第一招）</strong>：Caffeine/Guava Cache 缓存热 key，把读压力拦在 Redis 之前。<strong>代价是秒级不一致 + 多实例差异</strong>，所以只适用于「读多写少 + 能忍秒级延迟」的数据。</li>
+<li><strong>热 key 多副本</strong>：拆成 <code class="inline">hotkey:1001:0</code> ~ <code class="inline">hotkey:1001:9</code>，读时随机选。<strong>读压力分散到 N 个槽</strong>。代价是写放大（要写 N 份），只适合读多写少。</li>
+<li><strong>读写分离 / 从节点分流</strong>：读请求分散到多个从节点（<code class="inline">READONLY</code> + 客户端 LB）。<strong>代价是可能读到旧数据</strong>。</li>
+<li><strong>代理层/服务端二级缓存</strong>：在 proxy 或 Redis 内核做热 key 自动缓存，对业务透明（B站/得物的方向）。</li>
+<li><strong>业务层打散（最根本）</strong>：设计阶段就避免单一超级热点。<br>· 秒杀库存 → 拆成 100 个桶 <code class="inline">stock:1001:0~99</code>，随机扣减后汇总。<br>· 大促配置 → 本地缓存 + 配置中心推送。<br>· 明星主页 → 关注列表扇出 + 多级缓存，而不是单 key 计数器。</li>
+</ol>
+<p><strong>面试加分话术</strong>：「<strong>热 key 的『发现』方案成本差别很大，但『治理』的答案高度一致——本地缓存 + 读写分离 + 业务层打散。</strong> 所以我会优先把精力放在治理上。其中<strong>『业务层打散』是唯一能从根本上解决问题的</strong>——前三种都是『缓解』，只有设计上不产生超级热点才是『根治』。」</p>
+</div></details>
+
+<details class="qa"><summary>HeavyKeeper 是什么？为什么不用简单的计数器？<span class="lvl lv4">专家</span></summary>
+<div class="qa-b">
+<p><strong>为什么不用简单计数器</strong>：如果有一亿个 key，一个 key 一个计数器需要一亿个计数器 → <strong>内存不可接受</strong>。而且统计本身的读写开销会拖慢 Redis。</p>
+<p><strong>HeavyKeeper 的核心机制</strong>：</p>
+<ul>
+<li>维护 <code class="inline">d</code> 个哈希表，每个表 <code class="inline">w</code> 个桶，每桶存「指纹 + 计数」。</li>
+<li>新元素到达时，用 <code class="inline">d</code> 个哈希函数定位 <code class="inline">d</code> 个桶：
+<ul>
+<li>桶指纹相同 → 计数 +1</li>
+<li>桶指纹不同 → 以概率 <code class="inline">b^(-count)</code> <strong>衰减</strong>该桶计数（<code class="inline">b</code> 为衰减因子），计数降到 0 时用新元素替换</li>
+</ul>
+</li>
+<li><strong>效果</strong>：高频元素持续命中自己的桶、计数不断增长；低频元素被概率衰减逐渐抹掉。<strong>每个桶最终代表一个「高频候选」，从而用小内存找出 Top-K。</strong></li>
+</ul>
+<p><strong>相比其他算法</strong>：</p>
+<ul>
+<li><strong>Count-Min Sketch</strong>：只能估计频次，<strong>只高估不低估</strong>，找 Top-K 不够准。</li>
+<li><strong>Space-Saving</strong>：天然输出 Top-K，但低频元素容易被误淘汰。</li>
+<li><strong>HeavyKeeper</strong>：结合指纹 + 概率衰减，<strong>在更小内存下得到更准确的 Top-K</strong>，且能有效过滤长尾噪声。</li>
+</ul>
+<p><strong>B站的工程价值</strong>：把热 key 识别的开销降到「可以常驻运行」——<strong>从此热 key 监控从「故障后临时排查」变成「常态化监控」</strong>。这是运维理念上的升级。</p>
+</div></details>
+
+<details class="qa"><summary>线上 Redis 突然变慢 / CPU 打满，你的排查思路？<span class="lvl lv4">专家</span></summary>
+<div class="qa-b">
+<p>这是最典型的「10 年+ 岗位」场景题。给一套完整的分层排查框架：</p>
+<p><strong>第 0 步：先止血（永恒的第一原则）</strong></p>
+<ul>
+<li>确认影响面：是全集群还是单节点？是全部命令还是某类命令？</li>
+<li>如果影响业务，<strong>先降级</strong>（关闭非核心缓存、切到 DB 兜底、限流），<strong>再排查</strong>。</li>
+</ul>
+<p><strong>第 1 步：区分「全集群问题」还是「单节点问题」</strong></p>
+<ul>
+<li>看各节点 CPU、QPS、延迟（<code class="inline">INFO</code> / 监控大盘）。<strong>这一步就能把问题范围砍掉一半。</strong></li>
+<li>单节点 → 大概率是<strong>大 key / 热 key / 数据倾斜</strong>。</li>
+<li>全集群 → 大概率是<strong>业务流量突增 / 慢命令 / 网络问题 / 客户端问题</strong>。</li>
+</ul>
+<p><strong>第 2 步：看命令维度</strong></p>
+<pre style="margin:8px 0"><code class="lang-bash">INFO commandstats        <span class="cm"># 各命令的调用次数和耗时 — 找出"耗时大户"</span>
+INFO latencystats        <span class="cm"># 各命令的延迟分布（7.0+）</span>
+SLOWLOG GET 50           <span class="cm"># 慢查询日志 — 找出具体慢命令</span>
+LATENCY LATEST           <span class="cm"># 延迟事件（如 fork、expire-cycle）</span></code></pre>
+<p>常见嫌疑：<code class="inline">KEYS</code>、<code class="inline">HGETALL</code>、<code class="inline">SMEMBERS</code>、<code class="inline">ZRANGE 0 -1</code>、大范围的 <code class="inline">SCAN</code>、<code class="inline">SORT</code>、<code class="inline">ZUNIONSTORE</code>。<strong>看到这些命令出现在高频位置，基本就锁定了。</strong></p>
+<p><strong>第 3 步：定位具体的 key</strong></p>
+<ul>
+<li>大 key：<code class="inline">--bigkeys</code> / <code class="inline">--memkeys</code> / <code class="inline">MEMORY USAGE</code>。</li>
+<li>热 key：<code class="inline">HOTKEYS</code>（8.x）/ <code class="inline">--hotkeys</code>（需 LFU）/ 客户端埋点数据。</li>
+<li>Cluster：<code class="inline">CLUSTER SLOT-STATS ORDERBY CPU</code>（8.2+）先找热槽，再找槽内热 key。</li>
+</ul>
+<p><strong>第 4 步：排除「非 Redis 自身」的原因</strong></p>
+<ul>
+<li><strong>客户端问题</strong>：连接数暴增（<code class="inline">INFO clients</code>）、连接池不足、Pipeline 使用不当、<code class="inline">maxclients</code> 打满。</li>
+<li><strong>网络问题</strong>：带宽打满（大 key 传输）、网络抖动。</li>
+<li><strong>持久化影响</strong>：<code class="inline">INFO persistence</code> 看是否有 fork 阻塞、AOF rewrite 在进行、<code class="inline">rdb_last_fork_usec</code> 是否异常。</li>
+<li><strong>内存问题</strong>：<code class="inline">used_memory_rss</code> &gt; maxmemory 触发频繁淘汰；<code class="inline">mem_fragmentation_ratio</code> &gt; 1.5 碎片严重；<strong>内存被 swap 到磁盘（ratio &lt; 1.0）会导致延迟飙升</strong>。</li>
+<li><strong>主从/集群问题</strong>：主从全量同步、故障转移、槽迁移正在进行。</li>
+</ul>
+<p><strong>第 5 步：从个案到机制（架构师视角）</strong></p>
+<ul>
+<li>建立<strong>常态监控</strong>（热 key/大 key 扫描 + 趋势告警），而不是出故障才查。</li>
+<li>建立<strong>上线卡点</strong>（设计阶段评审 key 模型，禁止无上限集合）。</li>
+<li>建立<strong>降级预案</strong>（哪些能降级、降级后 DB 能扛多少）。</li>
+<li>建立<strong>命令规范</strong>（禁止 <code class="inline">KEYS</code>、禁止对大的集合做全量操作，用 SDK 提供安全封装）。</li>
+</ul>
+<p><strong>面试收尾</strong>：「我的排查思路是<strong>『从大到小、层层收敛』</strong>——先定位是哪个节点，再定位是哪类命令，再定位是哪个 key，最后排除非 Redis 的原因。<strong>但更重要的是最后一步：把这次排查沉淀成监控、卡点和规范，让同类问题下次能自动预警而不是重新排查一遍。</strong>」</p>
+</div></details>
+
+<details class="qa"><summary>怎么预防大 Key 和热 Key？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p><strong>一、设计阶段（最有效）</strong></p>
+<table>
+<thead><tr><th style="width:24%">反模式</th><th>正确做法</th></tr></thead>
+<tbody>
+<tr><td>一个大 Set/Hash 存全局数据</td><td>按业务维度或 ID 区间分片（<code class="inline">user:shard:{id%100}</code>）</td></tr>
+<tr><td>List/ZSet 无限增长</td><td><strong>强制裁剪</strong>：<code class="inline">LPUSH + LTRIM</code>、<code class="inline">ZADD + ZREMRANGEBYRANK</code>，或按周期分 key（<code class="inline">rank:daily:20260930</code>）</td></tr>
+<tr><td>Redis 存大对象/文件</td><td>只存元数据，大文件放对象存储</td></tr>
+<tr><td>String 存大 JSON 数组</td><td>拆为「ID 列表 key + 单条明细 key」</td></tr>
+<tr><td>用单个 key 做全局计数器/排行榜</td><td>拆成多个桶/分片 key，读时聚合</td></tr>
+<tr><td>秒杀库存放一个 key</td><td>拆成 N 个库存桶，随机扣减后汇总</td></tr>
+</tbody>
+</table>
+<p><strong>二、编码规范</strong></p>
+<ul>
+<li><strong>命令黑名单</strong>：禁止 <code class="inline">KEYS</code>；禁止对未知大小的集合用 <code class="inline">HGETALL/SMEMBERS/LRANGE 0 -1</code>；用 <code class="inline">HMGET/分页/LTRIM</code> 替代。</li>
+<li><strong>统一 SDK</strong>：把 <code class="inline">DEL</code> 替换为 <code class="inline">UNLINK</code> 的逻辑封进 SDK，让业务方无法误用。</li>
+<li><strong>强制 TTL</strong>：所有缓存 key 必须设过期时间（有明确永不过期需求的要评审）。</li>
+<li><strong>key 命名规范</strong>：<code class="inline">业务:实体:ID</code>，便于按前缀批量治理。</li>
+</ul>
+<p><strong>三、流程与监控</strong></p>
+<ul>
+<li><strong>上线卡点</strong>：在 CI/CD 里加检查（新增 key 模型超阈值需评审）。</li>
+<li><strong>常态扫描</strong>：每天定时在从节点扫大 key，生成趋势报告，新增的大 key 自动告警。</li>
+<li><strong>热 key 监控</strong>：客户端埋点 / HeavyKeeper / 8.x HOTKEYS，阈值告警。</li>
+<li><strong>容量告警</strong>：单实例内存、碎片率、连接数、慢查询数量都要有阈值告警。</li>
+<li><strong>降级预案</strong>：每个核心缓存都要明确「能不能降级、降级后影响是什么」。</li>
+</ul>
+<p><strong>一句话总结</strong>：「<strong>预防大 key/热 key 的答案是『设计 + 规范 + 监控 + 流程』四位一体</strong>。只靠事后排查治理，永远在救火；把检查点前移到设计和上线环节，才能从源头降低发生率。」</p>
+</div></details>
+
+<h2 id="c12-9">本节自测</h2>
+<div class="track">
+  <label><input type="checkbox" data-k="d4-27"><span>我能给出大 key 的量化标准（元素数/体积阈值）</span></label>
+  <label><input type="checkbox" data-k="d4-28"><span>我能说清大 key 的五大危害及每条的机理</span></label>
+  <label><input type="checkbox" data-k="d4-29"><span>我能说出大 key 的三种常见成因</span></label>
+  <label><input type="checkbox" data-k="d4-30"><span>我能用 --bigkeys / --memkeys / MEMORY USAGE / SCAN 脚本发现大 key</span></label>
+  <label><input type="checkbox" data-k="d4-31"><span>我知道 --bigkeys 只报告每种类型最大的一个 key，且不能在主节点高峰期跑</span></label>
+  <label><input type="checkbox" data-k="d4-32"><span>我能说出删除大 key 的四种方法，并解释 UNLINK 为什么安全</span></label>
+  <label><input type="checkbox" data-k="d4-33"><span>我能解释「RENAME + 异步清理」为什么可回滚</span></label>
+  <label><input type="checkbox" data-k="d4-34"><span>我能论证「热 key 为什么扩容解决不了」</span></label>
+  <label><input type="checkbox" data-k="d4-35"><span>我能说出热 key 的四种发现手段及各自的限制</span></label>
+  <label><input type="checkbox" data-k="d4-36"><span>我知道 --hotkeys 依赖 LFU 策略，生产常用客户端埋点/代理/内核方案</span></label>
+  <label><input type="checkbox" data-k="d4-37"><span>我知道 MONITOR 性能影响巨大，仅限紧急排查</span></label>
+  <label><input type="checkbox" data-k="d4-38"><span>我能说出热 key 治理的五种手段及各自代价</span></label>
+  <label><input type="checkbox" data-k="d4-39"><span>我能讲清京东 JDHotKey、得物内核改造、B站 HeavyKeeper 三条路线的差异</span></label>
+  <label><input type="checkbox" data-k="d4-40"><span>我能描述 HeavyKeeper 的指纹 + 概率衰减机制，并对比 Count-Min Sketch</span></label>
+  <label><input type="checkbox" data-k="d4-41"><span>我能完整复述一个热 key 故障的排查 → 止血 → 根治流程</span></label>
+  <label><input type="checkbox" data-k="d4-42"><span>我能给出「Redis 变慢」的分层排查框架（含非 Redis 原因的排除）</span></label>
+  <label><input type="checkbox" data-k="d4-43"><span>我能说出大 key/热 key 的四位一体预防体系（设计+规范+监控+流程）</span></label>
+</div>
+</section>

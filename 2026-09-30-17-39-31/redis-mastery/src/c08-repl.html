@@ -1,0 +1,447 @@
+<section id="c08-repl" class="anchor" data-title="Day3.1 · 主从复制与哨兵">
+<div class="ch-meta">
+  <span class="ch-num">Day 3 · 第 1 节</span>
+  <span class="badge bg-blue">预计 85 分钟</span>
+  <span class="badge bg-red">面试必考</span>
+</div>
+<h1>Day3.1 · 主从复制与哨兵：高可用的第一层</h1>
+
+<div class="box b-tip">
+  <div class="box-t">一句话结论</div>
+  <p>主从复制解决「<strong>数据多个副本 + 读写分离</strong>」，哨兵解决「<strong>主节点挂了自动切换</strong>」。面试的深水区在两处：<strong>① PSYNC 的全量/增量切换逻辑与 repl_backlog 的关系；② 脑裂（split-brain）导致的数据丢失，以及 min-replicas 怎么防。</strong></p>
+</div>
+
+<h2 id="c08-1">1. 动手：搭建主从并观察复制</h2>
+<pre><code class="lang-bash"><span class="cm">########## 方式 1：命令行（临时测试）##########</span>
+<span class="cm"># 在从节点上执行</span>
+REPLICAOF 10.0.0.5 6379
+<span class="cm"># 或旧命令 SLAVEOF 10.0.0.5 6379（已弃用但兼容）</span>
+
+<span class="cm"># 取消复制，变回主节点</span>
+REPLICAOF NO ONE
+
+<span class="cm">########## 方式 2：配置文件（生产标准）##########</span>
+<span class="cm"># 从节点 redis.conf：</span>
+<span class="kw">replicaof</span> 10.0.0.5 <span class="nu">6379</span>
+<span class="kw">masterauth</span> <span class="st">"主节点密码"</span>          <span class="cm"># 从节点连主节点用的密码（必配！）</span>
+<span class="kw">replica-read-only</span> <span class="st">yes</span>          <span class="cm"># 从节点只读（默认）</span>
+<span class="kw">replica-serve-stale-data</span> <span class="st">yes</span>    <span class="cm"># 与主节点断连时，是否继续响应（yes 用旧数据，no 报错）</span>
+<span class="kw">replica-priority</span> <span class="nu">100</span>            <span class="cm"># 哨兵选主的优先级，越小越优先</span>
+<span class="kw">repl-diskless-sync</span> <span class="st">yes</span>          <span class="cm"># 无盘复制（见下文）</span>
+<span class="kw">repl-diskless-sync-delay</span> <span class="nu">5</span>      <span class="cm"># 等待多个从节点一起同步（秒）</span>
+
+<span class="cm">########## 验证与观察 ##########</span>
+<span class="cm"># 在主节点上</span>
+INFO replication
+<span class="cm"># 输出：
+#   role:master
+#   connected_slaves:2
+#   slave0:ip=10.0.0.6,port=6379,state=online,offset=1234567,lag=0
+#   slave1:ip=10.0.0.7,port=6379,state=online,offset=1234000,lag=1
+#   master_failover_state:no-failover
+#   master_replid:8f3a...            ← 复制ID（关键！用于判断是否同一数据集）
+#   master_replid2:0000...
+#   master_repl_offset:1234567       ← 主节点复制偏移量
+#   repl_backlog_active:1
+#   repl_backlog_size:1048576        ← backlog 大小（默认 1MB）
+#   repl_backlog_first_byte_offset:186368
+#   repl_backlog_histlen:1048576</span>
+
+<span class="cm"># 在从节点上</span>
+INFO replication
+<span class="cm">#   role:slave
+#   master_host:10.0.0.5
+#   master_port:6379
+#   master_link_status:up             ← up/down 关键指标
+#   master_last_io_seconds_ago:0       ← 距上次通信秒数
+#   master_sync_in_progress:0
+#   slave_repl_offset:1234567          ← 从节点偏移量
+#   slave_priority:100
+#   slave_read_only:1
+#   connected_slaves:0</span>
+
+<span class="cm">########## 复制延迟监控（生产必配告警）##########</span>
+<span class="cm"># 在主节点上看每个从节点的 lag</span>
+redis-cli info replication | grep slave
+<span class="cm"># 或在从节点上看「落后多少字节」</span>
+<span class="cm"># 延迟字节数 = master_repl_offset(主) - slave_repl_offset(从)</span>
+redis-cli -h master info replication | grep master_repl_offset
+redis-cli -h slave  info replication | grep slave_repl_offset
+
+<span class="cm"># Prometheus + redis_exporter 会暴露 redis_slave_repl_offset 等指标</span></code></pre>
+
+<h2 id="c08-2">2. PSYNC：全量同步与增量同步</h2>
+
+<div class="box b-big">
+  <div class="box-t">✅ 全量同步（Full Resynchronization）完整流程</div>
+  <p>从节点首次连接主节点（或无法增量同步）时执行：</p>
+  <div class="steps">
+  <div class="step"><div class="st-t">从节点发起 PSYNC</div>
+  <p>发送 <code class="inline">PSYNC ? -1</code>（<code class="inline">?</code> 表示不知道主节点 replid，<code class="inline">-1</code> 表示没有偏移量）。</p>
+  </div>
+  <div class="step"><div class="st-t">主节点回复 +FULLRESYNC</div>
+  <p>主节点返回 <code class="inline">+FULLRESYNC &lt;replid&gt; &lt;offset&gt;</code>，告诉从节点「我的复制 ID 是这个，当前偏移量是这个」。</p>
+  </div>
+  <div class="step"><div class="st-t">主节点执行 BGSAVE</div>
+  <p>fork 子进程生成 RDB 文件。同时，<strong>主节点开始把这段时间的所有写命令写入「复制缓冲区（replication buffer）」</strong>——这个缓冲区是<strong>每个从节点一个</strong>。</p>
+  </div>
+  <div class="step"><div class="st-t">传输 RDB</div>
+  <p><strong>磁盘复制</strong>（默认）：RDB 写到磁盘再传给从节点。<br>
+  <strong>无盘复制</strong>（<code class="inline">repl-diskless-sync yes</code>）：RDB 不落盘，直接通过 socket 边生成边发送。<strong>优势</strong>：省磁盘 I/O、对磁盘慢的机器更友好。<strong>劣势</strong>：如果从节点连接中断，整个传输白费。</p>
+  </div>
+  <div class="step"><div class="st-t">从节点清空数据并加载 RDB</div>
+  <p>从节点先 <code class="inline">FLUSHALL</code> 清空自己的数据（！），再加载 RDB。所以 <strong>从节点上如果有本地数据会被清掉</strong>——不要往从节点写数据。</p>
+  </div>
+  <div class="step"><div class="st-t">主节点发送复制缓冲区的增量</div>
+  <p>把步骤 3-5 期间积累的写命令发给从节点，从节点重放。<strong>至此主从数据一致。</strong></p>
+  </div>
+  <div class="step"><div class="st-t">进入命令传播阶段</div>
+  <p>之后主节点每执行一个写命令，就<strong>异步</strong>发给所有从节点（不等待确认）。同时主节点会把命令写入<strong>复制积压缓冲区（repl_backlog）</strong>。</p>
+  </div>
+  </div>
+</div>
+
+<div class="box b-big">
+  <div class="box-t">✅ 增量同步（Partial Resynchronization）与 repl_backlog 的关系</div>
+  <p><strong>场景</strong>：从节点与主节点断连（网络抖动、从节点重启），重连后如果可能，希望只同步「断连期间缺失的那部分」，而不是全量重传。</p>
+  <p><strong>关键结构：repl_backlog（复制积压缓冲区）</strong></p>
+  <ul>
+  <li>是一个<strong>固定大小的环形缓冲区</strong>（默认 <code class="inline">repl-backlog-size 1mb</code>），主节点把所有写命令都写进去。</li>
+  <li>记录 <code class="inline">master_repl_offset</code>（主节点总偏移）、<code class="inline">repl_backlog_first_byte_offset</code>（最旧数据的位置）、<code class="inline">repl_backlog_histlen</code>（有效数据长度）。</li>
+  </ul>
+  <p><strong>增量同步的判定逻辑</strong>：从节点重连后发送 <code class="inline">PSYNC &lt;replid&gt; &lt;offset&gt;</code>，主节点检查：</p>
+  <ol>
+  <li><strong>replid 是否匹配</strong>（是自己的 replid 或 replid2）？</li>
+  <li><strong>offset 是否在 backlog 范围内</strong>（即 <code class="inline">offset &gt;= repl_backlog_first_byte_offset</code>）？</li>
+  </ol>
+  <p>两个条件都满足 → 回复 <code class="inline">+CONTINUE</code>，只发送缺失那部分（<strong>增量同步</strong>）。<br>
+  任一不满足 → 回复 <code class="inline">+FULLRESYNC</code>，走全量同步。</p>
+  <p><strong>核心结论</strong>：<strong>backlog 越小，越容易退化到全量同步</strong>。如果从节点断连时间长、写入量大，backlog 早被覆盖了，只能全量重传——这时会出现「网络带宽打满 + 主节点 fork」的双重冲击。</p>
+  <p><strong>容量估算公式（面试加分）</strong>：</p>
+  <pre style="margin:8px 0 0"><code class="lang-bash">repl-backlog-size = 平均写入速率(字节/秒) × 最大允许断连时间(秒) × 安全系数(2)
+<span class="cm"># 例：写入 5MB/s，允许断连 10 秒 → 5 × 10 × 2 = 100MB
+# 所以生产上 repl-backlog-size 通常设置为 64MB ~ 512MB，而不是默认的 1MB</span>
+
+CONFIG SET repl-backlog-size 256mb
+CONFIG GET repl-backlog-ttl   <span class="cm"># backlog 在没有从节点后多久被释放（默认 3600 秒）</span></code></pre>
+</div>
+
+<div class="box b-warn">
+  <div class="box-t">⚠️ replid 与 replid2：主从切换后的「血脉」问题</div>
+  <p>每个 Redis 实例启动时会生成一个 <strong>40 位的 replid</strong>（随机字符串），标识「这份数据集的血统」。</p>
+  <ul>
+  <li>从节点复制主节点后，<strong>继承主节点的 replid</strong>。</li>
+  <li><strong>主从切换后</strong>（哨兵选出新主），新主节点会改变自己的 replid（因为它成了新的数据源头）。为了不让其他从节点被迫全量同步，旧主节点的 replid 会被保存到 <code class="inline">replid2</code>。</li>
+  <li>这样，其他从节点用旧 replid 来 PSYNC 时，主节点检查到 <code class="inline">replid2</code> 匹配，仍可走增量同步。</li>
+</ul>
+  <p><strong>为什么重要</strong>：如果主从切换后所有从节点都要全量同步，会引发「同时全量同步风暴」——多个从节点同时请求 RDB，主节点要 fork 多次（实际是一次 BGSAVE 服务多个从节点，但复制缓冲区要各一份），网络和内存压力巨大。<strong>能讲清 replid2 的设计意图，说明你读过源码。</strong></p>
+</div>
+
+<h2 id="c08-3">3. 哨兵（Sentinel）：自动故障转移</h2>
+
+<h3>哨兵的四项工作</h3>
+<table>
+<thead><tr><th style="width:16%">工作</th><th>机制</th></tr></thead>
+<tbody>
+<tr><td><strong>监控</strong></td><td>每秒对主节点、从节点、其他哨兵执行 <code class="inline">PING</code>，判断是否可达；每 10 秒发送 <code class="inline">INFO</code> 更新拓扑；每 2 秒通过 <code class="inline">__sentinel__:hello</code> 频道交换信息</td></tr>
+<tr><td><strong>通知</strong></td><td>通过 Pub/Sub 把故障事件发布出去，供监控系统消费；可用脚本触发告警</td></tr>
+<tr><td><strong>自动故障转移</strong></td><td>主观下线 → 客观下线 → 选举 leader → 选新主 → 切换 → 通知客户端</td></tr>
+<tr><td><strong>配置提供者</strong></td><td>客户端连哨兵获取当前主节点地址，因此客户端要知道的是「哨兵地址」而不是「主节点地址」</td></tr>
+</tbody>
+</table>
+
+<div class="box b-big">
+  <div class="box-t">✅ 故障转移的完整流程（面试必答）</div>
+  <div class="steps">
+  <div class="step"><div class="st-t">主观下线（SDOWN）</div>
+  <p>某个哨兵发现主节点在 <code class="inline">down-after-milliseconds</code>（默认 30 秒，建议 5-10 秒）内一直没响应 PING，就把它标记为<strong>主观下线</strong>——只是这个哨兵自己认为它挂了。</p>
+  </div>
+  <div class="step"><div class="st-t">客观下线（ODOWN）</div>
+  <p>该哨兵向其他哨兵发送 <code class="inline">SENTINEL is-master-down-by-addr</code> 询问。如果<strong>超过 quorum 个哨兵</strong>也认为主节点下线，就标记为<strong>客观下线</strong>。</p>
+  <p><code class="inline">quorum</code> 在配置里指定（<code class="inline">sentinel monitor mymaster 1.2.3.4 6379 2</code> 里的 2）。<strong>quorum 是判定下线所需的最小票数，与实际选举 leader 所需票数是两件事。</strong></p>
+  </div>
+  <div class="step"><div class="st-t">选举领头哨兵（Leader Election）</div>
+  <p>基于 <strong>Raft 算法</strong>：</p>
+  <ul>
+  <li>发现客观下线的哨兵向其他哨兵请求投票。</li>
+  <li>每个哨兵在一个<strong>任期（epoch）</strong>内只能投一票，先到先得。</li>
+  <li>获得<strong>票数 ≥ max(quorum, 哨兵总数/2 + 1)</strong> 的哨兵成为 leader。</li>
+  <li>如果没有哨兵拿到多数票，等待随机时间后发起新一轮选举（epoch +1）。</li>
+  </ul>
+  <p><strong>为什么需要「多数」而不是 quorum</strong>：quorum 只是「确认下线」的门槛。如果 quorum=2 而哨兵总数是 5，2 票不足以避免「网络分区两侧各选出一个 leader」的脑裂问题，所以要求<strong>过半数</strong>才能当 leader。</p>
+  </div>
+  <div class="step"><div class="st-t">选择新的主节点</div>
+  <p>Leader 从合格的从节点中按以下顺序筛选：</p>
+  <ol>
+  <li><strong>过滤不健康的</strong>：主观下线、断连超过 <code class="inline">down-after-milliseconds × 10</code>、与主节点断连超过 <code class="inline">down-after-milliseconds</code> 的从节点被淘汰。</li>
+  <li><strong>按 replica-priority 排序</strong>：优先级小的优先（<code class="inline">replica-priority 0</code> 表示永不选为master）。</li>
+  <li><strong>优先级相同则看复制偏移量</strong>：offset 最大的（数据最新）。<strong>这是「尽量少丢数据」的关键。</strong></li>
+  <li><strong>offset 也相同则看 runid</strong>：字典序小的。</li>
+  </ol>
+  </div>
+  <div class="step"><div class="st-t">执行切换</div>
+  <p>Leader 向选中的从节点发送 <code class="inline">REPLICAOF NO ONE</code>（升为主），向其他从节点发送 <code class="inline">REPLICAOF &lt;新主&gt;</code>（改跟随）。旧主节点恢复后，哨兵会把它降级为从节点，跟随新主。</p>
+  </div>
+  <div class="step"><div class="st-t">通知客户端</div>
+  <p>哨兵通过 Pub/Sub 频道 <code class="inline">+switch-master</code> 广播新主地址。<strong>客户端必须实现订阅并刷新连接池</strong>（Jedis/Lettuce/Redisson 都内置了 Sentinel 支持）。</p>
+  </div>
+  </div>
+</div>
+
+<pre><code class="lang-conf"><span class="cm">########## 生产级哨兵配置 ##########</span>
+<span class="kw">port</span> <span class="nu">26379</span>
+<span class="kw">daemonize</span> <span class="st">no</span>
+<span class="kw">logfile</span> <span class="st">"/var/log/redis/sentinel.log"</span>
+<span class="kw">dir</span> <span class="st">"/var/lib/redis/sentinel"</span>       <span class="cm"># 哨兵会在这里写配置（记录已知的从节点和状态）</span>
+
+<span class="cm"># ---- 监控的主节点 ----</span>
+<span class="kw">sentinel monitor</span> mymaster <span class="nu">10.0.0.5</span> <span class="nu">6379</span> <span class="nu">2</span>
+<span class="cm">#                                  ↑ quorum=2，至少 2 个哨兵同意才判客观下线</span>
+
+<span class="cm"># ---- 认证 ----</span>
+<span class="kw">sentinel auth-pass</span> mymaster <span class="st">"主节点密码"</span>
+
+<span class="cm"># ---- 下线判定 ----</span>
+<span class="kw">sentinel down-after-milliseconds</span> mymaster <span class="nu">5000</span>   <span class="cm"># 5 秒无响应判主观下线</span>
+
+<span class="cm"># ---- 故障转移 ----</span>
+<span class="kw">sentinel failover-timeout</span> mymaster <span class="nu">60000</span>       <span class="cm"># 同一主节点的两次 failover 间隔至少 60s</span>
+<span class="kw">sentinel parallel-syncs</span> mymaster <span class="nu">1</span>              <span class="cm"># 每次只允许 1 个从节点同时同步新主</span>
+<span class="cm">#   ⭐ parallel-syncs 很关键：值越大切换越快，但会有更多从节点同时进</span>
+<span class="cm">#      入"不可用"状态（同步期间只读甚至不可读）。值小则切换慢但不影响可用性。</span>
+
+<span class="cm"># ---- 安全 ----</span>
+<span class="kw">requirepass</span> <span class="st">"哨兵自己的密码"</span>             <span class="cm"># 6.2+ 支持哨兵间认证</span>
+<span class="kw">sentinel sentinel-user</span> default
+<span class="kw">sentinel sentinel-pass</span> <span class="st">"哨兵密码"</span>
+
+<span class="cm"># ---- 通知（可选，用于告警）----</span>
+<span class="kw">sentinel notification-script</span> mymaster <span class="st">/etc/redis/notify.sh</span>
+<span class="kw">sentinel client-reconfig-script</span> mymaster <span class="st">/etc/redis/reconfig.sh</span>
+<span class="cm">#   client-reconfig-script 在切换完成后执行，可用来做 DNS 更新、网关配置刷新</span>
+
+<span class="cm"># ---- 7.0+ 支持主机名解析 ----</span>
+<span class="kw">sentinel resolve-hostnames</span> <span class="st">yes</span>
+<span class="kw">sentinel announce-hostnames</span> <span class="st">yes</span></code></pre>
+
+<pre><code class="lang-bash"><span class="cm">########## 哨兵运维命令 ##########</span>
+sentinel masters                                <span class="cm"># 所有被监控的主节点及状态</span>
+sentinel master mymaster                        <span class="cm"># 详查某个主节点（含所有从节点信息）</span>
+sentinel replicas mymaster                      <span class="cm"># 从节点列表</span>
+sentinel sentinels mymaster                     <span class="cm"># 其他哨兵节点</span>
+sentinel get-master-addr-by-name mymaster       <span class="cm"># ⭐ 客户端用它获取当前主节点地址</span>
+
+<span class="cm"># 手动触发故障转移（演练用！）</span>
+sentinel failover mymaster
+<span class="cm">#   ⭐ 生产应定期做「故障转移演练」，验证切换链路可用</span>
+
+<span class="cm"># 修改配置（部分参数支持运行时修改）</span>
+sentinel set mymaster down-after-milliseconds 10000
+sentinel set mymaster parallel-syncs 2
+sentinel flushconfig                            <span class="cm"># 把配置强制写回磁盘</span>
+sentinel reset mymaster                         <span class="cm"># 重置状态（慎用）</span></code></pre>
+
+<h2 id="c08-4">4. 脑裂：主从架构最大的坑</h2>
+<div class="box b-x">
+  <div class="box-t">🚨 脑裂（Split-Brain）导致数据丢失的完整推演</div>
+  <p><strong>场景</strong>：主节点与「哨兵 + 从节点」之间的网络断了（但客户端与主节点还是通的）。</p>
+  <ol>
+  <li>哨兵们判定主节点主观下线 → 客观下线 → 选举 leader → <strong>把某个从节点提升为新主</strong>。</li>
+  <li><strong>但旧主节点还活着，还在接受客户端的写请求！</strong>（因为客户端到它的网络是通的）</li>
+  <li>此时系统里有<strong>两个主节点</strong>：旧主（在写新数据）+ 新主（在服务读，且它没有旧主新写的数据）。</li>
+  <li>网络恢复后，哨兵会把旧主<strong>降级为从节点</strong>，让它 <code class="inline">REPLICAOF</code> 新主。</li>
+  <li><strong>旧主上「断连期间写入的数据」被全部清空</strong>（因为全量同步会先 FLUSHALL 再加载新主的 RDB）！</li>
+  </ol>
+  <p><strong>这就是脑裂数据丢失</strong>：客户端以为写入成功了，但数据永久丢失。</p>
+  <p><strong>典型案例</strong>：分布式锁场景。旧主上创建的锁 key 在同步后消失，另一个客户端又能拿到锁——<strong>两个客户端同时持锁，业务逻辑失效</strong>。这就是为什么「Redlock 也无法解决所有问题」的讨论中，脑裂总被提起。</p>
+  <p><strong>防护手段（两个必须配的配置）</strong>：</p>
+  <pre style="margin:8px 0 0"><code class="lang-conf"><span class="cm"># 主节点：至少要有 N 个从节点连接且延迟 &le; M 秒，才接受写入</span>
+<span class="kw">min-replicas-to-write</span> <span class="nu">1</span>
+<span class="kw">min-replicas-max-lag</span> <span class="nu">10</span>
+<span class="cm"># 含义：如果连不上 1 个从节点，或从节点延迟超过 10 秒，
+#      主节点拒绝所有写请求，返回 NOREPLICAS 错误
+# 效果：脑裂时旧主因为连不上从节点而拒绝写 → 不会产生"会丢的数据"</span>
+
+<span class="cm"># 从节点：与主节点断连超过 N 秒后，不再响应客户端（返回错误）</span>
+<span class="kw">replica-serve-stale-data</span> <span class="st">no</span>
+<span class="cm"># 效果：避免客户端读到过期数据</span></code></pre>
+  <p><strong>权衡（面试一定要说）</strong>：这两个配置<strong>降低可用性以换取一致性</strong>。配了 <code class="inline">min-replicas-to-write 1</code> 后，即使只有一个从节点短暂抖动，主节点也会拒绝写入，业务报错。<strong>所以要根据业务对「丢数据」和「不可写」的容忍度来选择</strong>——缓存场景可以不配，钱相关的必须配。</p>
+</div>
+
+<div class="box b-tip">
+  <div class="box-t">💡 关于 WAIT 命令</div>
+  <p><code class="inline">WAIT numreplicas timeout</code> 会阻塞当前客户端，直到「至少 numreplicas 个从节点确认收到」或超时。</p>
+  <pre style="margin:8px 0 0"><code class="lang-bash">SET order:1001 <span class="st">'{"status":"paid"}'</span>
+WAIT 1 100        <span class="cm"># 等 1 个从节点确认，最多等 100ms</span>
+<span class="cm"># 返回实际确认的从节点数量</span></code></pre>
+  <p><strong>用途</strong>：把「异步复制」变成「同步确认」，用于对数据安全要求高的少数写操作。<br>
+  <strong>注意</strong>：① <code class="inline">WAIT</code> 只保证「命令已到达从节点」，<strong>不保证从节点已经执行完</strong>；② 它不改变默认的异步复制语义（不影响其他客户端）；③ 会增加延迟，不能全量使用。</p>
+</div>
+
+<h2 id="c08-5">5. 读写分离的收益与陷阱</h2>
+<table>
+<thead><tr><th style="width:18%">维度</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><strong>收益</strong></td><td>读流量分摊到多个从节点，主节点专注写；可以横向加从节点提升读吞吐</td></tr>
+<tr><td><strong>陷阱 1：不一致</strong></td><td>复制是异步的，从节点可能读到旧数据。<strong>刚写完立刻读（写后读）大概率读到旧值。</strong></td></tr>
+<tr><td><strong>陷阱 2：过期数据</strong></td><td>从节点上过期 key 不主动删（Day2.3 讲过），但读取时会做逻辑过期判断，返回 nil。不过如果 Redis 版本老或配置不当仍可能读到过期数据。</td></tr>
+<tr><td><strong>陷阱 3：从节点故障的影响</strong></td><td>如果客户端连接池没配好，某个从节点挂了会导致部分请求失败——需要客户端支持拓扑感知和故障剔除。</td></tr>
+<tr><td><strong>陷阱 4：从节点数增加放大写入</strong></td><td>每个从节点都要接收全量写命令，主节点的复制带宽和 CPU 开销（命令传播、缓冲区）随从节点数线性增长。<strong>从节点不是越多越好。</strong></td></tr>
+</tbody>
+</table>
+<p><strong>解决「写后读不一致」的方案</strong>：</p>
+<ol>
+<li><strong>关键读走主节点</strong>：对一致性敏感的读（如刚下单后查订单）强制路由到主节点。</li>
+<li><strong>基于偏移量的一致性读</strong>：写操作记录返回的 <code class="inline">master_repl_offset</code>，读时带上这个偏移量，客户端等待从节点追上再读（Lettuce 支持这种模式）。</li>
+<li><strong>本地缓存兜底</strong>：写完后把新值放本地缓存（短 TTL），读到本地缓存直接返回。</li>
+<li><strong>业务上规避</strong>：把「写后立刻读」的场景改成「写后前端用返回的数据渲染」，不依赖读。</li>
+</ol>
+
+<h2 id="c08-6">面试深度问答</h2>
+
+<details class="qa"><summary>主从复制的原理？全量同步和增量同步的区别？<span class="lvl lv1">基础</span></summary>
+<div class="qa-b">
+<p><strong>整体流程</strong>：</p>
+<ol>
+<li>从节点连上主节点，发送 <code class="inline">PSYNC ? -1</code>（首次）或 <code class="inline">PSYNC &lt;replid&gt; &lt;offset&gt;</code>（断连重连）。</li>
+<li>主节点判断能否增量：<strong>replid 匹配 且 offset 在 repl_backlog 范围内</strong> → 回复 <code class="inline">+CONTINUE</code>，只发缺失部分（<strong>增量</strong>）。</li>
+<li>否则回复 <code class="inline">+FULLRESYNC &lt;replid&gt; &lt;offset&gt;</code>，执行 <code class="inline">BGSAVE</code> 生成 RDB 发给从节点，期间新写命令存入<strong>复制缓冲区</strong>；从节点清空自己的数据、加载 RDB，再重放复制缓冲区的命令。</li>
+<li>之后进入<strong>命令传播</strong>阶段：主节点每执行写命令，异步发给所有从节点，同时写入 repl_backlog。</li>
+</ol>
+<p><strong>全量 vs 增量对比</strong>：</p>
+<table>
+<thead><tr><th style="width:20%">维度</th><th>全量同步</th><th>增量同步</th></tr></thead>
+<tbody>
+<tr><td>传输量</td><td>整份 RDB（可能几 GB）</td><td>仅缺失的命令</td></tr>
+<tr><td>主节点开销</td><td>fork + COW 内存 + 网络带宽</td><td>几乎无</td></tr>
+<tr><td>从节点开销</td><td>FLUSHALL + 加载 RDB（从节点不可用）</td><td>重放少量命令</td></tr>
+<tr><td>依赖</td><td>—</td><td><strong>repl_backlog 是否覆盖断连期间的写入</strong></td></tr>
+</tbody>
+</table>
+<p><strong>加分点</strong>：一定要提 <code class="inline">repl-backlog-size</code> 的容量估算公式，并指出<strong>默认 1MB 太小</strong>，生产应根据写入速率设置为几十到几百 MB，否则从节点每次网络抖动都会退化成全量同步，引发「网络打满 + fork 阻塞」的双重打击。</p>
+</div></details>
+
+<details class="qa"><summary>哨兵的工作原理？它怎么选新主？<span class="lvl lv2">进阶</span></summary>
+<div class="qa-b">
+<p>按「监控 → 判下线 → 选举 → 选主 → 切换 → 通知」六步回答（见本节第 3 节）。重点强调三个容易被追问的点：</p>
+<ol>
+<li><strong>主观下线 vs 客观下线</strong>：单个哨兵的判断是主观的（可能因网络抖动误判），必须<strong>超过 quorum 个哨兵</strong>都认为下线才算客观下线。这是为了避免单点误判引发无谓切换。</li>
+<li><strong>quorum ≠ leader 选举票数</strong>：quorum 是「判下线」的门槛；选 leader 需要<strong>超过半数（哨兵总数/2 + 1）</strong>的票。这是 Raft 的要求，防止网络分区两侧各选一个 leader。<strong>这是最高频的深挖点。</strong></li>
+<li><strong>选新主的顺序</strong>：过滤不健康的 → <code class="inline">replica-priority</code> 最小 → 复制偏移量 offset 最大（数据最新） → runid 最小。</li>
+</ol>
+<p><strong>部署建议</strong>：</p>
+<ul>
+<li><strong>哨兵至少 3 个（奇数个）</strong>，且分布在不同物理机/可用区。2 个哨兵时，挂 1 个就无法达到多数票，无法切换。</li>
+<li>quorum 建议设为「哨兵总数/2 + 1」，与多数票一致，避免误判。</li>
+<li>哨兵本身不是主从的，<strong>哨兵之间通过 Pub/Sub 互相发现</strong>（不需要互相配置），只要配置同一个主节点即可自动组成集群。</li>
+<li><code class="inline">down-after-milliseconds</code> 不要太小（网络抖动会误判），也不宜太大（切换慢）。<strong>5-10 秒是比较通用的值。</strong></li>
+</ul>
+</div></details>
+
+<details class="qa"><summary>什么是脑裂？怎么防止？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p>见本节第 4 节的完整推演。回答框架：</p>
+<ol>
+<li><strong>定义</strong>：网络分区导致「旧主仍然可写、新主已选出」，系统短时间存在两个主节点。</li>
+<li><strong>后果</strong>：网络恢复后旧主被降级为从节点，会执行全量同步（先 FLUSHALL），<strong>旧主在分区期间写入的数据全部丢失</strong>。业务侧无法感知（写请求都成功了）。</li>
+<li><strong>为什么危险</strong>：典型的「静默数据丢失」，比服务不可用更难发现和排查。分布式锁场景会导致互斥失效。</li>
+<li><strong>防护方案</strong>：
+  <ul>
+    <li>主节点配 <code class="inline">min-replicas-to-write 1</code> + <code class="inline">min-replicas-max-lag 10</code>——分区时旧主因连不上从节点而拒绝写。</li>
+    <li>从节点配 <code class="inline">replica-serve-stale-data no</code>——断连时对外报错，避免读到过期数据。</li>
+    <li>架构上考虑：如果数据极其关键，用 <strong>Redis Cluster</strong>（有更多节点参与投票，且分片降低影响面），或用 <code class="inline">WAIT</code> 命令做同步确认。</li>
+    <li>业务上：<strong>关键数据不要只依赖 Redis</strong>，用 DB + 对账兜底。</li>
+  </ul>
+</li>
+<li><strong>trade-off</strong>：这些配置都以降低可用性为代价（连不上从节点就拒绝写），要根据业务容忍度选择。</li>
+</ol>
+<p><strong>额外加分</strong>：提到「脑裂不仅存在于哨兵架构，Cluster 也有类似问题（分区时主节点可能仍接受写入）」，以及「Redis 的 <code class="inline">min-replicas-to-write</code> 在 Cluster 模式下每个主分片单独生效」。</p>
+</div></details>
+
+<details class="qa"><summary>从节点为什么要配 replica-read-only yes？能往从节点写吗？<span class="lvl lv2">进阶</span></summary>
+<div class="qa-b">
+<p><strong>默认就是 yes，强烈建议保持。</strong></p>
+<p><strong>为什么不能往从节点写</strong>：</p>
+<ol>
+<li><strong>数据会被覆盖</strong>：从节点执行全量同步时会 <code class="inline">FLUSHALL</code>，本地写入的数据全没了。</li>
+<li><strong>破坏一致性</strong>：从节点的数据是主节点的副本，本地写入会让主从数据不一致，主从切换后这些「本地数据」会丢失，且可能造成业务逻辑混乱。</li>
+<li><strong>无法传播</strong>：从节点上的写入不会传播给主节点或其他从节点（Redis 不支持双向复制）。</li>
+</ol>
+<p><strong>什么时候会设为 no</strong>：</p>
+<ul>
+<li>从节点上跑「临时计算」的场景（比如 Redis 作为计算节点的缓存），但这是很危险的做法。</li>
+<li>有些公司用「从节点做本地缓存预热」，但那应该用独立的 key 前缀并接受被清空的风险。</li>
+</ul>
+<p><strong>生产规范</strong>：保持 <code class="inline">replica-read-only yes</code>。如果需要在从节点做特殊操作，用独立实例而不是从节点。</p>
+</div></details>
+
+<details class="qa"><summary>Redis 主从复制是同步还是异步的？<span class="lvl lv2">进阶</span></summary>
+<div class="qa-b">
+<p><strong>异步复制</strong>（生产环境默认）。</p>
+<ol>
+<li>主节点执行完写命令后<strong>立即返回给客户端</strong>，然后异步发送给从节点。</li>
+<li>主从之间不等待确认，所以<strong>主节点不会因为从节点慢而变慢</strong>——这是性能优势，也是数据丢失风险的来源。</li>
+</ol>
+<p><strong>为什么不用同步复制</strong>：<strong>性能和可用性</strong>。同步复制意味着主节点要等所有从节点确认，任何从节点慢都会拖慢主节点；从节点挂了主节点写不了，可用性下降。这与 Redis「高性能」的定位冲突。</p>
+<p><strong>如何让它「更同步」</strong>：</p>
+<ul>
+<li><code class="inline">WAIT numreplicas timeout</code>：按客户端粒度做同步等待，只对关键写操作使用。</li>
+<li><code class="inline">min-replicas-to-write</code>：强制「至少有 N 个从节点在线」才允许写，这是一种「弱同步」保证。</li>
+</ul>
+<p><strong>面试话术</strong>：「Redis 主从是异步复制，这是为了性能——主节点不必等待从节点确认。代价是主节点宕机时可能丢掉尚未同步的写命令（通常是毫秒到秒级）。如果需要更强的保证，可以用 <code class="inline">WAIT</code> 命令做单次同步确认，或用 <code class="inline">min-replicas-to-write</code> 在集群层面约束；但根本的解法是**‘不能丢的数据不要只放在 Redis’**。」</p>
+<p><strong>补充</strong>：主节点的复制相关配置 <code class="inline">repl-disable-tcp-nodelay</code>——设为 <code class="inline">no</code>（默认）时，复制命令会立即发送（延迟低但网络包多）；设为 <code class="inline">yes</code> 时合并发送（省带宽但延迟增加）。跨机房场景可以考虑设 yes。</p>
+</div></details>
+
+<details class="qa"><summary>主从延迟很大怎么办？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p>先量化，再定位，最后优化（这是标准的问题解决框架）：</p>
+<div class="steps">
+<div class="step"><div class="st-t">量化延迟</div>
+<pre style="margin:8px 0"><code class="lang-bash">redis-cli -h master info replication | grep -E <span class="st">'master_repl_offset|slave'</span>
+redis-cli -h slave  info replication | grep -E <span class="st">'slave_repl_offset|master_link_status|master_last_io_seconds_ago'</span>
+<span class="cm"># 延迟字节 = master_repl_offset - slave_repl_offset</span>
+<span class="cm"># 也可以看 slave0:...lag=N 这个字段（秒，最直观）</span></code></pre>
+<p>同时看 <code class="inline">master_last_io_seconds_ago</code>：如果持续 &gt; 10 秒，说明连接有问题。</p>
+</div>
+<div class="step"><div class="st-t">定位原因（按概率）</div>
+<table style="margin:8px 0">
+<thead><tr><th style="width:26%">原因</th><th>判据</th><th>解法</th></tr></thead>
+<tbody>
+<tr><td><strong>网络带宽不足</strong></td><td>复制流量大 + 网络打满</td><td>提升带宽、开启 <code class="inline">repl-disable-tcp-nodelay yes</code>（合并小包）、减少从节点数、跨机房用专线</td></tr>
+<tr><td><strong>从节点执行慢</strong></td><td>从节点 CPU 高、有慢命令</td><td>从节点不应有慢查询（它也在单线程重放）；排查是否有 <code class="inline">KEYS</code> 类命令；升级硬件</td></tr>
+<tr><td><strong>从节点在做 RDB 加载/AOF 重写</strong></td><td>同步期间从节点不可用</td><td>错开 AOF 重写时间；用混合持久化加速加载</td></tr>
+<tr><td><strong>主节点写入量激增</strong>（如大 key 写入）</td><td>主节点 <code class="inline">instantaneous_ops_per_sec</code> 高；某个大 key 反复修改</td><td>治理大 key；业务侧减少无效写入</td></tr>
+<tr><td><strong>repl_backlog 太小导致反复全量同步</strong></td><td><code class="inline">sync_full</code> 指标持续增长</td><td><strong>调大 <code class="inline">repl-backlog-size</code></strong>（这是最常见的隐藏原因）</td></tr>
+<tr><td><strong>从节点太多</strong></td><td>从节点数 &gt; 5</td><td>主节点复制开销随从节点数线性增长；考虑用「级联复制」（从节点再挂从节点）</td></tr>
+</tbody>
+</table>
+</div>
+<div class="step"><div class="st-t">关键指标：sync_full</div>
+<pre style="margin:8px 0"><code class="lang-bash">INFO stats | grep -E <span class="st">'sync_full|sync_partial_ok|sync_partial_err'</span>
+<span class="cm"># sync_full         → 全量同步次数（持续增长 = 增量同步失败，要紧！）</span>
+<span class="cm"># sync_partial_ok   → 增量同步成功次数</span>
+<span class="cm"># sync_partial_err  → 增量同步失败次数</span></code></pre>
+<p><strong>如果 <code class="inline">sync_full</code> 在持续增长</strong>，说明每次断连都退化成全量同步 → 优先检查 <code class="inline">repl-backlog-size</code>。</p>
+</div>
+<div class="step"><div class="st-t">业务侧应对</div>
+<ul>
+<li>对一致性敏感的读走主节点。</li>
+<li>读多写少的场景，从节点只承载「容忍延迟」的读（如统计、报表）。</li>
+<li>设置「最大可接受延迟」阈值，超过则降级到主节点读。</li>
+</ul>
+</div>
+</div>
+</div></details>
+
+<h2 id="c08-7">本节自测</h2>
+<div class="track">
+  <label><input type="checkbox" data-k="d3-1"><span>我能完整描述 PSYNC 全量同步的 7 个步骤</span></label>
+  <label><input type="checkbox" data-k="d3-2"><span>我能说清 repl_backlog 的作用、增量同步的判定条件与容量估算公式</span></label>
+  <label><input type="checkbox" data-k="d3-3"><span>我能解释 replid 与 replid2 的设计意图</span></label>
+  <label><input type="checkbox" data-k="d3-4"><span>我能描述哨兵故障转移的完整流程，并区分 quorum 与 leader 选举票数</span></label>
+  <label><input type="checkbox" data-k="d3-5"><span>我能说清哨兵选新主的四个排序规则</span></label>
+  <label><input type="checkbox" data-k="d3-6"><span>我能完整推演脑裂导致数据丢失的过程，并给出两个防护配置</span></label>
+  <label><input type="checkbox" data-k="d3-7"><span>我能说出读写分离的收益与四个陷阱，以及解决写后读不一致的方案</span></label>
+  <label><input type="checkbox" data-k="d3-8"><span>我能给出「主从延迟大」的完整排查路径与 sync_full 指标的含义</span></label>
+</div>
+</section>

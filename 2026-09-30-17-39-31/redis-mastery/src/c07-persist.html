@@ -1,0 +1,347 @@
+<section id="c07-persist" class="anchor" data-title="Day2.4 · 持久化：RDB / AOF / 混合">
+<div class="ch-meta">
+  <span class="ch-num">Day 2 · 第 4 节</span>
+  <span class="badge bg-blue">预计 85 分钟</span>
+  <span class="badge bg-red">面试必考</span>
+</div>
+<h1>Day2.4 · 持久化：Redis 会不会丢数据</h1>
+
+<div class="box b-tip">
+  <div class="box-t">一句话结论</div>
+  <p>「Redis 会不会丢数据」的正确答案不是「不会」，而是<strong>「取决于你选的持久化配置，每种配置都有明确的丢失窗口」</strong>。面试要能说出：<strong>RDB 丢多少、AOF 三种刷盘策略各丢多少、混合持久化怎么兼顾、以及 fork 为什么是最大的隐患。</strong></p>
+</div>
+
+<h2 id="c07-1">1. 一张表看懂两种持久化</h2>
+<table>
+<thead><tr><th style="width:13%">维度</th><th>RDB（快照）</th><th>AOF（追加日志）</th></tr></thead>
+<tbody>
+<tr><td><strong>原理</strong></td><td>fork 子进程，把内存全量数据按二进制格式写入 dump.rdb</td><td>记录所有写命令，重启时重放命令恢复数据</td></tr>
+<tr><td><strong>文件格式</strong></td><td>二进制，紧凑</td><td>文本命令（或混合格式，见下文）</td></tr>
+<tr><td><strong>体积</strong></td><td>小（只有数据本身）</td><td>大（含命令开销，重写后约 RDB 的 1.5-2 倍）</td></tr>
+<tr><td><strong>恢复速度</strong></td><td><strong>快</strong>（直接加载）</td><td><strong>慢</strong>（逐条重放，数据量大时可能几分钟到几十分钟）</td></tr>
+<tr><td><strong>数据安全性</strong></td><td>差（按 save 间隔，可能丢几分钟到十几分钟）</td><td>好（everysec 最多丢 1 秒）</td></tr>
+<tr><td><strong>对主线程影响</strong></td><td>fork 阻塞 + COW 内存峰值</td><td>写入缓冲区开销；<code class="inline">always</code> 时每次 fsync 阻塞</td></tr>
+<tr><td><strong>主要用途</strong></td><td>冷备、灾难恢复、数据迁移</td><td>数据安全性要求高的场景</td></tr>
+</tbody>
+</table>
+
+<h2 id="c07-2">2. RDB 深度：fork 与 COW</h2>
+
+<h3>触发方式</h3>
+<pre><code class="lang-bash"><span class="cm">########## RDB 的三种触发 ##########</span>
+
+<span class="cm"># 1) 自动触发（配置 save 规则）</span>
+save 900 1        <span class="cm"># 900 秒内至少 1 个 key 变更</span>
+save 300 10       <span class="cm"># 300 秒内至少 10 个 key 变更</span>
+save 60 10000     <span class="cm"># 60 秒内至少 10000 个 key 变更</span>
+<span class="cm"># ⚠️ 生产建议：只保留 1-2 条宽松规则，或干脆关掉 save 规则
+#    因为 save 规则会与 AOF 重写/主从全量同步叠加，造成 fork 风暴</span>
+
+<span class="cm"># 2) 手动触发</span>
+SAVE          <span class="cm"># ⚠️ 阻塞主线程直到完成 —— 生产严禁使用！</span>
+BGSAVE        <span class="cm"># ✅ fork 子进程后台执行</span>
+
+<span class="cm"># 3) 被动触发</span>
+<span class="cm"># - 主从全量同步时（从节点请求 PSYNC，主节点执行 BGSAVE）</span>
+<span class="cm"># - SHUTDOWN 时（除非 no-save）</span>
+<span class="cm"># - DEBUG RELOAD</span>
+
+<span class="cm">########## 监控与验证 ##########</span>
+<span class="cm"># 查看最后一次 BGSAVE 的状态</span>
+INFO persistence | grep -E <span class="st">'rdb_last_bgsave_status|rdb_last_bgsave_time_sec|rdb_changes_since_last_save|rdb_bgsave_in_progress|rdb_last_cow_size'</span>
+<span class="cm"># rdb_last_bgsave_status     → ok / err（err 时必须告警！）</span>
+<span class="cm"># rdb_last_bgsave_time_sec   → 上次快照耗时</span>
+<span class="cm"># rdb_last_cow_size          → 上次 fork 期间 COW 复制的字节数 ⭐ 关键指标</span>
+<span class="cm"># rdb_bgsave_in_progress     → 1 表示正在进行</span>
+
+<span class="cm"># 关闭 save 规则（纯 AOF 场景）</span>
+CONFIG SET save <span class="st">""</span>
+<span class="cm"># 或 CONFIG REWRITE 持久化到配置文件</span>
+CONFIG REWRITE</code></pre>
+
+<div class="box b-big">
+  <div class="box-t">✅ fork + COW 的完整机制（面试深度核心）</div>
+  <p><strong>fork 做了什么</strong>：</p>
+  <ol>
+    <li>调用 Linux 的 <code class="inline">fork()</code> 系统调用创建子进程。</li>
+    <li>子进程<strong>不复制物理内存</strong>，而是复制父进程的<strong>页表</strong>（虚拟地址到物理地址的映射），父子进程指向同一份物理页，这些页被标记为<strong>只读</strong>。</li>
+    <li>页表大小与内存量成正比。Linux 每个页表项 8 字节，每页 4KB。所以 <strong>1GB 内存约需 2MB 页表；10GB 约 20MB</strong>。fork 时复制页表的耗时在这量级。</li>
+  </ol>
+  <p><strong>COW（Copy-On-Write）</strong>：</p>
+  <ol>
+    <li>主进程收到写命令，要修改某个 key。发现该内存页是只读且被共享，触发<strong>缺页中断</strong>。</li>
+    <li>内核<strong>复制这一页</strong>（4KB），父子进程各持一份；主进程修改自己的副本，子进程继续读旧页（保证快照数据一致性）。</li>
+    <li>所以：<strong>写命令越多、越分散，复制的页越多，内存峰值越高</strong>。最坏情况（全量数据都被修改）额外占用接近一份完整数据集。</li>
+  </ol>
+  <p><strong>三个关键结论</strong>：</p>
+  <ul>
+  <li><strong>fork 耗时与内存量成正比</strong>：10GB 实例 fork 可能耗时 100-200ms，这段时间主线程完全阻塞（这就是 P99 毛刺的来源）。</li>
+  <li><strong>COW 内存峰值与「写入的页数」成正比</strong>，不是与数据量。所以「大 key 在被 fork 期间被修改」会一次复制很多页——这也是大 key 危害的一个维度。</li>
+  <li><strong>必须留内存余量</strong>：<code class="inline">maxmemory</code> 设为物理内存的 60%-75%，因为 COW 峰值可能额外占 20%-40%。</li>
+  </ul>
+  <p><strong>关键内核参数</strong>：</p>
+  <pre style="margin:8px 0 0"><code class="lang-bash"><span class="cm"># 1) 允许过量分配内存（否则 fork 可能失败）</span>
+sysctl vm.overcommit_memory = 1
+<span class="cm"># 0 = 启发式（默认，可能拒绝 fork）
+# 1 = 总是允许分配（推荐）
+# 2 = 不允许超过 swap + 一定比例的物理内存</span>
+
+<span class="cm"># 2) 尽量不用 swap（或让内核不倾向换出 Redis）</span>
+sysctl vm.swappiness = 0
+
+<span class="cm"># 3) 关闭透明大页 THP（避免 COW 放大到 2MB 大页，导致延迟毛刺）</span>
+echo never &gt; /sys/kernel/mm/transparent_hugepage/enabled
+<span class="cm"># ⭐ 这是最容易被忽略但影响最大的参数：
+#   THP 开启时，COW 复制的是 2MB 大页而非 4KB 页，
+#   复制开销放大 512 倍，会造成明显的延迟抖动</span>
+
+<span class="cm"># 4) 观察 fork 实际耗时</span>
+INFO stats | grep latest_fork_usec
+<span class="cm"># 或看日志中的 "Background saving started by pid ..." 到最后完成的时间</span></code></pre>
+</div>
+
+<h2 id="c07-3">3. AOF 深度：三种刷盘策略与重写</h2>
+
+<h3>写回流程</h3>
+<pre><code class="lang-bash"><span class="cm"># AOF 的完整写入链路（4 步）：
+# 1) 命令执行完，追加到 redisServer.aof_buf（内存缓冲区）
+# 2) 根据 appendfsync 策略，把 aof_buf 写（write）到 AOF 文件（内核页缓存）
+# 3) 根据策略，调用 fsync 把页缓存刷到磁盘
+# 4) 如果 AOF 文件增长超过阈值，触发 BGREWRITEAOF</span>
+
+<span class="cm">########## 三种 appendfsync 策略对比 ##########</span>
+<span class="cm"># always：每个写命令都 fsync</span>
+<span class="cm">#   - 数据最安全（理论上不丢，但磁盘故障仍可能丢）</span>
+<span class="cm">#   - 性能最差：QPS 从 10 万降到几千（受磁盘 IOPS 限制）</span>
+<span class="cm">#   - 主线程每次都等 fsync，延迟高且抖动大</span>
+
+<span class="cm"># everysec（默认，生产首选）：每秒 fsync 一次（后台 bio_aof_fsync 线程）</span>
+<span class="cm">#   - 最多丢 1 秒数据</span>
+<span class="cm">#   - 性能好（主线程不阻塞在 fsync 上）</span>
+<span class="cm">#   - 如果上次 fsync 还没完成，主线程会短暂等待（最多 2 秒左右）</span>
+
+<span class="cm"># no：不主动 fsync，交给操作系统（通常 30 秒）</span>
+<span class="cm">#   - 性能最好</span>
+<span class="cm">#   - 丢数据多（可达 30 秒）</span>
+<span class="cm">#   - 实际上没人用</span>
+
+CONFIG SET appendfsync everysec
+CONFIG GET appendfsync</code></pre>
+
+<div class="box b-warn">
+  <div class="box-t">⚠️ everysec 的两个隐藏细节（高频深挖点）</div>
+  <ol style="margin-bottom:0">
+  <li><strong>everysec 并不是「完全不影响主线程」</strong>：如果上一次 fsync 还没完成（磁盘卡了），主线程在下次要写 AOF 时会<strong>等待</strong>（最多 <code class="inline">aof-fsync-delay</code>），这是「延迟毛刺」的来源之一。<strong>Redis 的日志里如果出现 "Asynchronous AOF fsync is taking too long"，说明磁盘有瓶颈。</strong></li>
+  <li><strong>everysec 丢的 1 秒数据也可能超出预期</strong>：因为数据先进 <code class="inline">aof_buf</code>，再 write 到内核页缓存，再 fsync。如果 Redis 进程崩溃（而机器没崩），内核页缓存里的数据还能被 OS 刷盘保留；但如果<strong>机器断电</strong>，内核页缓存里没 fsync 的数据就丢了——这就是「最多丢 1 秒」的实际边界。</li>
+  </ol>
+</div>
+
+<h3>AOF 重写（BGREWRITEAOF）</h3>
+<div class="box b-big">
+  <div class="box-t">✅ 为什么需要重写，以及 7.0 的 MP-AOF 改进</div>
+  <p><strong>问题</strong>：AOF 记录的是「命令流」。如果一个 key 被改了 1000 次（<code class="inline">INCR counter</code> 1000 次），AOF 里就有 1000 条命令，但实际数据只需 <code class="inline">SET counter 1000</code> 一条。所以 AOF 会无限膨胀。</p>
+  <p><strong>7.0 之前的 AOF 重写流程</strong>：</p>
+  <ol>
+  <li>fork 子进程，<strong>子进程扫描当前内存数据，生成一份最小命令集</strong>写入新的 AOF 临时文件（此时文件里可能只有 1/10 的命令）。</li>
+  <li>重写期间，主进程把<strong>新收到的写命令同时追加到「AOF 重写缓冲区」（aof_rewrite_buf）</strong>。</li>
+  <li>子进程写完后通知主进程。<strong>主进程把重写缓冲区的内容追加到新 AOF 文件末尾</strong>（补齐期间的增量）。</li>
+  <li>用新文件原子替换旧文件（<code class="inline">rename</code>）。</li>
+  </ol>
+  <p><strong>问题</strong>：第 3 步需要把「重写期间的所有写命令」缓存在内存里。如果重写期间写入量巨大（比如大促），<strong>重写缓冲区会吃掉大量内存</strong>，可能触发 OOM——这是 Redis 历史上的经典问题。</p>
+  <p><strong>7.0 的 MP-AOF（Multi-Part AOF）</strong>：</p>
+  <ul>
+  <li>把 AOF 拆成<strong>一个 base 文件（RDB 格式或 AOF 格式的快照）+ 多个 incr 增量文件</strong>，用一个 <code class="inline">manifest</code> 文件记录它们的关系。</li>
+  <li>重写时，子进程生成一个新的 base 文件（新的「代」）；<strong>重写期间的写命令直接写入新的 incr 文件</strong>，不再需要内存中的重写缓冲区。</li>
+  <li>重写完成后更新 manifest，指向新的 base + 新的 incr。<strong>重写缓冲区被彻底消除，内存峰值问题解决。</strong></li>
+  </ul>
+  <pre style="margin:8px 0 0"><code class="lang-bash"><span class="cm"># 7.0+ 的 AOF 目录结构</span>
+/var/lib/redis/appendonlydir/
+├── appendonly.aof.1.base.rdb      <span class="cm"># base 文件（混合持久化时是 RDB 格式）</span>
+├── appendonly.aof.1.incr.aof      <span class="cm"># 增量文件</span>
+├── appendonly.aof.2.incr.aof
+└── appendonly.aof.manifest        <span class="cm"># 清单，记录 base + 所有 incr 文件</span>
+
+<span class="cm"># ⚠️ 重要运维影响：7.0 升级后 AOF 变成一个目录，备份脚本和监控脚本要改！</span>
+CONFIG GET appenddirname</code></pre>
+</div>
+
+<pre><code class="lang-bash"><span class="cm">########## AOF 重写触发与监控 ##########</span>
+auto-aof-rewrite-percentage 100     <span class="cm"># AOF 文件比上次重写后增长 100%（即翻倍）时触发</span>
+auto-aof-rewrite-min-size 64mb      <span class="cm"># 且文件至少 64MB 才触发</span>
+
+BGREWRITEAOF                        <span class="cm"># 手动触发（异步）</span>
+
+INFO persistence | grep -E <span class="st">'aof_enabled|aof_rewrite_in_progress|aof_last_bgrewrite_status|aof_last_write_status|aof_current_size|aof_base_size|aof_pending_rewrite|aof_last_cow_size|aof_rewrites'</span>
+<span class="cm"># aof_last_bgrewrite_status → err 时必须告警！</span>
+<span class="cm"># aof_last_write_status     → err 说明磁盘写 AOF 失败（磁盘满 / 权限问题）</span>
+<span class="cm"># aof_current_size 与 aof_base_size 的比值可判断是否需要重写</span>
+
+<span class="cm">########## AOF 损坏修复 ##########</span>
+<span class="cm"># 场景：Redis 意外宕机，AOF 尾部有半条命令（写了一半）</span>
+redis-check-aof --fix appendonly.aof.1.incr.aof
+<span class="cm"># 会提示：AOF analyzed: size=..., ok_up_to=..., ok_up_to_line=...
+#        AOF is not valid. Use the --fix option to try fixing it.</span>
+<span class="cm"># --fix 会把不完整命令截断，数据可能丢失最后几条</span>
+
+<span class="cm"># 8.4+ 支持自动修复 AOF（aof-load-truncated 相关）</span>
+CONFIG GET aof-load-truncated        <span class="cm"># yes（默认）：尾部截断时自动加载并 log 警告</span>
+CONFIG GET aof-use-rdb-preamble      <span class="cm"># 混合持久化开关</span></code></pre>
+
+<h2 id="c07-4">4. 混合持久化（4.0+）：生产推荐配置</h2>
+<div class="box b-big">
+  <div class="box-t">✅ 混合持久化的原理与收益</div>
+  <p><strong>配置</strong>：<code class="inline">aof-use-rdb-preamble yes</code>（4.0+ 默认开启）</p>
+  <p><strong>原理</strong>：AOF 重写时，base 文件用 <strong>RDB 二进制格式</strong>（恢复快），之后的增量用 AOF 命令格式（安全）。重放时先加载 RDB 部分（快），再重放 AOF 增量。</p>
+  <p><strong>收益对比（10GB 数据的恢复时间）</strong>：</p>
+  <table style="margin:8px 0">
+  <thead><tr><th>方案</th><th>文件大小</th><th>恢复时间</th><th>丢失窗口</th></tr></thead>
+  <tbody>
+  <tr><td>纯 RDB</td><td>约 3GB</td><td>约 30 秒</td><td>最多 5-15 分钟（取决于 save 规则）</td></tr>
+  <tr><td>纯 AOF（everysec）</td><td>约 6-8GB</td><td>约 3-5 分钟</td><td>最多 1 秒</td></tr>
+  <tr><td><strong>混合持久化</strong></td><td>约 4-5GB</td><td><strong>约 40-60 秒</strong></td><td><strong>最多 1 秒</strong></td></tr>
+  </tbody>
+  </table>
+  <p><strong>生产推荐配置</strong>：</p>
+  <pre style="margin:8px 0 0"><code class="lang-conf"><span class="kw">appendonly</span> <span class="st">yes</span>
+<span class="kw">appendfsync</span> <span class="st">everysec</span>
+<span class="kw">aof-use-rdb-preamble</span> <span class="st">yes</span>          <span class="cm"># 混合持久化</span>
+<span class="kw">auto-aof-rewrite-percentage</span> <span class="nu">100</span>
+<span class="kw">auto-aof-rewrite-min-size</span> <span class="st">1gb</span>      <span class="cm"># 小文件重写收益低，阈值调大减少 fork 次数</span>
+
+<span class="cm"># RDB 作为冷备（不要用于恢复，主要用于备份/迁移/复制）</span>
+<span class="kw">save</span> <span class="nu">3600 1</span>                     <span class="cm"># 或直接关掉，靠 AOF + 定期外部备份</span>
+<span class="kw">stop-writes-on-bgsave-error</span> <span class="st">yes</span>
+
+<span class="cm"># 关键：备份策略（生产必备）</span>
+<span class="cm"># - AOF 文件定期归档到对象存储（按小时/天）</span>
+<span class="cm"># - RDB 每天全量备份到异地</span>
+<span class="cm"># - 定期做「恢复演练」：把备份加载到测试实例验证可用</span></code></pre>
+</div>
+
+<div class="box b-x">
+  <div class="box-t">🚨 五个真实的生产事故模式</div>
+  <ol style="margin-bottom:0">
+  <li><strong>fork 风暴</strong>：save 规则配了 3 条 + AOF 重写 + 主从全量同步同时触发，短时间内多次 fork，每次阻塞几百毫秒。现象是「周期性 P99 毛刺」。<strong>解法</strong>：减少 save 规则、调大 <code class="inline">auto-aof-rewrite-min-size</code>、错开主从同步时间、控制单实例内存。</li>
+  <li><strong>AOF 写到磁盘满</strong>：<code class="inline">aof_last_write_status: err</code>，此时如果 <code class="inline">appendfsync always</code>，写命令直接失败。生产要监控磁盘空间 + 配置告警。</li>
+  <li><strong>THP 导致延迟抖动</strong>：COW 复制 2MB 大页而非 4KB，放大 512 倍。现象是 fork 期间出现几十毫秒的延迟。<strong>解法</strong>：关闭透明大页。</li>
+  <li><strong>升级 7.0 后备份脚本失效</strong>：AOF 从单文件变成 <code class="inline">appendonlydir/</code> 目录，老脚本备份不到数据。<strong>解法</strong>：升级前审查所有自动化脚本。</li>
+  <li><strong>恢复时间过长导致故障扩大</strong>：10GB 纯 AOF 恢复要 5 分钟，主库故障后 5 分钟不可用。<strong>解法</strong>：用混合持久化；或者用「哨兵/集群快速切换 + 从库承载读」而非等主库恢复。</li>
+  </ol>
+</div>
+
+<h2 id="c07-5">面试深度问答</h2>
+
+<details class="qa"><summary>RDB 和 AOF 的区别？生产怎么选？<span class="lvl lv1">基础</span></summary>
+<div class="qa-b">
+<p>先对比，再给结论。见本节第 1 节的表。</p>
+<p><strong>生产标准答案</strong>：「我们用的是 <strong>AOF（everysec）+ 混合持久化 + RDB 冷备</strong>」的组合：</p>
+<ul>
+<li><strong>AOF everysec</strong> 保证最多丢 1 秒数据，满足绝大多数业务的数据安全要求；同时性能影响很小（fsync 在后台线程）。</li>
+<li><strong>混合持久化</strong>（<code class="inline">aof-use-rdb-preamble yes</code>）让 AOF 重写后的 base 文件是 RDB 格式，把恢复时间从几分钟压到几十秒——这是「故障恢复速度」这个 SLA 的关键。</li>
+<li><strong>RDB 只作为冷备</strong>：每天全量备份到异地对象存储，用于「误删数据恢复」「跨集群迁移」「盘古式重建」。<strong>不指望 RDB 做主恢复</strong>，因为它的丢失窗口太大。</li>
+</ul>
+<p><strong>为什么不选纯 RDB</strong>：丢数据太多（5-15 分钟），缓存场景可以接受，但一旦 Redis 承载了队列/计数器/分布式锁这类不能丢的数据就不行了。</p>
+<p><strong>为什么不选纯 AOF（不带混合）</strong>：恢复太慢，故障恢复时间（MTTR）会拖长，这对 SLA 是硬伤。<strong>「恢复速度也是可用性的一部分」——这个观点很能加分。</strong></p>
+</div></details>
+
+<details class="qa"><summary>fork 的时候会阻塞主线程吗？阻塞多久？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p><strong>会阻塞，且阻塞时间与内存量成正比。</strong></p>
+<ol>
+<li><strong>fork 本身是阻塞主线程的</strong>：Linux 的 <code class="inline">fork()</code> 要复制父进程的页表。页表大小约 <strong>内存量/512</strong>（4KB 页，每页表项 8 字节 → 每 GB 约 2MB 页表）。所以 10GB 实例约复制 20MB 页表，耗时约 <strong>50-200ms</strong>（取决于 CPU 和内存带宽）。</li>
+<li><strong>数据量越大，fork 越慢</strong>：这就是为什么单实例内存不建议超过 10-16GB——不只是 COW 内存，还有 fork 时间。</li>
+<li><strong>COW 之后不阻塞主线程</strong>：fork 完成后子进程独立跑，主线程继续处理请求。但——<strong>每次主线程写一个被共享的页，都要触发缺页中断 + 复制页</strong>，这有 CPU 和内存带宽开销，会间接导致延迟上升。</li>
+<li><strong>真正的「抖动」往往来自 THP</strong>：如果透明大页开启，COW 复制的是 2MB 大页，开销放大 512 倍。<strong>关闭 THP 是必须的。</strong></li>
+</ol>
+<p><strong>怎么量化观察</strong>：</p>
+<pre style="margin:8px 0 0"><code class="lang-bash">INFO stats | grep latest_fork_usec            <span class="cm"># 最近一次 fork 耗时（微秒）⭐</span>
+INFO persistence | grep rdb_last_cow_size     <span class="cm"># COW 复制的字节数</span>
+redis-cli --latency-history -i 5              <span class="cm"># 看是否有周期性毛刺</span></code></pre>
+<p><strong>优化手段</strong>：① 控制单实例内存（&lt;10-16GB）；② 关闭 THP；③ <code class="inline">vm.overcommit_memory=1</code>；④ 减少 save 规则、调大 AOF 重写阈值，避免频繁 fork；⑤ 如果非常敏感，考虑用「主从 + 只读从库 + 在从库上做持久化」的架构。</p>
+</div></details>
+
+<details class="qa"><summary>AOF 重写的流程？重写缓冲区的作用？7.0 有什么变化？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p><strong>7.0 之前的流程</strong>（四步）：</p>
+<ol>
+<li>fork 子进程，子进程扫描当前内存数据，生成最小命令集写入临时 AOF 文件。<strong>注意：子进程看到的是 fork 那一刻的数据快照。</strong></li>
+<li>主进程把重写期间新收到的写命令，<strong>同时追加到 AOF 缓冲区（正常写）和 AOF 重写缓冲区（aof_rewrite_buf）</strong>。</li>
+<li>子进程完成后通知主进程，主进程<strong>把重写缓冲区的内容追加到新 AOF 文件</strong>——这一步补齐了「fork 之后到重写完成之前」的增量，保证不丢数据。</li>
+<li><code class="inline">rename</code> 原子替换旧 AOF 文件。</li>
+</ol>
+<p><strong>重写缓冲区的作用</strong>：解决「子进程用旧快照生成新文件 + 期间有新增写命令」的数据一致性问题。<strong>必须有它，否则重写期间的数据会丢。</strong></p>
+<p><strong>它的问题</strong>：重写期间的所有写命令都要缓存在内存。如果写入量巨大（大促），缓冲区可能膨胀到几百 MB 甚至 GB，导致内存暴涨/OOM。<strong>重写时间越长、写入越密集，问题越严重。</strong></p>
+<p><strong>7.0 的 MP-AOF 改进</strong>：</p>
+<ul>
+<li>把 AOF 拆成 <code class="inline">base</code>（快照，RDB 格式）+ 多个 <code class="inline">incr</code>（增量）+ <code class="inline">manifest</code>（清单）。</li>
+<li>重写时子进程生成新的 base（新一代），<strong>期间的写命令直接追加到新的 incr 文件</strong>——不需要内存中的重写缓冲区。</li>
+<li>完成后更新 manifest。<strong>内存峰值问题从根上解决。</strong></li>
+</ul>
+<p><strong>运维影响（这是加分点）</strong>：AOF 从「单个文件」变成「目录 + 多文件」，所以：① 备份脚本要改成备份整个 <code class="inline">appendonlydir</code>；② 用 <code class="inline">redis-check-aof --fix</code> 时要指定具体的文件；③ 从 7.0 降级到 6.x 需要先做 AOF 格式转换（基本等于不支持降级）。<strong>「升级前审查脚本」是真实的踩坑经验。</strong></p>
+</div></details>
+
+<details class="qa"><summary>Redis 会丢数据吗？能保证不丢吗？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p><strong>结论：单机 Redis 无法保证完全不丢数据，只能缩小丢失窗口。</strong>分场景回答：</p>
+<table>
+<thead><tr><th style="width:26%">配置</th><th>丢失窗口</th><th>适用</th></tr></thead>
+<tbody>
+<tr><td>不持久化</td><td>重启即全丢</td><td>纯缓存，可接受（但生产不推荐）</td></tr>
+<tr><td>RDB save 60 10000</td><td>最多 60 秒（实际可能更久）</td><td>缓存、可容忍较多丢失</td></tr>
+<tr><td>AOF everysec</td><td><strong>最多 1 秒</strong></td><td>生产主流</td></tr>
+<tr><td>AOF always</td><td>理论不丢（除磁盘故障）</td><td>性能下降 10 倍以上，几乎无人用</td></tr>
+<tr><td>主从 + AOF everysec（+ 哨兵/集群）</td><td>主节点宕机可能丢 1 秒内数据（异步复制）</td><td>高可用主流</td></tr>
+</tbody>
+</table>
+<p><strong>为什么「主从 + AOF」也可能丢 1 秒</strong>：Redis 的复制是<strong>异步</strong>的。主节点执行完写命令后立即返回给客户端，同时异步发送给从节点。如果主节点在这 1 秒内宕机，从节点的数据可能落后主节点，切换后就会丢这部分数据。<strong>这就是「异步复制的固有风险」。</strong></p>
+<p><strong>那怎么做到接近不丢</strong>：</p>
+<ol>
+<li><code class="inline">WAIT</code> 命令：<code class="inline">WAIT numreplicas timeout</code> 可以阻塞等待直到 N 个从节点确认收到。<strong>用它把「异步复制」变成「同步确认」，代价是延迟增加。</strong></li>
+<li><code class="inline">min-replicas-to-write</code> + <code class="inline">min-replicas-max-lag</code>：至少要有 N 个从节点且延迟小于 M 秒，主节点才接受写入。<strong>这是防止「脑裂时写丢数据」的关键配置。</strong></li>
+<li><strong>业务层面</strong>：对于绝对不能丢的数据（如订单、支付），不要只依赖 Redis——用 Redis 做前置（预扣减、幂等），最终一致性由 DB 兜底（异步落库 + 对账）。<strong>这是大厂的标准姿势。</strong></li>
+</ol>
+<p><strong>一句话收尾</strong>：「Redis 的定位是高性能数据层，不是强一致的账本。我们的原则是——<strong>能被重建的数据放 Redis 且允许丢；不能重建的数据（订单、金额）必须落库，Redis 只做加速和前置校验。</strong>」</p>
+</div></details>
+
+<details class="qa"><summary>为什么生产不建议用 SAVE？BGSAVE 期间能处理请求吗？<span class="lvl lv2">进阶</span></summary>
+<div class="qa-b">
+<p><strong>SAVE vs BGSAVE</strong>：</p>
+<ul>
+<li><code class="inline">SAVE</code>：<strong>在主线程上执行</strong>，整个快照过程阻塞所有客户端请求。10GB 数据可能阻塞几秒到几十秒。<strong>生产严禁使用</strong>（通常通过 <code class="inline">rename-command</code> 或 ACL 禁用）。</li>
+<li><code class="inline">BGSAVE</code>：fork 子进程执行，fork 的那一瞬间阻塞主线程（几十到几百毫秒），之后主线程继续服务。</li>
+</ul>
+<p><strong>BGSAVE 期间能处理请求吗？</strong>能，但有三个注意点：</p>
+<ol>
+<li><strong>fork 的瞬间是阻塞的</strong>：这段时间所有请求都要排队。所以 fork 耗时是 P99 毛刺的来源。</li>
+<li><strong>COW 有性能开销</strong>：主线程写共享页时触发缺页中断和页复制，消耗 CPU 和内存带宽，间接导致延迟上升。</li>
+<li><strong>BGSAVE 期间不会触发另一个 BGSAVE</strong>：如果再触发，Redis 会直接返回「Background save already in progress」。但 <code class="inline">save</code> 规则和 AOF 重写、主从全量同步之间也要注意避免叠加。</li>
+</ol>
+<p><strong>生产规范</strong>：① 用 BGSAVE，禁用 SAVE；② 控制单实例内存；③ 关闭 THP；④ 减少 save 规则条数；⑤ 监控 <code class="inline">latest_fork_usec</code>，超过 500ms 就要考虑拆分实例。</p>
+</div></details>
+
+<details class="qa"><summary>Redis 重启后数据是怎么加载的？<span class="lvl lv2">进阶</span></summary>
+<div class="qa-b">
+<p><strong>加载优先级：如果开启了 AOF，只加载 AOF，忽略 RDB。</strong></p>
+<ol>
+<li>进程启动时检查 <code class="inline">appendonly</code>。为 <code class="inline">yes</code> → 读 <code class="inline">appendonlydir/appendonly.aof.manifest</code>，按清单加载 base 文件 + 所有 incr 文件。<code class="inline">appendonly no</code> → 加载 <code class="inline">dump.rdb</code>。</li>
+<li><strong>加载 base 文件</strong>：如果是 RDB 格式（混合持久化），直接二进制加载（快）；如果是 AOF 格式，逐条重放。</li>
+<li><strong>重放 incr 文件</strong>：逐条执行命令。这里有个细节——重放时会<strong>用假的客户端</strong>执行（<code class="inline">fakeClient</code>），且不写回 AOF、不传播给从节点。</li>
+<li>如果 AOF 尾部损坏（<code class="inline">aof-load-truncated yes</code>），Redis 会<strong>截断不完整的命令并继续启动</strong>，同时在日志里警告。如果设为 <code class="inline">no</code>，Redis 会拒绝启动（更安全但需人工介入）。</li>
+</ol>
+<p><strong>为什么 AOF 优先于 RDB</strong>：因为 AOF 的数据通常更新（everysec 最多丢 1 秒，而 RDB 可能丢几分钟）。如果两个都加载会导致数据重复或混乱，所以必须二选一。</p>
+<p><strong>重要提示</strong>：<strong>加载 AOF 时如果数据量大，会长时间阻塞（因为重放是单线程的）</strong>。这也是为什么推荐混合持久化——base 用 RDB 格式，加载时是二进制解析，比逐条重放快得多。</p>
+<p><strong>监控</strong>：<code class="inline">INFO persistence</code> 里的 <code class="inline">loading:0/1</code> 和 <code class="inline">loading_start_time</code>，以及重启后 <code class="inline">used_memory</code> 与重启前的对比（如果明显变小，说明数据丢了）。</p>
+</div></details>
+
+<h2 id="c07-6">本节自测</h2>
+<div class="track">
+  <label><input type="checkbox" data-k="d2-25"><span>我能完整描述 fork + COW 机制，以及它会带来哪些问题</span></label>
+  <label><input type="checkbox" data-k="d2-26"><span>我能说出 THP（透明大页）为什么必须关闭</span></label>
+  <label><input type="checkbox" data-k="d2-27"><span>我能对比 appendfsync 三种策略的丢失窗口与性能</span></label>
+  <label><input type="checkbox" data-k="d2-28"><span>我能说清 AOF 重写流程与重写缓冲区的作用，以及 7.0 MP-AOF 的改进</span></label>
+  <label><input type="checkbox" data-k="d2-29"><span>我能解释混合持久化如何兼顾「恢复快」与「丢得少」</span></label>
+  <label><input type="checkbox" data-k="d2-30"><span>我能回答「Redis 会不会丢数据」，并给出主从异步复制的固有风险</span></label>
+  <label><input type="checkbox" data-k="d2-31"><span>我能说出 5 个持久化相关的真实生产事故模式</span></label>
+  <label><input type="checkbox" data-k="d2-32"><span>我能说出 7.0 升级后 AOF 目录结构的变化及对备份脚本的影响</span></label>
+</div>
+</section>

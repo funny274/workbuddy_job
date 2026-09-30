@@ -1,0 +1,2405 @@
+<section id="c17-interview" class="anchor" data-title="Day5 · 面试八股深度问答（60 题四档分级）">
+<div class="ch-meta"><span class="ch-num">Day 5 · 第 4 节</span><span class="badge bg-purple">预计 150 分钟</span></div>
+<h1>面试八股深度问答（60 题四档分级）</h1>
+
+<div class="box b-big">
+<div class="box-t">这一节怎么用</div>
+<p>前面 17 节是「学」，这一节是「考」。我把 Redis 面试能问到的题目按 <strong>难度四级（L1 入门 / L2 进阶 / L3 高级 / L4 专家）</strong> 全部整理出来，每道题给出 <strong>标准答案 + 加分点 + 常见陷阱</strong>。建议用法：</p>
+<ol class="steps">
+<li class="step"><strong>第一遍（学完当天）：</strong>只看题干，自己在心里答一遍，答不出来就展开看答案，然后回去翻对应章节。</li>
+<li class="step"><strong>第二遍（面试前 3 天）：</strong>只看 L3/L4 题干，L1/L2 应该已经条件反射了。</li>
+<li class="step"><strong>第三遍（面试前 1 晚）：</strong>只看「一句话答案」的加粗句，扫一遍肌肉记忆。</li>
+</ol>
+<p><strong>重要：面试官听到的从来不是「背答案」，而是「你有过思考」。</strong> 每道题我都标了 <code class="inline">🎯 加分点</code>，那是让你从「背过」变成「做过」的关键。</p>
+</div>
+
+<div class="box b-tip">
+<div class="box-t">答题总纲：四层递进法</div>
+<p>任何一道 Redis 题，都可以用这四层回答，层层递进，面试官会觉得你「有深度」：</p>
+<table>
+<thead><tr><th>层</th><th>内容</th><th>示例（以「Redis 为什么快」为例）</th></tr></thead>
+<tbody>
+<tr><td><strong>① 结论</strong></td><td>一句话给答案</td><td>「因为它是内存数据库 + 单线程无锁 + IO 多路复用 + 高效数据结构」</td></tr>
+<tr><td><strong>② 原理</strong></td><td>底层机制拆开讲</td><td>「单线程避免了上下文切换和锁竞争；epoll 让单线程也能扛住万级连接」</td></tr>
+<tr><td><strong>③ 代价</strong></td><td>说清 trade-off</td><td>「但单线程也意味着慢命令会阻塞全局，所以有 SLOWLOG 和大 key 治理」</td></tr>
+<tr><td><strong>④ 实践</strong></td><td>落到你项目的做法</td><td>「我们线上就踩过一个 200MB 的 Hash 做 HGETALL，直接卡了 800ms」</td></tr>
+</tbody>
+</table>
+<p>第 ④ 层是分水岭。<strong>没有第 ④ 层的候选人只能拿 P5/P6，有第 ④ 层的才能往 P7 谈。</strong></p>
+</div>
+
+<h2>L1 · 入门级（必答，答不出直接挂）</h2>
+
+<details class="qa"><summary>1. Redis 是什么？它和 MySQL 的区别是什么？<span class="lvl lv1">L1</span></summary><div class="qa-b">
+<p><strong>一句话答案：Redis 是基于内存的 Key-Value 数据库，MySQL 是磁盘的关系型数据库。</strong></p>
+<table>
+<thead><tr><th>维度</th><th>Redis</th><th>MySQL</th></tr></thead>
+<tbody>
+<tr><td>存储介质</td><td>内存（可持久化到磁盘）</td><td>磁盘</td></tr>
+<tr><td>数据模型</td><td>Key-Value，8+ 种结构</td><td>表/行/列，关系模型</td></tr>
+<tr><td>读写性能</td><td>10 万+ QPS</td><td>数千 QPS（单机）</td></tr>
+<tr><td>事务</td><td>弱事务（MULTI/EXEC，无回滚）</td><td>ACID 完整事务</td></tr>
+<tr><td>查询能力</td><td>只能按 key 查，无法复杂查询</td><td>SQL、join、索引、聚合</td></tr>
+<tr><td>容量</td><td>受内存限制（几十 GB）</td><td>TB/PB 级</td></tr>
+<tr><td>定位</td><td><strong>缓存、加速、特殊场景</strong></td><td><strong>数据可靠存储</strong></td></tr>
+</tbody>
+</table>
+<p><strong>🎯 加分点：</strong>「我们不是二选一，而是组合用。MySQL 是 source of truth，Redis 是加速层。Redis 挂了业务降级查库，库挂了才是真故障。」</p>
+</div></details>
+
+<details class="qa"><summary>2. Redis 有哪些数据类型？分别用在什么场景？<span class="lvl lv1">L1</span></summary><div class="qa-b">
+<p><strong>一句话答案：五大基础类型 + 四种扩展类型。</strong></p>
+<table>
+<thead><tr><th>类型</th><th>底层编码</th><th>典型场景</th></tr></thead>
+<tbody>
+<tr><td>String</td><td>int / embstr / raw (SDS)</td><td>缓存对象、计数器、分布式锁、限流</td></tr>
+<tr><td>Hash</td><td>listpack / hashtable</td><td>购物车、用户信息、对象分字段更新</td></tr>
+<tr><td>List</td><td>quicklist</td><td>消息队列（不推荐）、最新列表、栈</td></tr>
+<tr><td>Set</td><td>intset / listpack / hashtable</td><td>去重、共同好友、抽奖、标签</td></tr>
+<tr><td>ZSet</td><td>listpack / skiplist</td><td>排行榜、延时队列、带权重的队列</td></tr>
+<tr><td>Bitmap</td><td>String 的位操作</td><td>签到、UV 统计、布尔统计</td></tr>
+<tr><td>HyperLogLog</td><td>稀疏/稠密编码</td><td>海量 UV 去重（误差 0.81%）</td></tr>
+<tr><td>GEO</td><td>ZSet + GeoHash</td><td>附近的人、门店距离</td></tr>
+<tr><td>Stream</td><td>radix tree</td><td>消息队列（支持消费组、ACK）</td></tr>
+</tbody>
+</table>
+<p><strong>🎯 加分点：</strong>「还有一个 <code class="inline">Bitfield</code>，本质是 String 的位域操作，能一次读写多个位段，适合游戏积分、多维布尔标记。」</p>
+</div></details>
+
+<details class="qa"><summary>3. Redis 为什么快？<span class="lvl lv1">L1</span><span class="badge bg-red">高频</span></summary><div class="qa-b">
+<p><strong>一句话答案：纯内存操作 + 单线程无锁 + epoll IO 多路复用 + 精心设计的数据结构 + 合理的底层协议。</strong></p>
+<ol class="steps">
+<li class="step"><strong>纯内存：</strong>内存访问 ~100ns，磁盘寻道 ~10ms，差 5 个数量级。这是最根本的原因。</li>
+<li class="step"><strong>单线程：</strong>避免多线程上下文切换（每次 ~1.5μs）和锁竞争。不需要加锁，就没有锁开销。</li>
+<li class="step"><strong>IO 多路复用：</strong>一个 epoll 实例管几万个连接，谁有数据就处理谁，不用为每个连接开线程。</li>
+<li class="step"><strong>高效数据结构：</strong>SDS O(1) 取长度、跳表 O(logN) 范围查询、listpack 紧凑内存布局、渐进式 rehash。</li>
+<li class="step"><strong>自定义协议 RESP：</strong>解析简单，二进制安全，比 HTTP 轻量得多。</li>
+<li class="step"><strong>内核优化：</strong>避免 NUMA、关闭 THP、合理设置 somaxconn。</li>
+</ol>
+<p><strong>🎯 加分点：</strong>一定要补一句「但单线程是双刃剑」——慢命令（KEYS、HGETALL 大 key）会阻塞所有请求。这就是为什么我们要有 SLOWLOG 和大 key 治理。</p>
+</div></details>
+
+<details class="qa"><summary>4. Redis 是单线程的吗？<span class="lvl lv1">L1</span><span class="badge bg-red">高频</span></summary><div class="qa-b">
+<p><strong>一句话答案：命令执行是单线程的，但整个 Redis 进程不是单线程。</strong></p>
+<table>
+<thead><tr><th>时间线</th><th>线程</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>4.0 之前</td><td>1 主线程</td><td>连后台删除都是同步的</td></tr>
+<tr><td>4.0+</td><td>主线程 + 后台线程</td><td>UNLINK、FLUSHASYNC、lazy-free 交给后台</td></tr>
+<tr><td>6.0+</td><td>主线程 + IO 线程 + 后台线程</td><td>IO 读写可以多线程（<code class="inline">io-threads</code>）</td></tr>
+<tr><td>8.x</td><td>同上，IO 线程更成熟</td><td>命令执行仍然单线程</td></tr>
+</tbody>
+</table>
+<p>关键：<strong>「解析请求」和「写回响应」可以多线程，「执行命令」永远单线程</strong>。因为执行部分要访问共享数据结构，多线程反而要加锁，得不偿失。</p>
+<p><strong>🎯 加分点：</strong>「IO 多线程不是并发执行命令，而是把网络读写这个 CPU 占比不大的环节并行掉。我们线上 8 核机器设 <code class="inline">io-threads 4</code>，注意是<strong>总线程数</strong>，不是额外线程数。」</p>
+</div></details>
+
+<details class="qa"><summary>5. Redis 的持久化有哪几种？区别是什么？<span class="lvl lv1">L1</span><span class="badge bg-red">高频</span></summary><div class="qa-b">
+<p><strong>一句话答案：RDB（快照）、AOF（日志）、混合持久化（推荐）。</strong></p>
+<table>
+<thead><tr><th>对比</th><th>RDB</th><th>AOF</th><th>混合（7.0+ 默认）</th></tr></thead>
+<tbody>
+<tr><td>原理</td><td>fork 子进程写二进制快照</td><td>追加写命令日志</td><td>AOF 文件头是 RDB，后面追加命令</td></tr>
+<tr><td>文件大小</td><td>小</td><td>大</td><td>中</td></tr>
+<tr><td>恢复速度</td><td>快</td><td>慢（要重放命令）</td><td>快</td></tr>
+<tr><td>数据安全</td><td>差（丢最后一次快照后的数据）</td><td>好（everysec 最多丢 1s）</td><td>好</td></tr>
+<tr><td>fork 阻塞</td><td>有（数据量越大越久）</td><td>只在重写时有</td><td>只在重写时有</td></tr>
+<tr><td>默认开启</td><td>是</td><td>7.0 之前默认 no</td><td>是（<code class="inline">aof-use-rdb-preamble yes</code>）</td></tr>
+</tbody>
+</table>
+<p><strong>AOF 刷盘策略</strong>：<code class="inline">always</code>（每条都 fsync，最安全最慢）、<code class="inline">everysec</code>（每秒 fsync，默认，最多丢 1s）、<code class="inline">no</code>（交给 OS，不可控，可能丢 30s）。</p>
+<p><strong>🎯 加分点：</strong>「生产环境我们用的是混合持久化。另外 7.0 引入了 <strong>Multi-Part AOF</strong>，把 manifest 和各个 base/incr 文件分离，重写时不用再 fork 一个大文件，解决了 AOF 重写时的内存膨胀问题。」</p>
+</div></details>
+
+<details class="qa"><summary>6. RDB 的 fork 是怎么工作的？会阻塞吗？<span class="lvl lv1">L1</span></summary><div class="qa-b">
+<p><strong>一句话答案：fork 用 Copy-On-Write，fork 本身会短暂阻塞，且阻塞时间与内存页表大小正相关。</strong></p>
+<ol class="steps">
+<li class="step"><strong>fork 做了什么：</strong>复制父进程的页表给子进程（不是复制数据！）。父子进程共享物理内存，只有写操作才复制页面。</li>
+<li class="step"><strong>阻塞点在哪：</strong>fork 系统调用本身要复制页表。10GB 内存大约 250 万个页表项，fork 耗时可达 <strong>数十到数百毫秒</strong>。</li>
+<li class="step"><strong>COW 的代价：</strong>fork 之后，父进程每修改一个页面，就要复制一份。所以 fork 期间写入越频繁，内存膨胀越严重——最坏情况是 <strong>内存翻倍</strong>。</li>
+<li class="step"><strong>进程退出时：</strong>子进程写完后父进程要 <code class="inline">wait</code>，这也会短暂阻塞。</li>
+</ol>
+<p><strong>🎯 加分点：</strong>「所以我们的经验是：<strong>（1）单实例内存控制在 10GB 以内</strong>，fork 才可控；<strong>（2）用 <code class="inline">bgsave</code> 而不是 <code class="inline">save</code></strong>，绝不在主线程做持久化；<strong>（3）fork 期间避免大批量写</strong>，我们曾在大促前清缓存，结果 COW 把内存从 12G 干到 23G，触发了 OOM Killer。另外 <code class="inline">vm.overcommit_memory=1</code> 是必须的，否则 fork 会直接失败。」</p>
+</div></details>
+
+<details class="qa"><summary>7. Redis 的过期键是怎么删除的？<span class="lvl lv1">L1</span><span class="badge bg-red">高频</span></summary><div class="qa-b">
+<p><strong>一句话答案：惰性删除 + 定期删除，两者结合。</strong></p>
+<table>
+<thead><tr><th>策略</th><th>触发时机</th><th>优点</th><th>缺点</th></tr></thead>
+<tbody>
+<tr><td><strong>惰性删除</strong></td><td>访问 key 时检查是否过期</td><td>CPU 友好，不浪费</td><td>没被访问就永远占内存（内存泄漏）</td></tr>
+<tr><td><strong>定期删除</strong></td><td>每 100ms 随机抽查 20 个 key</td><td>能回收冷数据</td><td>抽样有遗漏，需多轮</td></tr>
+</tbody>
+</table>
+<p><strong>定期删除的细节（必答）：</strong>每秒执行 <code class="inline">server.hz</code>（默认 10）次，每次：</p>
+<ol class="steps">
+<li class="step">从「已设置过期时间」的字典中<strong>随机</strong>取 20 个 key。</li>
+<li class="step">删除其中已过期的 key。</li>
+<li class="step">如果过期比例 &gt; 25%，<strong>重复步骤 1</strong>。</li>
+<li class="step">给这次任务设置一个 25ms 的时间上限，超时立即退出（防止阻塞主线程）。</li>
+</ol>
+<p><strong>🎯 加分点：</strong>「这里有个经典问题：如果大量 key 同时过期，定期删除会反复循环，可能阻塞主线程。所以生产上我们给 TTL 加随机抖动（<code class="inline">expire = base + random(0, 300)</code>），这也是防止缓存雪崩的同一招。」</p>
+</div></details>
+
+<details class="qa"><summary>8. Redis 的内存淘汰策略有哪些？<span class="lvl lv1">L1</span><span class="badge bg-red">高频</span></summary><div class="qa-b">
+<p><strong>一句话答案：8 种策略 = 4 种淘汰范围（noeviction/allkeys/volatile）× 多种算法。</strong></p>
+<table>
+<thead><tr><th>策略</th><th>淘汰范围</th><th>算法</th><th>适用场景</th></tr></thead>
+<tbody>
+<tr><td>noeviction</td><td>—</td><td>不淘汰，内存满则写报错</td><td>数据不能丢（当 DB 用）</td></tr>
+<tr><td>allkeys-lru</td><td>所有 key</td><td>最近最少使用</td><td><strong>纯缓存，最常用</strong></td></tr>
+<tr><td>allkeys-lfu</td><td>所有 key</td><td>最不经常使用</td><td>缓存，且热点明显（4.0+）</td></tr>
+<tr><td>allkeys-random</td><td>所有 key</td><td>随机</td><td>访问均匀，几乎不用</td></tr>
+<tr><td>volatile-lru</td><td>仅带 TTL 的 key</td><td>LRU</td><td>缓存+持久数据混存</td></tr>
+<tr><td>volatile-lfu</td><td>仅带 TTL 的 key</td><td>LFU</td><td>同上，热点明显</td></tr>
+<tr><td>volatile-random</td><td>仅带 TTL 的 key</td><td>随机</td><td>很少用</td></tr>
+<tr><td>volatile-ttl</td><td>仅带 TTL 的 key</td><td>剩余 TTL 最小优先</td><td>快要过期的先删</td></tr>
+</tbody>
+</table>
+<p><strong>LRU vs LFU 的核心区别：</strong>LRU 只看「最近有没有用」，LFU 看「用的频率」。LFU 能解决「冷数据偶尔被访问一次就把热数据挤掉」的问题。</p>
+<p><strong>Redis 的 LRU 是近似 LRU</strong>：不维护完整链表，而是随机采样 <code class="inline">maxmemory-samples</code>（默认 5）个 key，淘汰其中最久未使用的。采样数越大越准，但越耗 CPU。</p>
+<p><strong>🎯 加分点：</strong>「Redis 的 LFU 有个 8bit 的计数器，高 8 位记录访问频率（对数增长，最大 255），低 8 位记录最后一次衰减时间。默认每分钟衰减一次，<code class="inline">lfu-decay-time</code> 控制。注意 <strong>LFU 计数器不会因为重启清零</strong>——因为它在对象头里，会在 RDB 里保存。」</p>
+</div></details>
+
+<details class="qa"><summary>9. Memcached 和 Redis 有什么区别？为什么选 Redis？<span class="lvl lv1">L1</span></summary><div class="qa-b">
+<table>
+<thead><tr><th>维度</th><th>Memcached</th><th>Redis</th></tr></thead>
+<tbody>
+<tr><td>数据结构</td><td>只有 String（value 是字节）</td><td>8+ 种结构</td></tr>
+<tr><td>持久化</td><td>无</td><td>RDB/AOF</td></tr>
+<tr><td>高可用</td><td>无原生方案</td><td>哨兵/Cluster</td></tr>
+<tr><td>多线程</td><td>多线程</td><td>单线程（IO 多线程）</td></tr>
+<tr><td>内存效率</td><td>高（纯 KV）</td><td>略低（对象头开销）</td></tr>
+<tr><td>生态</td><td>少</td><td>极其丰富</td></tr>
+</tbody>
+</table>
+<p><strong>🎯 加分点：</strong>「现在基本没有选 Memcached 的理由了。Redis 单线程 IO 多路复用，QPS 不比 Memcached 差，而能力是它的超集。唯一场景是纯 KV 且对内存效率极端敏感。</p>
+</div></details>
+
+<details class="qa"><summary>10. Redis 的 String 为什么比 C 的 char* 好？<span class="lvl lv1">L1</span></summary><div class="qa-b">
+<p><strong>一句话答案：Redis 用 SDS（Simple Dynamic String）替代 C 字符串，解决了 4 个问题。</strong></p>
+<table>
+<thead><tr><th>问题</th><th>C char*</th><th>SDS</th></tr></thead>
+<tbody>
+<tr><td>取长度</td><td>O(n) 遍历到 '\0'</td><td>O(1)，有 len 字段</td></tr>
+<tr><td>二进制安全</td><td>不安全，遇到 \0 截断</td><td>安全，靠 len 判断结尾</td></tr>
+<tr><td>缓冲区溢出</td><td>strcat 可能溢出</td><td>自动扩容（空间预分配）</td></tr>
+<tr><td>内存分配次数</td><td>每次修改都 realloc</td><td>预分配 + 惰性释放，减少 realloc</td></tr>
+</tbody>
+</table>
+<p><strong>SDS 有三种头部：</strong><code class="inline">sdshdr5</code>（&lt;32 字节，只存 flags）、<code class="inline">sdshdr8</code>、<code class="inline">sdshdr16</code>、<code class="inline">sdshdr32</code>、<code class="inline">sdshdr64</code>，按字符串长度选最小的，节省内存。</p>
+<p><strong>空间预分配规则：</strong>扩容后 len &lt; 1MB 时，alloc = 2 × len；len ≥ 1MB 时，alloc = len + 1MB。最多浪费 1MB。</p>
+<p><strong>🎯 加分点：</strong>「SDS 的扩容是<strong>惰性释放</strong>的：缩短字符串时不立即回收内存（<code class="inline">free</code> 字段记录空闲），留给后续 append 复用，避免频繁 realloc。」</p>
+</div></details>
+
+<details class="qa"><summary>11. Redis 的 key 最大能存多大？<span class="lvl lv1">L1</span></summary><div class="qa-b">
+<p><strong>512 MB。</strong>这是 String 的硬上限。但生产上<strong>强烈不建议超过 10KB</strong>，超过 100KB 就属于「大 key」，1MB 以上就是必须治理的严重问题。</p>
+<p><strong>原因：</strong>单线程模型下，一次 GET 一个 100MB 的 value，网络传输 + 反序列化会阻塞其他所有请求。</p>
+</div></details>
+
+<details class="qa"><summary>12. 怎么查看 Redis 的内存使用情况？<span class="lvl lv1">L1</span></summary><div class="qa-b">
+<pre><code class="language-bash"># 总览
+INFO memory
+# 关注字段：
+#   used_memory            实际分配器给 Redis 的内存量
+#   used_memory_rss        操作系统看到的物理内存（含碎片）
+#   used_memory_peak       历史峰值
+#   mem_fragmentation_ratio = rss / used_memory，1.0~1.5 正常
+#   maxmemory              配置上限
+#   maxmemory_policy       淘汰策略
+#   mem_clients_normal     客户端缓冲区占用
+
+# 单个 key 的内存
+MEMORY USAGE mykey
+MEMORY USAGE mykey SAMPLES 100     # 采样精度
+
+# 内存明细
+MEMORY DOCTOR                       # 健康诊断
+MEMORY STATS                        # 详细统计
+
+# 扫描大 key
+redis-cli --bigkeys
+redis-cli --memkeys</code></pre>
+<p><strong>🎯 加分点：</strong>「<code class="inline">used_memory</code> 和 <code class="inline">used_memory_rss</code> 的差值就是内存碎片。我们线上 <code class="inline">mem_fragmentation_ratio &gt; 1.5</code> 就告警，配合 <code class="inline">activedefrag yes</code> 做在线碎片整理。低于 1.0 说明在用 swap，性能会崩。」</p>
+</div></details>
+
+<h2>L2 · 进阶级（区分度开始出现）</h2>
+
+<details class="qa"><summary>13. Redis 的 Hash 什么时候用 listpack，什么时候转 hashtable？<span class="lvl lv2">L2</span></summary><div class="qa-b">
+<p><strong>两个阈值（Redis 7.x 默认值）：</strong></p>
+<pre><code class="language-bash">hash-max-listpack-entries 128      # 字段数上限
+hash-max-listpack-value 64         # 单个字段/值的字节上限</code></pre>
+<p>任一条件突破，就转成 hashtable。<strong>转换是单向的</strong>，转过去就不会转回来。</p>
+<p><strong>为什么要有这个设计：</strong>listpack 是紧凑的连续内存，省内存但查找是 O(n)；hashtable 查找 O(1) 但有指针开销和 hash 桶浪费。小 Hash 用 listpack 省内存，大 Hash 用 hashtable 保性能。</p>
+<table>
+<thead><tr><th>结构</th><th>内存开销</th><th>查找</th></tr></thead>
+<tbody>
+<tr><td>listpack</td><td>极低（连续内存）</td><td>O(n)，n≤128 可接受</td></tr>
+<tr><td>hashtable</td><td>高（每项一个 dictEntry 24B + 指针）</td><td>O(1)</td></tr>
+</tbody>
+</table>
+<p><strong>🎯 加分点：</strong>「<strong>这里有个坑</strong>：如果你建了一个 500 字段的 Hash，它就永远是 hashtable 了。所以设计时要么控制字段数 &lt; 128，要么拆成多个 key。反过来，我们在做用户画像时故意把 <code class="inline">user:123:base</code> 和 <code class="inline">user:123:extra</code> 拆开，就是为了让各自都能用 listpack。」</p>
+</div></details>
+
+<details class="qa"><summary>14. ZSet 的底层是怎么实现的？跳表为什么能替代平衡树？<span class="lvl lv2">L2</span><span class="badge bg-red">高频</span></summary><div class="qa-b">
+<p><strong>一句话答案：元素少时用 listpack，超过阈值用「跳表 + 字典」双结构。</strong></p>
+<pre><code class="language-bash">zset-max-listpack-entries 128
+zset-max-listpack-value 64</code></pre>
+<p><strong>为什么是双结构：</strong></p>
+<table>
+<thead><tr><th>需求</th><th>结构</th><th>复杂度</th></tr></thead>
+<tbody>
+<tr><td>按 score 范围查（ZRANGEBYSCORE）</td><td>跳表</td><td>O(logN)</td></tr>
+<tr><td>按 member 查 score（ZSCORE）</td><td>字典</td><td>O(1)</td></tr>
+</tbody>
+</table>
+<p>只用跳表的话，ZSCORE 要 O(logN)；只用字典的话，范围查询做不到有序。所以两个都要。</p>
+<p><strong>跳表 vs 平衡树（必答的对比）：</strong></p>
+<table>
+<thead><tr><th>维度</th><th>跳表</th><th>红黑树/AVL</th></tr></thead>
+<tbody>
+<tr><td>范围查询</td><td><strong>简单</strong>，找到起点沿 level 0 顺序遍历即可</td><td>要做中序遍历，实现复杂</td></tr>
+<tr><td>实现复杂度</td><td>简单（~200 行）</td><td>复杂（旋转、染色）</td></tr>
+<tr><td>并发友好</td><td>局部修改，锁粒度小</td><td>旋转影响大范围</td></tr>
+<tr><td>平均复杂度</td><td>O(logN)（期望）</td><td>O(logN)（最坏）</td></tr>
+<tr><td>内存</td><td>略高（多层指针，平均 1/(1-p) ≈ 1.33 个指针/层）</td><td>较低（每节点 2 指针）</td></tr>
+</tbody>
+</table>
+<p><strong>跳表的分层规则：</strong>每次插入随机决定层数，<code class="inline">p = 0.25</code>，即第 k 层的概率是 0.25<sup>k-1</sup>。最大 32 层（支持 4 亿+ 元素）。</p>
+<p><strong>🎯 加分点：</strong>「antirez 自己说过，选跳表而不是平衡树，主要是<strong>范围查询和实现简单</strong>。ZRANGEBYSCORE 从跳表出发只要顺序遍历，平衡树则要中序遍历，代码量和 bug 面积都大得多。」</p>
+</div></details>
+
+<details class="qa"><summary>15. Redis 的渐进式 rehash 是怎么做的？<span class="lvl lv2">L2</span></summary><div class="qa-b">
+<p><strong>问题背景：</strong>Hash 表扩容需要把所有元素重新 hash 到新表，如果一次性做完，几百万 key 会阻塞主线程几秒。所以要「渐进式」。</p>
+<p><strong>实现：</strong>维护两个哈希表 <code class="inline">ht[0]</code>（旧）和 <code class="inline">ht[1]</code>（新），加一个 <code class="inline">rehashidx</code> 游标。</p>
+<ol class="steps">
+<li class="step"><strong>触发扩容：</strong>负载因子 ≥ 1（未做 bgsave 时）或 ≥ 5（在做 bgsave 时）触发扩容。缩容阈值是 0.1。</li>
+<li class="step"><strong>开始 rehash：</strong>为 ht[1] 分配空间（扩容为 ≥ 2×used 的 2 次幂），rehashidx = 0。</li>
+<li class="step"><strong>渐进迁移：</strong>每次对字典做增删改查时，顺便把 ht[0] 在 rehashidx 上的桶迁移到 ht[1]，然后 rehashidx++。</li>
+<li class="step"><strong>定时迁移：</strong>如果长期没有请求，还有 serverCron 每 100ms 迁移 1ms 的量（防止一直不完成）。</li>
+<li class="step"><strong>完成：</strong>ht[0] 空了，把 ht[1] 赋给 ht[0]，ht[1] 置空，rehashidx = -1。</li>
+</ol>
+<p><strong>rehash 期间的操作规则（易考）：</strong></p>
+<ul>
+<li><strong>查找：</strong>先查 ht[0]，再查 ht[1]。</li>
+<li><strong>新增：</strong><strong>只往 ht[1] 加</strong>，保证 ht[0] 只减不增，最终一定收敛。</li>
+<li><strong>删除/修改：</strong>两个表都找，找到就操作。</li>
+</ul>
+<p><strong>🎯 加分点：</strong>「为什么 bgsave 时扩容阈值要提到 5？因为 fork 之后 COW 机制下，扩容会复制大量页面，导致内存暴涨。所以宁可让它更满也不轻易扩容。」</p>
+</div></details>
+
+<details class="qa"><summary>16. Pipeline 是什么？它和事务有什么区别？<span class="lvl lv2">L2</span><span class="badge bg-red">高频</span></summary><div class="qa-b">
+<p><strong>一句话答案：Pipeline 是批量发命令省 RTT，事务是保证命令不被别人插队，两者解决不同的问题。</strong></p>
+<table>
+<thead><tr><th>维度</th><th>Pipeline</th><th>MULTI/EXEC 事务</th><th>Lua 脚本</th></tr></thead>
+<tbody>
+<tr><td>目的</td><td>减少网络往返</td><td>命令原子执行</td><td>原子 + 逻辑</td></tr>
+<tr><td>原子性</td><td><strong>无</strong>，中间可能插别人的命令</td><td>有（EXEC 时连续执行）</td><td><strong>有</strong>（整个脚本原子）</td></tr>
+<tr><td>回滚</td><td>不适用</td><td><strong>不支持回滚</strong>（运行时错误不中断）</td><td>不支持回滚，但可写判断逻辑</td></tr>
+<tr><td>条件判断</td><td>不支持</td><td><strong>不支持</strong>（WATCH 只能处理简单 CAS）</td><td><strong>支持</strong>（if/else、循环）</td></tr>
+<tr><td>性能</td><td>极高（1 次 RTT 发 N 条）</td><td>高（1 次 RTT 发 N+2 条）</td><td>高，但大脚本会阻塞</td></tr>
+<tr><td>适用</td><td>批量读写、初始化</td><td>简单原子操作</td><td>复杂原子逻辑（扣库存）</td></tr>
+</tbody>
+</table>
+<p><strong>关键点：Redis 事务为什么不回滚？</strong>antirez 的设计哲学是：运行时错误（如对 String 做 INCR）是<strong>编程错误</strong>，应该在开发期发现，而不是靠数据库回滚。回滚需要额外的 undo log，复杂且影响性能。</p>
+<p><strong>🎯 加分点：</strong>「我们在秒杀场景做过压测：同样扣 1000 次库存，Pipeline 耗时约 12ms，MULTI/EXEC 约 15ms，Lua 约 18ms。但 Lua 能保证『判断+扣减』原子，前两者做不到。所以<strong>能用 Lua 就用 Lua，能用 Pipeline 批量读就用 Pipeline</strong>。」</p>
+</div></details>
+
+<details class="qa"><summary>17. 什么是缓存穿透？怎么解决？<span class="lvl lv2">L2</span><span class="badge bg-red">高频</span></summary><div class="qa-b">
+<p><strong>一句话答案：查一个数据库也不存在的 key，每次都绕过缓存打到 DB。</strong></p>
+<p><strong>三种解决方案：</strong></p>
+<table>
+<thead><tr><th>方案</th><th>做法</th><th>优点</th><th>缺点</th></tr></thead>
+<tbody>
+<tr><td><strong>空值缓存</strong></td><td>查不到就缓存 null，TTL 短一些（60s）</td><td>简单，能挡住重复攻击</td><td>占内存；数据变更后有短暂不一致</td></tr>
+<tr><td><strong>布隆过滤器</strong></td><td>启动时把所有存在的 key 灌进去，查询前先过 BF</td><td>内存极省（1 亿 key 约 100MB）</td><td>有误判率；删除困难；需预热</td></tr>
+<tr><td><strong>参数校验</strong></td><td>id&lt;0 或格式不对直接拒绝</td><td>零成本</td><td>只能挡低级攻击</td></tr>
+</tbody>
+</table>
+<p><strong>布隆过滤器原理：</strong>k 个哈希函数映射到 m 位的位数组。查询时若所有位都是 1 则「可能存在」，任一位是 0 则「一定不存在」。</p>
+<p>误判率公式：<code class="inline">P ≈ (1 - e^(-kn/m))^k</code>，最优 k = (m/n)·ln2 ≈ 0.693·(m/n)。</p>
+<p><strong>Redis 8.x 内置了布隆过滤器</strong>（之前要装 RedisBloom 模块）：</p>
+<pre><code class="language-bash">BF.RESERVE users 0.001 1000000     # 误判率0.001，预期100万元素
+BF.ADD users user:123
+BF.EXISTS users user:456
+BF.MADD users a b c
+BF.INFO users                       # 查看统计</code></pre>
+<p><strong>🎯 加分点：</strong>「我们线上是<strong>组合拳</strong>：参数校验挡住 90% 的无效请求，布隆过滤器挡住剩余的存在性检查，空值缓存兜底防止同一 key 反复穿透。另外要<strong>监控缓存命中率</strong>——一旦命中率从 99% 掉到 80%，基本就是被穿透了。」</p>
+</div></details>
+
+<details class="qa"><summary>18. 什么是缓存击穿？怎么解决？和穿透有什么区别？<span class="lvl lv2">L2</span><span class="badge bg-red">高频</span></summary><div class="qa-b">
+<p><strong>击穿：单个热点 key 过期瞬间，大量并发请求同时打到 DB。</strong>（注意：key 在 DB 里<strong>是存在的</strong>）</p>
+<p><strong>穿透 vs 击穿：</strong></p>
+<table>
+<thead><tr><th>维度</th><th>穿透</th><th>击穿</th></tr></thead>
+<tbody>
+<tr><td>数据是否存在</td><td><strong>不存在</strong>（DB 也没有）</td><td><strong>存在</strong>（DB 有，只是缓存过期了）</td></tr>
+<tr><td>攻击量</td><td>大量不同 key</td><td>单个热点 key</td></tr>
+<tr><td>后果</td><td>DB 压力线性增长</td><td>DB 瞬时压力尖峰</td></tr>
+</tbody>
+</table>
+<p><strong>两种解决方案：</strong></p>
+<h4>方案一：互斥锁（强一致，牺牲可用性）</h4>
+<pre><code class="language-java">public Product getProduct(Long id) {
+    String key = "product:" + id;
+    String cached = redis.get(key);
+    if (cached != null) return JSON.parseObject(cached, Product.class);
+
+    // 缓存未命中，抢锁重建
+    String lockKey = "lock:" + key;
+    // SET NX EX 一条命令搞定，原子
+    Boolean locked = redis.set(lockKey, "1", SetParams.setParams().nx().ex(10));
+    if (Boolean.TRUE.equals(locked)) {
+        try {
+            // 双重检查：可能别的线程已经重建好了
+            cached = redis.get(key);
+            if (cached != null) return JSON.parseObject(cached, Product.class);
+            Product p = productMapper.selectById(id);
+            redis.set(key, JSON.toJSONString(p), 300);
+            return p;
+        } finally {
+            redis.del(lockKey);   // 生产环境要按 value 校验后删，见分布式锁章节
+        }
+    } else {
+        // 没抢到锁，短暂休眠后重试（或直接返回旧值）
+        Thread.sleep(50);
+        return getProduct(id);
+    }
+}</code></pre>
+<h4>方案二：逻辑过期（高可用，牺牲一致性）</h4>
+<pre><code class="language-java">// value 里不带 TTL，而是自己存一个 expireAt 字段
+@Data
+class CacheData {
+    Object data;
+    Long expireAt;      // 逻辑过期时间
+}
+
+public Object getProduct(Long id) {
+    CacheData cd = (CacheData) redis.get("product:" + id);
+    if (cd == null) return null;
+    if (cd.getExpireAt() > System.currentTimeMillis()) {
+        return cd.getData();       // 没过期，直接返回
+    }
+    // 逻辑已过期：异步重建，当前请求仍返回旧数据
+    if (tryLock("lock:product:" + id)) {
+        ASYNC_EXECUTOR.execute(() -> {
+            try {
+                Product p = productMapper.selectById(id);
+                redis.set("product:" + id,
+                    new CacheData(p, System.currentTimeMillis() + 300_000));
+            } finally { unlock("lock:product:" + id); }
+        });
+    }
+    return cd.getData();   // 永远不阻塞，返回旧值
+}</code></pre>
+<p><strong>怎么选：</strong></p>
+<table>
+<thead><tr><th>方案</th><th>一致性</th><th>可用性</th><th>适用</th></tr></thead>
+<tbody>
+<tr><td>互斥锁</td><td>强（拿到的一定是新数据）</td><td>差（其他线程要等，可能超时）</td><td>对一致性要求高、并发不极端</td></tr>
+<tr><td>逻辑过期</td><td>弱（短暂返回旧数据）</td><td>极好（永不阻塞）</td><td>秒杀、大促、超高并发</td></tr>
+</tbody>
+</table>
+<p><strong>🎯 加分点：</strong>「还有一种『永不过期』方案——后台定时任务主动刷新。这样既没有重建时的并发问题，也能保证最终一致。我们做首页楼层数据就是这么干的：热点数据不设 TTL，用 XXL-Job 每 5 分钟推一次。」</p>
+</div></details>
+
+<details class="qa"><summary>19. 什么是缓存雪崩？怎么解决？<span class="lvl lv2">L2</span><span class="badge bg-red">高频</span></summary><div class="qa-b">
+<p><strong>三种雪崩形态（这个分层讲很加分）：</strong></p>
+<table>
+<thead><tr><th>形态</th><th>原因</th><th>现象</th></tr></thead>
+<tbody>
+<tr><td><strong>① 大批 key 同时过期</strong></td><td>统一 TTL，或零点刷新全量缓存</td><td>缓存命中率骤降到 0，DB 瞬间被打爆</td></tr>
+<tr><td><strong>② Redis 实例宕机</strong></td><td>单节点故障、内存满、被 OOM Kill</td><td>所有流量直接打到 DB</td></tr>
+<tr><td><strong>③ Redis 集群整体不可用</strong></td><td>机房断电、网络分区</td><td>灾难性，需要降级方案</td></tr>
+</tbody>
+</table>
+<p><strong>对应解法：</strong></p>
+<h4>针对 ①：TTL 加随机抖动</h4>
+<pre><code class="language-java">// ❌ 所有 key 都是 1800 秒，会在同一秒集体失效
+redis.set(key, value, 1800);
+
+// ✅ 抖动 300 秒，把失效时间散开
+int ttl = 1800 + ThreadLocalRandom.current().nextInt(300);
+redis.set(key, value, ttl);
+// 上线时预热也别一次性全灌，加个随机延迟或分批</code></pre>
+<h4>针对 ②：高可用架构 + 多级缓存</h4>
+<ol class="steps">
+<li class="step"><strong>高可用：</strong>哨兵 / Cluster，主从切换控制在秒级。这是基础设施层。</li>
+<li class="step"><strong>多级缓存：</strong>JVM 本地缓存（Caffeine）+ Redis。Redis 挂了，本地缓存还能顶一阵。</li>
+<li class="step"><strong>熔断降级：</strong>Sentinel 对 DB 调用限流，宁可拒掉部分请求也不让 DB 死。</li>
+<li class="step"><strong>DB 限流保护：</strong>给 DB 层加连接数上限，超出直接返回兜底数据。</li>
+</ol>
+<h4>针对 ③：业务降级 + 预案</h4>
+<ul>
+<li><strong>兜底数据：</strong>把静态兜底数据放本地文件/本地缓存，Redis 全挂时返回兜底（如「服务繁忙，请稍后」）。</li>
+<li><strong>开关预案：</strong>大促前准备好降级开关，一键关闭非核心功能。</li>
+<li><strong>压测预案：</strong>提前测「缓存全失效」场景，DB 到底能扛多少。</li>
+</ul>
+<p><strong>🎯 加分点（大厂真题级回答）：</strong>「我经历过一次真实雪崩。<strong>背景</strong>：运维做 Redis 主从切换，切了 40 秒。<strong>现象</strong>：40 秒内所有请求穿透到 MySQL，QPS 从 2000 涨到 3 万，MySQL 连接池打满，整个系统雪崩。<strong>根因</strong>：没有本地缓存层，没有 DB 限流。<strong>改造</strong>：（1）核心商品数据加 Caffeine 一级缓存；（2）DB 层加 Hystrix 限流；（3）切主改在低峰期，并用 Lua 脚本让客户端在切换期间返回旧值。<strong>效果</strong>：后来再切主，Redis 挂了 15 秒，业务无感知。」</p>
+</div></details>
+
+<details class="qa"><summary>20. 缓存和数据库怎么保证一致性？<span class="lvl lv2">L2</span><span class="badge bg-red">超高频</span></summary><div class="qa-b">
+<p><strong>一句话答案：没有完美方案，只能根据业务容忍度在「一致性/性能/复杂度」之间取舍。</strong></p>
+<p><strong>先排除一个错误答案：</strong>「先删缓存再更新 DB」❌ —— 并发下必然不一致。</p>
+<h4>方案一：先更新 DB，再删缓存（Cache Aside，最常用）</h4>
+<pre><code class="language-java">// 写路径
+public void updateProduct(Product p) {
+    // 1. 先更新数据库（在事务内）
+    productMapper.updateById(p);
+    // 2. 事务提交后再删缓存
+    //    ⚠️ 注意：必须在事务提交后执行！否则事务还没提交，
+    //       其他线程可能读到旧数据又写回缓存
+    transactionSynchronizationManager.registerSynchronization(
+        new TransactionSynchronization() {
+            @Override public void afterCommit() {
+                redis.del("product:" + p.getId());
+            }
+        });
+}
+
+// 读路径
+public Product getProduct(Long id) {
+    String key = "product:" + id;
+    String cached = redis.get(key);
+    if (cached != null) return JSON.parseObject(cached, Product.class);
+    Product p = productMapper.selectById(id);
+    if (p != null) redis.set(key, JSON.toJSONString(p), 300);
+    return p;
+}</code></pre>
+<p><strong>为什么是「删缓存」而不是「更新缓存」？</strong></p>
+<table>
+<thead><tr><th>方式</th><th>问题</th></tr></thead>
+<tbody>
+<tr><td>更新缓存</td><td>并发写时，A 更新成 1、B 更新成 2，但可能 A 的后操作覆盖 B，缓存变成 1（脏数据）。而且如果这个缓存值没人读，就是白算一次，浪费。</td></tr>
+<tr><td>删缓存</td><td>下次读时懒加载重建，天然避免并发写覆盖问题。且「删」是幂等的，「更新」不是。</td></tr>
+</tbody>
+</table>
+<p><strong>Cache Aside 的不一致窗口：</strong></p>
+<pre><code>时刻   线程A（写）              线程B（读）             缓存     DB
+ t1    更新DB=1                                          -       1
+ t2                           读缓存 miss                -       1
+ t3                           读DB → 1                   -       1
+ t4                           写缓存 = 1                 1       1
+ t5    删除缓存                                         -       1
+ t6                           写缓存 = 1（旧值！）       1       1   ← 不一致！</code></pre>
+<p>这个窗口极短（要求 B 的写缓存在 A 的删缓存之后），但理论上存在。解法是<strong>延时双删</strong>：</p>
+<pre><code class="language-java">public void updateProduct(Product p) {
+    redis.del("product:" + p.getId());   // 第一次删
+    productMapper.updateById(p);
+    // 延迟一段时间再删一次，覆盖掉读线程可能写回的旧值
+    // 延迟时间 = 读数据耗时（几十ms）+ 主从同步耗时，一般 500ms~1s
+    delayExecutor.schedule(
+        () -> redis.del("product:" + p.getId()),
+        800, TimeUnit.MILLISECONDS);
+}</code></pre>
+<p><strong>⚠️ 延时双删不是银弹</strong>：延迟时间怎么定？删第二次时如果又有读请求……所以只能把窗口压到极小，无法消除。</p>
+<h4>方案二：订阅 binlog（Canal，最终一致，最强）</h4>
+<pre><code class="language-bash">MySQL binlog ──> Canal ──> MQ ──> 消费端删缓存
+                                  │
+                                  ├─ 天然解耦，不影响主业务流程
+                                  ├─ 顺序消费保证最终一致
+                                  ├─ 即使业务代码漏删，也能兜住
+                                  └─ 缺点：引入 Canal + MQ，复杂度高</code></pre>
+<h4>方案三：强一致场景 —— 直接读 DB 或加分布式锁</h4>
+<p>如果业务真的不能容忍任何不一致（如金融余额），<strong>就别用缓存</strong>，或对写路径加分布式锁串行化。</p>
+<p><strong>🎯 加分点（这是面试官最想听的）：</strong>「我的选型逻辑是<strong>按业务分级</strong>：</p>
+<table>
+<thead><tr><th>业务</th><th>容忍度</th><th>方案</th></tr></thead>
+<tbody>
+<tr><td>商品详情、评论</td><td>秒级不一致可接受</td><td>Cache Aside + 短 TTL（300s）。TTL 是最后一道保险</td></tr>
+<tr><td>库存、优惠券</td><td>不能超卖</td><td>不用缓存读，直接 Lua 在 Redis 里原子扣减</td></tr>
+<tr><td>配置、字典</td><td>分钟级可接受</td><td>Cache Aside + 长 TTL + 主动刷新</td></tr>
+<tr><td>订单状态</td><td>秒级可接受</td><td>Canal 订阅 binlog 删缓存</td></tr>
+</tbody>
+</table>
+<p>核心认知：<strong>「缓存一致性」本质是分布式一致性问题，CAP 里只能选 AP + 最终一致。想要强一致，代价是不用缓存或者加锁，性能会掉一个数量级。</strong> 所以第一步永远是问清楚：业务能容忍多少不一致？」</p>
+</div></details>
+
+<details class="qa"><summary>21. Redis 的主从复制是怎么工作的？<span class="lvl lv2">L2</span></summary><div class="qa-b">
+<p><strong>三个阶段：</strong></p>
+<h4>阶段一：建立连接、协商同步（PSYNC）</h4>
+<ol class="steps">
+<li class="step">从库启动，配置 <code class="inline">replicaof &lt;masterip&gt; &lt;port&gt;</code>，向主库发 <code class="inline">PING</code>。</li>
+<li class="step">主库返回 <code class="inline">PONG</code>，认证（如果有 <code class="inline">requirepass</code>）。</li>
+<li class="step">从库发送 <code class="inline">REPLCONF listening-port &lt;port&gt;</code>，上报自己的端口。</li>
+<li class="step">从库发送 <code class="inline">PSYNC &lt;runid&gt; &lt;offset&gt;</code>。<strong>首次是 PSYNC ? -1</strong>，表示全量同步。</li>
+</ol>
+<h4>阶段二：主库同步数据给从库</h4>
+<ol class="steps">
+<li class="step">主库执行 <code class="inline">BGSAVE</code> 生成 RDB（fork 子进程）。</li>
+<li class="step">把 RDB 文件发给从库。</li>
+<li class="step"><strong>关键：</strong>生成 RDB 期间的新写命令，会写入 <code class="inline">repl_buffer</code>（复制积压缓冲区）。</li>
+<li class="step">从库收到 RDB 后先<strong>清空自己的数据</strong>（flushall），再加载 RDB。</li>
+<li class="step">主库把 repl_buffer 里的增量命令发给从库重放。</li>
+</ol>
+<h4>阶段三：命令传播（持续同步）</h4>
+<p>之后主库每执行一个写命令，就异步发给所有从库。从库执行后回复 <code class="inline">REPLCONF ACK &lt;offset&gt;</code>。</p>
+<p><strong>全量同步 vs 增量同步：</strong></p>
+<table>
+<thead><tr><th>类型</th><th>触发条件</th><th>代价</th></tr></thead>
+<tbody>
+<tr><td>全量（FULLRESYNC）</td><td>从库首次连接；或 offset 不在 repl_backlog 范围内</td><td>高：BGSAVE + 传大文件 + 从库清空</td></tr>
+<tr><td>增量（CONTINUE）</td><td>网络闪断后重连，offset 还在 backlog 里</td><td>低：只补发差量命令</td></tr>
+</tbody>
+</table>
+<p><strong>repl_backlog（复制积压缓冲区）：</strong>主库上的一个环形缓冲区，默认 1MB。<code class="inline">repl-backlog-size</code> 太小会导致网络一断就要全量同步。</p>
+<p><strong>🎯 加分点：</strong>「<code class="inline">repl-backlog-size</code> 我们线上设成 64MB。计算公式是 <code class="inline">大小 = 平均写入速率 × 预计最长断连时间</code>。我们写入峰值约 5MB/s，希望扛住 10 秒断连，所以 ≥ 50MB。设小了，网络抖一下就从增量退化成全量，主库 fork 一次就卡一下。」</p>
+</div></details>
+
+<details class="qa"><summary>22. 主从复制是全同步还是异步的？会有数据丢失吗？<span class="lvl lv2">L2</span></summary><div class="qa-b">
+<p><strong>一句话答案：默认全异步，会丢数据。要防丢必须开 WAIT 或 min-replicas。</strong></p>
+<p><strong>默认行为：</strong>主库执行完命令就返回给客户端，<strong>不等从库确认</strong>。所以主库刚写完就宕机，还没同步给从库，数据就丢了。</p>
+<p><strong>防丢的三个配置：</strong></p>
+<pre><code class="language-bash"># 1. 至少要有 N 个从库 ack 才算写成功（默认0=不检查）
+min-replicas-to-write 1
+min-replicas-max-lag 10     # 且延迟不超过 10 秒
+
+# 2. 客户端可用 WAIT 命令，等 N 个副本确认
+WAIT 1 1000                 # 等 1 个副本确认，超时 1000ms
+
+# 3. 从库只读（默认开）
+replica-read-only yes</code></pre>
+<p><strong>⚠️ 注意：</strong><code class="inline">min-replicas-to-write</code> 有可用性代价——从库全挂时主库会拒绝写入。<strong>这是典型的 CP 选择</strong>。</p>
+<p><strong>🎯 加分点：</strong>「这里有个面试高频陷阱：<strong>WAIT 不保证强一致</strong>。它只是把「写入同步给了 1 个副本」这个信息返回给你，但如果这个副本也挂了、主库也挂了，还是有丢失风险。真正的强一致要用 Raft（比如 Redis 不支持，得用 etcd/ZooKeeper）。Redis 官方定位是 AP。」</p>
+</div></details>
+
+<details class="qa"><summary>23. 哨兵（Sentinel）是干什么的？它怎么判断主库挂了？<span class="lvl lv2">L2</span></summary><div class="qa-b">
+<p><strong>三个职责：监控、通知、自动故障转移。</strong></p>
+<h4>主观下线（SDOWN）→ 客观下线（ODOWN）</h4>
+<ol class="steps">
+<li class="step">每个 Sentinel 每秒向所有节点发 <code class="inline">PING</code>。</li>
+<li class="step">如果超过 <code class="inline">down-after-milliseconds</code>（默认 30s）没回 PONG，该 Sentinel 把主库标记为<strong>主观下线（SDOWN）</strong>。</li>
+<li class="step">这个 Sentinel 向其他 Sentinel 发 <code class="inline">SENTINEL is-master-down-by-addr</code>，询问意见。</li>
+<li class="step">如果<strong>超过 quorum 个</strong> Sentinel 都认为它挂了，标记为<strong>客观下线（ODOWN）</strong>。</li>
+<li class="step">接下来选举 leader Sentinel 执行故障转移（Raft 式投票，需 majority：N/2+1 票）。</li>
+</ol>
+<p><strong>quorum 和 majority 的区别（容易混淆）：</strong></p>
+<table>
+<thead><tr><th>概念</th><th>含义</th><th>作用</th></tr></thead>
+<tbody>
+<tr><td>quorum</td><td>配置项，判定 ODOWN 需要的票数</td><td>「几个人说它死了」</td></tr>
+<tr><td>majority</td><td>计算值 = sentinel总数/2 + 1</td><td>「几个人同意换主」，是选举 leader 的门槛</td></tr>
+</tbody>
+</table>
+<p>例：3 个 Sentinel，quorum=2，majority=2。若 quorum 配成 3，那挂 1 个就永远无法 ODOWN。</p>
+<h4>选新主库的规则（优先级从高到低）</h4>
+<ol class="steps">
+<li class="step"><code class="inline">replica-priority</code>：数字越小优先级越高（0 表示永不参选）。</li>
+<li class="step">复制 offset 最大（数据最新）的胜出。</li>
+<li class="step">runid 字典序最小的胜出。</li>
+</ol>
+<h4>故障转移过程</h4>
+<ol class="steps">
+<li class="step">选出的从库执行 <code class="inline">SLAVEOF NO ONE</code> 升级为主库。</li>
+<li class="step">其他从库 <code class="inline">SLAVEOF</code> 指向新主库。</li>
+<li class="step">旧主库恢复后变成新主库的从库。</li>
+<li class="step">通过<strong>发布订阅</strong>通知客户端新主库地址（客户端要订阅 <code class="inline">+switch-master</code>）。</li>
+</ol>
+<p><strong>🎯 加分点：</strong>「哨兵有<strong>脑裂</strong>风险：网络分区时，旧主库还在接受写入，新主库已经选出。等网络恢复，旧主库的数据会被<strong>清空</strong>（变成从库时全量同步）。所以必须配 <code class="inline">min-replicas-to-write 1</code>——让被隔离的主库发现自己没有从库，主动拒绝写入，减少数据丢失。」</p>
+</div></details>
+
+<details class="qa"><summary>24. 为什么大厂都用 Cluster 而不是哨兵？<span class="lvl lv2">L2</span></summary><div class="qa-b">
+<table>
+<thead><tr><th>维度</th><th>哨兵</th><th>Cluster</th></tr></thead>
+<tbody>
+<tr><td>分片</td><td><strong>无</strong>，单主容量受限</td><td>有，16384 槽分布在多主</td></tr>
+<tr><td>水平扩展</td><td>不行，只能加从库读扩展</td><td>可以，加主库扩容</td></tr>
+<tr><td>单机内存上限</td><td>约 10-20GB（fork 考虑）</td><td>每主库都能到 10GB+</td></tr>
+<tr><td>写入能力</td><td>单主写入</td><td>多主并行写入</td></tr>
+<tr><td>客户端复杂度</td><td>低（订阅+switch-master）</td><td>高（需处理 MOVED/ASK）</td></tr>
+<tr><td>运维复杂度</td><td>低</td><td>高</td></tr>
+<tr><td>适用数据量</td><td>&lt; 20GB</td><td>可到 TB 级</td></tr>
+</tbody>
+</table>
+<p><strong>核心原因：Cluster 解决了「单机内存上限」这个根本瓶颈。</strong> 一台机器 32GB 内存，扣掉系统和 fork 开销，Redis 单实例安全线在 10GB 左右。数据到了 50GB 就只能上 Cluster。</p>
+<p><strong>🎯 加分点：</strong>「不过 Cluster 也不是越大越好。<strong>槽越多，运维越复杂，跨槽操作越受限。</strong> 我们线上是 6 主 6 从（每个主 1 个从），大约 60GB 数据。为什么不搞 100 个主？因为（1）Cluster 的 Gossip 通信是 O(N²) 量级，节点太多心跳风暴；（2）redis-cli --cluster rebalance 会变得很慢；（3）故障转移时选举范围太大，速度下降。」</p>
+</div></details>
+
+<details class="qa"><summary>25. Cluster 的 16384 个槽是怎么回事？为什么要 16384？<span class="lvl lv2">L2</span></summary><div class="qa-b">
+<p><strong>槽 = 数据分片单位。</strong> <code class="inline">slot = CRC16(key) mod 16384</code>，每个主节点负责一部分槽。</p>
+<p><strong>为什么是 16384（2^14）而不是 65536？</strong>这是 antirez 亲自回答过的问题（GitHub issue #2575），四个原因：</p>
+<ol class="steps">
+<li class="step"><strong>心跳包大小：</strong>每个节点心跳要带「我负责哪些槽」的 bitmap。16384 位 = 2KB；65536 位 = 8KB。Gossip 每秒都要发，2KB 已经够大了。</li>
+<li class="step"><strong>集群规模：</strong>Redis Cluster 设计上限约 1000 个节点。16384 槽 / 1000 节点 ≈ 16 槽/节点，够用。再多也用不到 65536。</li>
+<li class="step"><strong>位图压缩：</strong>节点少时，16384 位的 bitmap 压缩率高（大部分是 0）；65536 位则压缩效果差。</li>
+<li class="step"><strong>槽区间表示：</strong>节点负责的槽通常是一段连续区间，可用「起始槽 + 结束槽」压缩表示，16384 个槽在实现和传播时更轻量。</li>
+</ol>
+<p><strong>🎯 加分点：</strong>「注意槽的分配<strong>不需要均匀</strong>。比如你预估某个业务 key 特别多，可以多分一些槽给它。但一般还是均分，用 <code class="inline">redis-cli --cluster rebalance</code> 自动均衡。还有一点：<strong>16384 个槽固定不可改</strong>，这是写死在代码里的，Cluster 模式下不能用 SELECT 切库（只有 db0）。」</p>
+</div></details>
+
+<details class="qa"><summary>26. Cluster 的 MOVED 和 ASK 有什么区别？<span class="lvl lv2">L2</span><span class="badge bg-red">高频</span></summary><div class="qa-b">
+<p><strong>一句话答案：MOVED 表示「槽永久迁走了」，ASK 表示「这个 key 正在迁走，这次先来我这」。</strong></p>
+<table>
+<thead><tr><th>对比</th><th>MOVED</th><th>ASK</th></tr></thead>
+<tbody>
+<tr><td>触发场景</td><td>槽已经完成迁移，永久归属新节点</td><td>槽正在迁移中，key 恰好已迁到目标节点</td></tr>
+<tr><td>客户端动作</td><td>更新本地槽映射表，以后都去新节点</td><td><strong>不更新</strong>本地映射，只在本次请求加 <code class="inline">ASKING</code> 前缀重试</td></tr>
+<tr><td>是否刷新路由</td><td><strong>是</strong>（永久）</td><td><strong>否</strong>（临时）</td></tr>
+<tr><td>返回格式</td><td><code class="inline">MOVED 3999 127.0.0.1:6381</code></td><td><code class="inline">ASK 3999 127.0.0.1:6381</code></td></tr>
+</tbody>
+</table>
+<p><strong>为什么 ASK 不能更新路由表：</strong>因为槽还在迁移中，目标节点只接收了「这一个 key」，其他 key 还在源节点。如果客户端更新了映射，下次请求别的 key 就会打到目标节点，但目标节点还没有这个 key，会返回 MOVED。所以只能「本次临时」重定向。</p>
+<p><strong>迁移流程（槽迁移的三步）：</strong></p>
+<pre><code class="language-bash"># 1. 源节点：把这个槽标记为 MIGRATING
+CLUSTER SETSLOT 3999 MIGRATING &lt;目标节点ID&gt;
+
+# 2. 目标节点：把这个槽标记为 IMPORTING
+CLUSTER SETSLOT 3999 IMPORTING &lt;源节点ID&gt;
+
+# 3. 逐个迁移 key
+CLUSTER GETKEYSINSLOT 3999 100        # 取100个key
+MIGRATE &lt;target-ip&gt; &lt;target-port&gt; "" 0 5000 KEYS key1 key2 ...
+
+# 4. 迁移完成后，通知所有节点新归属
+CLUSTER SETSLOT 3999 NODE &lt;目标节点ID&gt;</code></pre>
+<p>迁移期间，客户端请求已迁走的 key 会收到 ASK；迁移完成后收到 MOVED。</p>
+<p><strong>🎯 加分点：</strong>「<strong>Redis 8.4 引入了原子槽迁移</strong>，解决了老版本迁移过程中『槽处于中间态』的问题。老版本迁移时如果源节点挂掉，这个槽可能两边都不认。8.4 用一个类似两阶段提交的机制，保证槽的归属切换是原子的。这是新版本一个挺实用的改进。」</p>
+</div></details>
+
+<details class="qa"><summary>27. Cluster 的故障转移是怎么做的？和哨兵有什么不同？<span class="lvl lv2">L2</span></summary><div class="qa-b">
+<p><strong>核心区别：Cluster 没有独立 Sentinel 进程，故障检测和仲裁都内建在数据节点里，用 Gossip 协议。</strong></p>
+<h4>PFAIL → FAIL</h4>
+<ol class="steps">
+<li class="step">节点 A 给节点 B 发 PING，超时未回 → A 把 B 标记为 <strong>PFAIL</strong>（疑似下线，本地状态，不广播）。</li>
+<li class="step">A 通过 Gossip 消息的 <code class="inline">gossip</code> 段落，向其他节点传播「我觉得 B 可能挂了」。</li>
+<li class="step">当超过半数<strong>主节点</strong>都认为 B 是 PFAIL 时，会把 B 标记为 <strong>FAIL</strong>（客观下线），并立即广播。</li>
+<li class="step">B 的从库发现主库 FAIL，开始竞选。</li>
+</ol>
+<h4>从库竞选（和 Raft 类似）</h4>
+<ol class="steps">
+<li class="step">从库把自己的 <code class="inline">currentEpoch + 1</code>，广播 <code class="inline">FAILOVER_AUTH_REQUEST</code>。</li>
+<li class="step">只有<strong>持有槽的主节点</strong>才有投票权，每个 epoch 只能投一票。</li>
+<li class="step">从库拿到<strong>多数票</strong>（N/2+1，N 是主节点总数）后，晋升为主库。</li>
+<li class="step">执行 <code class="inline">SLAVEOF NO ONE</code>，接管原来主库的槽，并广播 pong 消息宣告。</li>
+<li class="step">其他节点收到后更新自己的槽映射。</li>
+</ol>
+<p><strong>Cluster vs 哨兵的故障转移对比：</strong></p>
+<table>
+<thead><tr><th>维度</th><th>哨兵</th><th>Cluster</th></tr></thead>
+<tbody>
+<tr><td>检测者</td><td>独立 Sentinel 进程</td><td>数据节点自身（Gossip）</td></tr>
+<tr><td>投票者</td><td>所有 Sentinel</td><td>只有持槽的主节点</td></tr>
+<tr><td>需要额外部署</td><td>是（3+ Sentinel）</td><td>否</td></tr>
+<tr><td>切换粒度</td><td>整个主库</td><td>单个分片</td></tr>
+<tr><td>其他分片影响</td><td>无（只有一套）</td><td>无（不受影响）</td></tr>
+</tbody>
+</table>
+<p><strong>🎯 加分点：</strong>「Cluster 默认<strong>没有自动故障转移的时限保护</strong>，主库挂了到切换完成可能需要 10-30 秒（取决于 <code class="inline">cluster-node-timeout</code>，默认 15s）。这个时间窗口内该分片的请求全部失败。所以客户端必须配<strong>重试机制</strong>：捕获 <code class="inline">CLUSTERDOWN</code> 异常，带退避重试。Lettuce 的 <code class="inline">cluster-node-timeout</code> 和 <code class="inline">timeout</code> 是两个独立配置，别搞混。」</p>
+</div></details>
+
+<details class="qa"><summary>28. 说一下 Redis 的发布订阅，它有什么缺陷？<span class="lvl lv2">L2</span></summary><div class="qa-b">
+<p><strong>命令：</strong><code class="inline">SUBSCRIBE / PUBLISH / PSUBSCRIBE / UNSUBSCRIBE / PUBSUB CHANNELS</code>。</p>
+<p><strong>四个致命缺陷（面试点）：</strong></p>
+<table>
+<thead><tr><th>缺陷</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><strong>① 消息不持久化</strong></td><td>订阅者不在线，消息直接丢弃。恢复不了</td></tr>
+<tr><td><strong>② 无 ACK 机制</strong></td><td>发了不确认，不知道对方收没收到</td></tr>
+<tr><td><strong>③ 无消费组</strong></td><td>无法做「多个消费者共同消费一个队列」的负载均衡</td></tr>
+<tr><td><strong>④ 不保证可靠投递</strong></td><td>Redis 重启、主从切换都可能丢消息</td></tr>
+</tbody>
+</table>
+<p><strong>另外 Cluster 模式下还有个大坑：</strong>PUBLISH 会<strong>广播到所有节点</strong>，如果客户端只连了一个节点，订阅关系可能不匹配。要用 <code class="inline">SPUBLISH/SSUBSCRIBE</code>（分片订阅）才是正确的 Cluster 用法。</p>
+<p><strong>🎯 加分点：</strong>「所以<strong>生产上的 MQ 绝对不用发布订阅</strong>。要用 Redis 做 MQ 只有两个选择：List（简单但不能多消费组，且需轮询）或 <strong>Stream</strong>（5.0+，支持消费组、ACK、持久化，是目前 Redis 做 MQ 的正解）。不过说实话，真要 MQ 还是用 Kafka/RocketMQ，Redis 只适合轻量级、允许丢失的场景，比如配置变更通知。」</p>
+</div></details>
+
+<details class="qa"><summary>29. Redis 的 Stream 是怎么做消息队列的？<span class="lvl lv2">L2</span></summary><div class="qa-b">
+<p><strong>Stream 是 Redis 5.0 引入的真正的消息队列结构。</strong></p>
+<pre><code class="language-bash"># 生产者：添加消息，* 表示自动生成ID（时间戳-序号）
+XADD orders * orderId 1001 userId 888 amount 99.9
+XADD orders * orderId 1002 userId 889 amount 199.9
+
+# 消费者组（多条消息共享消费）
+XGROUP CREATE orders group1 0            # 从0开始
+XGROUP CREATE orders group2 $            # 从最新开始
+
+# 消费者读消息（> 表示只读未投递过的）
+XREADGROUP GROUP group1 consumer1 COUNT 10 BLOCK 5000 STREAMS orders >
+
+# 处理完后 ACK
+XACK orders group1 1699999999999-0
+
+# 查看待处理（未ACK）的消息
+XPENDING orders group1
+
+# 认领超时未ACK的消息（故障转移）
+XAUTOCLAIM orders group1 consumer2 60000 0-0 COUNT 10
+
+# 限制长度（防止无限增长）
+XADD orders MAXLEN ~ 10000 * ...        # ~ 表示近似裁剪，性能好
+XTRIM orders MAXLEN ~ 10000
+XRANGE orders - + COUNT 10
+XINFO STREAM orders
+XINFO GROUPS orders</code></pre>
+<p><strong>Stream 的能力对照 MQ：</strong></p>
+<table>
+<thead><tr><th>MQ 特性</th><th>Stream 支持</th></tr></thead>
+<tbody>
+<tr><td>持久化消息</td><td>✅（RDB/AOF）</td></tr>
+<tr><td>消费组</td><td>✅（XGROUP）</td></tr>
+<tr><td>ACK 确认</td><td>✅（XACK）</td></tr>
+<tr><td>未 ACK 重投</td><td>✅（XPENDING + XAUTOCLAIM）</td></tr>
+<tr><td>消息回溯</td><td>✅（按 ID 范围读）</td></tr>
+<tr><td>顺序性</td><td>✅（单 stream 内有序）</td></tr>
+<tr><td>分区/多 stream 扩展</td><td>⚠️ 需自己按业务分 stream</td></tr>
+<tr><td>堆积能力</td><td>⚠️ 内存有限，不适合海量堆积</td></tr>
+</tbody>
+</table>
+<p><strong>🎯 加分点：</strong>「Stream 的内存是大问题。<strong>一定要配 MAXLEN 做裁剪</strong>，否则消息全在内存里。我们线上用它做任务队列，MAXLEN ~ 100000，配合「消费完就 XDEL」或定期 XTRIM。如果堆积量会到百万级，那就别用 Stream，Kafka 更合适。」</p>
+</div></details>
+
+<h2>L3 · 高级（决定你能不能上 P7）</h2>
+
+<details class="qa"><summary>30. 分布式锁怎么实现？SETNX 演进到 Redisson 的完整历程？<span class="lvl lv3">L3</span><span class="badge bg-red">超高频</span></summary><div class="qa-b">
+<p><strong>四代演进（这是标准答法）：</strong></p>
+<h4>第一代：SETNX + DEL（有致命 bug）</h4>
+<pre><code class="language-java">// ❌ 错误示范
+if (redis.setnx("lock", "1") == 1) {
+    try {
+        doBusiness();
+    } finally {
+        redis.del("lock");   // 问题1：如果业务抛异常前宕机，锁永远不释放
+    }
+}</code></pre>
+<p>问题：① 没设过期时间 → 死锁；② del 会删掉别人的锁。</p>
+<h4>第二代：SET NX EX（原子设置 + 过期时间）</h4>
+<pre><code class="language-bash">SET lock value NX EX 30</code></pre>
+<p>必须用一条命令，不能 <code class="inline">SETNX</code> 后再 <code class="inline">EXPIRE</code>（两条命令之间宕机就死锁）。</p>
+<p>但仍有问题：<strong>删锁可能删错</strong>。A 的业务执行了 35 秒（超过 30 秒 TTL），锁自动过期，B 拿到了锁。此时 A 执行完去 del，删的是 B 的锁。</p>
+<h4>第三代：value 存唯一标识 + Lua 原子校验删除</h4>
+<pre><code class="language-lua">-- unlock.lua
+-- KEYS[1] = 锁key, ARGV[1] = 客户端唯一标识
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+else
+    return 0
+end</code></pre>
+<pre><code class="language-java">// Java 侧
+String clientId = UUID.randomUUID().toString();
+String result = redis.set("lock", clientId, SetParams.setParams().nx().ex(30));
+if ("OK".equals(result)) {
+    try {
+        doBusiness();
+    } finally {
+        // Lua 保证「判断+删除」原子，不会删错
+        redis.eval(UNLOCK_LUA, Collections.singletonList("lock"),
+                   Collections.singletonList(clientId));
+    }
+}</code></pre>
+<p>但仍有问题：<strong>业务执行超过 TTL 怎么办？</strong>锁提前释放了。</p>
+<h4>第四代：Redisson 看门狗自动续期（生产标准）</h4>
+<pre><code class="language-java">RLock lock = redisson.getLock("order:lock");
+lock.lock();          // ✅ 不传 leaseTime，启用看门狗
+try {
+    doBusiness();
+} finally {
+    lock.unlock();
+}
+
+// ❌ 千万别这么写：
+// lock.lock(30, TimeUnit.SECONDS);   // 传了 leaseTime，看门狗失效！</code></pre>
+<p><strong>看门狗机制（必须讲清楚）：</strong></p>
+<ol class="steps">
+<li class="step"><code class="inline">lock()</code> 不传超时时间时，Redisson 默认用 <code class="inline">lockWatchdogTimeout = 30000ms</code>（30 秒）。</li>
+<li class="step">加锁成功后，启动一个定时任务，<strong>每隔 1/3 时间（10 秒）</strong>检查业务是否还在执行。</li>
+<li class="step">如果还持有锁，就用 Lua 脚本把 TTL 重置回 30 秒（<code class="inline">PEXPIRE</code>）。</li>
+<li class="step">业务执行完 <code class="inline">unlock()</code>，取消定时任务，删除锁。</li>
+<li class="step"><strong>只要客户端没宕机，锁就一直续期，业务可以执行任意长时间。</strong></li>
+</ol>
+<p><strong>⚠️ 看门狗的三个坑：</strong></p>
+<table>
+<thead><tr><th>坑</th><th>后果</th></tr></thead>
+<tbody>
+<tr><td>传了 leaseTime</td><td>看门狗不启动，锁到期自动释放，业务还在执行 → 并发</td></tr>
+<tr><td>unlock 时不是持有者</td><td>抛 <code class="inline">IllegalMonitorStateException</code>，要用 <code class="inline">isHeldByCurrentThread()</code> 判断</td></tr>
+<tr><td>Redisson 客户端进程挂了</td><td>续期停止，锁在 30 秒后自动释放（这是设计而非 bug）</td></tr>
+</tbody>
+</table>
+<p><strong>🎯 加分点（三层保护，这是 P7 级别的回答）：</strong>「我们的订单场景用了<strong>三层保护</strong>：</p>
+<ol class="steps">
+<li class="step"><strong>第一层：Redis 分布式锁</strong>（Redisson）——挡住 99% 的并发，快速失败。</li>
+<li class="step"><strong>第二层：数据库乐观锁</strong>（<code class="inline">update stock set num = num - 1 where id = ? and num &gt;= 1</code>）——即使锁失效，DB 层的条件更新也能保证不超卖。返回影响行数 0 就说明抢失败了。</li>
+<li class="step"><strong>第三层：数据库唯一索引</strong>——如果是「一人一单」，直接给 <code class="inline">(user_id, activity_id)</code> 建唯一索引，物理层面无法重复。</li>
+</ol>
+<p><strong>为什么要三层？因为分布式锁本身不是 100% 可靠的</strong>——主从切换、网络分区都可能让锁失效。<strong>真正的正确性必须由数据库来兜底。</strong> 这是我做了 8 年分布式系统最深的体会。」</p>
+</div></details>
+
+<details class="qa"><summary>31. Redlock 到底可不可靠？Kleppmann 和 antirez 吵的是什么？<span class="lvl lv3">L3</span><span class="badge bg-purple">专家</span></summary><div class="qa-b">
+<p><strong>背景：</strong>单实例 Redis 锁在主从切换时会失效（主库写完锁，还没同步给从库就宕机，从库升主后锁丢了）。所以 antirez 提出 <strong>Redlock</strong>：向 N（通常 5）个<strong>独立</strong>的 Redis 实例加锁，超过半数成功且总耗时小于锁有效期，才算加锁成功。</p>
+<h4>Kleppmann（《Designing Data-Intensive Applications》作者）的批评</h4>
+<ol class="steps">
+<li class="step"><strong>时钟依赖：</strong>Redlock 假设各节点时钟大致同步且不会跳变。但 NTP 校时、虚拟机暂停都会让时钟跳变。如果某节点时钟前跳，它的锁提前过期，Redlock 却以为还有效。</li>
+<li class="step"><strong>GC 暂停：</strong>客户端拿到锁后如果发生长时间 GC（比如 10 秒），锁在 GC 期间过期，其他客户端拿到锁，两个客户端同时持有锁。</li>
+<li class="step"><strong>无 fencing token：</strong>即使意识到锁可能失效，也没有机制阻止「旧持有者」继续写。Kleppmann 提出应该用 <strong>fencing token</strong>——每次加锁返回一个<strong>单调递增</strong>的数字，存储层拒绝比当前已见过更小的 token 的写入。</li>
+<li class="step"><strong>结论：</strong>依赖时钟的分布式锁不能保证正确性，应该用 Paxos/Raft 这类共识算法（如 etcd、ZooKeeper）。</li>
+</ol>
+<h4>antirez 的反驳</h4>
+<ol class="steps">
+<li class="step"><strong>时钟跳变可以用运维手段规避</strong>（不用 NTP 大步调，用 slew 模式）。</li>
+<li class="step"><strong>GC 问题不是 Redlock 的锅</strong>——是客户端的问题，任何锁都有这个问题，包括 ZooKeeper。</li>
+<li class="step"><strong>fencing token 需要存储层配合</strong>，而很多存储层根本不支持。如果没有这个能力，讨论 fencing token 也没意义。</li>
+<li class="step"><strong>Redlock 的定位是「效率锁」而非「正确性锁」</strong>——用它来避免重复劳动（如重复计算），而不是保护资金安全。</li>
+</ol>
+<h4>怎么回答这个问题（面试标准答案）</h4>
+<p><strong>结论先行：</strong></p>
+<table>
+<thead><tr><th>场景</th><th>推荐方案</th><th>理由</th></tr></thead>
+<tbody>
+<tr><td><strong>效率锁</strong>（防重复计算、防缓存击穿重建）</td><td>单实例 Redis 锁 / Redisson</td><td>偶尔失效只是多做一次，无损失</td></tr>
+<tr><td><strong>正确性锁</strong>（资金、库存）</td><td><strong>不用分布式锁</strong>，用「DB 条件更新 + 唯一索引」或 etcd/ZooKeeper</td><td>正确性不能依赖有时钟假设的锁</td></tr>
+</tbody>
+</table>
+<p><strong>🎯 加分点：</strong>「Kleppmann 那篇文章最狠的一句话是：<strong>『如果你需要保证正确性，就不要用 Redis 锁；如果你只是为了避免重复工作，那单实例 Redis 锁就够了，Redlock 是过度设计。』</strong> 我觉得这话是对的。我们的实践是：<strong>库存扣减从不用锁，直接用 <code class="inline">UPDATE ... WHERE stock > 0</code> 的条件更新，或者 Redis Lua 脚本原子扣减</strong>。锁只在『防止重复触发』这类场景用，比如防止定时任务重复执行。」</p>
+</div></details>
+
+<details class="qa"><summary>32. 缓存和 MySQL 双写，为什么推荐「先更新 DB 再删缓存」？<span class="lvl lv3">L3</span></summary><div class="qa-b">
+<p><strong>四种组合逐一分析（这是最严谨的答法）：</strong></p>
+<table>
+<thead><tr><th>方案</th><th>并发问题</th><th>结论</th></tr></thead>
+<tbody>
+<tr><td>① 先更缓存，再更 DB</td><td>缓存成功但 DB 失败 → 缓存永久脏</td><td>❌ 不推荐</td></tr>
+<tr><td>② 先更 DB，再更缓存</td><td>并发写时，A 后写却先更新缓存，B 先写却后更新 → 缓存是 A 的旧值</td><td>❌ 不推荐</td></tr>
+<tr><td>③ 先删缓存，再更 DB</td><td>删完缓存、还没更 DB 时，读请求把旧值读回来写进缓存 → 长期脏</td><td>❌ 不推荐</td></tr>
+<tr><td>④ <strong>先更 DB，再删缓存</strong></td><td>理论上仍有不一致窗口，但概率极低（要求读线程写缓存在删缓存之后）</td><td>✅ <strong>推荐</strong></td></tr>
+</tbody>
+</table>
+<p><strong>为什么 ④ 的窗口极小：</strong>要出现不一致，必须满足「读线程在『读 DB』之后、『写缓存』之前，写线程完成了『更 DB + 删缓存』」。这个时间窗口只有几毫秒，且要求一次读操作横跨一次完整的写操作。</p>
+<p><strong>为什么「删」优于「更新」：</strong></p>
+<ol class="steps">
+<li class="step"><strong>幂等性：</strong>DEL 是幂等的，重复执行无害。UPDATE 缓存不是——两次并发更新，执行顺序可能颠倒。</li>
+<li class="step"><strong>懒加载：</strong>删了之后，如果这个 key 再也没人访问，就不需要重建，省一次计算。而更新缓存是「无论如何都要算一次」。</li>
+<li class="step"><strong>避免写放大：</strong>如果缓存值需要复杂计算（聚合多个表），更新缓存会引入写路径的复杂计算，影响写性能。</li>
+</ol>
+<p><strong>🎯 加分点：</strong>「还有一个关键细节很多人不知道：<strong>必须等事务提交后再删缓存</strong>。如果代码是这样：</p>
+<pre><code class="language-java">// ❌ 错误：事务未提交就删缓存
+@Transactional
+public void update() {
+    mapper.update(p);       // 事务还没提交
+    redis.del(key);         // 此时删缓存
+}
+// 事务真正提交是在方法返回后
+
+// 危险时序：
+// T1: 更新DB（未提交）→ 删缓存
+// T2: 读缓存miss → 读DB（读到旧值，因为T1未提交）→ 写缓存旧值
+// T3: T1事务提交
+// 结果：缓存是旧值，DB是新值，长期不一致！</code></pre>
+<p>正确做法是用 <code class="inline">TransactionSynchronizationManager.registerSynchronization</code> 的 <code class="inline">afterCommit</code> 回调，或者用 AOP 在事务提交后删。」</p>
+</div></details>
+
+<details class="qa"><summary>33. 大 key 怎么发现和处理？<span class="lvl lv3">L3</span></summary><div class="qa-b">
+<p><strong>定义（量化标准）：</strong></p>
+<table>
+<thead><tr><th>类型</th><th>大 key 阈值</th></tr></thead>
+<tbody>
+<tr><td>String</td><td>&gt; 10 KB（严格）、&gt; 1 MB（严重）</td></tr>
+<tr><td>Hash/List/Set/ZSet</td><td>元素数 &gt; 5000（严格）、&gt; 10000（严重）</td></tr>
+<tr><td>总体</td><td>单个 key 内存 &gt; 1 MB</td></tr>
+</tbody>
+</table>
+<p><strong>五大危害：</strong></p>
+<ol class="steps">
+<li class="step"><strong>网络阻塞：</strong>单次 GET 传 100MB，占用带宽，其他请求排队。</li>
+<li class="step"><strong>命令阻塞：</strong>单线程下 HGETALL 一个大 Hash 要几秒，全局阻塞。</li>
+<li class="step"><strong>删除阻塞：</strong>DEL 一个大 key 会同步释放内存，可能阻塞数秒（要用 UNLINK）。</li>
+<li class="step"><strong>持久化阻塞：</strong>大 key 在 fork + COW 时会复制大量页面，内存暴涨。</li>
+<li class="step"><strong>集群倾斜：</strong>大 key 所在节点内存远超其他节点，甚至 OOM。</li>
+</ol>
+<p><strong>四种发现手段：</strong></p>
+<pre><code class="language-bash"># 1. 官方工具（离线扫描，会占用CPU，建议从库执行）
+redis-cli --bigkeys                    # 按类型找最大的key
+redis-cli --bigkeys -i 0.1             # 每次扫描间隔，降低影响
+redis-cli --memkeys                    # 按内存大小找
+
+# 2. 精确查单个key
+MEMORY USAGE mykey
+STRLEN mykey                           # String 长度
+HLEN mykey / LLEN / SCARD / ZCARD      # 集合元素数
+
+# 3. RDB 离线分析（推荐，零影响）
+# 用 redis-rdb-tools 分析 RDB 文件，生成 CSV 报告
+rdb -c memory dump.rdb --bytes 1024 --filters db=0 > memory.csv
+# 然后排序 SQL 分析
+# 或 rdb -c memory dump.rdb | sort -k4 -nr | head -20
+
+# 4. 慢查询日志反推
+SLOWLOG GET 100                        # 找耗时长的命令，通常是操作大key
+
+# 5. 客户端埋点（最推荐）
+# 在 RedisTemplate 或 AOP 里统计每次操作返回的字节数，
+# 超过阈值就上报 Prometheus
+</code></pre>
+<p><strong>四种删除方法：</strong></p>
+<pre><code class="language-bash"># ❌ DEL：同步删除，会阻塞，别在生产用
+DEL bigkey
+
+# ✅ UNLINK：异步删除，先摘除key，实际内存在后台线程慢慢释放
+UNLINK bigkey
+
+# ✅ Hash 分批删除（用 HSCAN 遍历，每次删一批）
+HSCAN bigkey 0 COUNT 100
+HDEL bigkey field1 field2 ...
+
+# ✅ 更稳妥：先改名再删（保证业务立即看不到，删除延迟执行）
+RENAME bigkey bigkey:del:{timestamp}
+# 然后后台任务在低峰期 UNLINK
+UNLINK bigkey:del:1699999999
+</code></pre>
+<p><strong>🎯 加分点（大厂实践）：</strong>「大 key 治理我们分三步：</p>
+<ol class="steps">
+<li class="step"><strong>发现：</strong>RDB 离线分析（每天跑一次）+ 客户端 AOP 埋点（实时告警）。<strong>不做线上 --bigkeys</strong>，因为它是 O(N) 全量扫描，会在主线程跑很久。</li>
+<li class="step"><strong>改造：</strong>大 Hash 拆成多个小 Hash（如 <code class="inline">cart:user:123:1</code>、<code class="inline">cart:user:123:2</code>），用 hash tag 保证同槽。大 List 按时间分片。</li>
+<li class="step"><strong>清理：</strong>用 <code class="inline">RENAME + UNLINK</code>，在凌晨低峰期做。<strong>绝不直接 DEL。</strong></li>
+</ol>
+<p>另外，我们还改过一个坑：<strong><code class="inline">lazyfree-lazy-user-del yes</code></strong> 可以让 DEL 也变成异步，但我们没开——因为这让删除行为不可预期，运维更难排查。宁可显式用 UNLINK。」</p>
+</div></details>
+
+<details class="qa"><summary>34. 热 key 怎么发现和处理？为什么扩容没用？<span class="lvl lv3">L3</span></summary><div class="qa-b">
+<p><strong>热 key：单位时间内访问频率极高的 key。</strong>（注意和大 key 完全不同——热 key 可能很小，就是访问量太大）</p>
+<p><strong>为什么扩容没用（关键问答）：</strong></p>
+<pre><code>假设：key=「iPhone 14 详情页」，QPS 8 万
+
+单实例 Redis 极限约 10 万 QPS（简单 GET）
+
+情形A：哨兵模式
+  └─ 加从库也没用！因为从库是只读副本，
+     但客户端读同一个 key 会因负载均衡到不同从库，
+     如果客户端只连主库 → 完全没用
+  └─ 即使读从库，也是「分散压力」而非「解决热点」
+
+情形B：Cluster 模式
+  └─ 但这个 key 只在一个槽 → 只在一个节点 → 该节点 QPS 8万
+  └─ 加其他节点完全没用！因为槽是固定的
+
+结论：扩容解决的是「整体容量」，热 key 是「单点压力」，
+      两者维度不同。热 key 必须特殊处理。</code></pre>
+<p><strong>五种发现手段：</strong></p>
+<pre><code class="language-bash"># 1. Redis 8.x 原生 HOTKEYS（推荐，会轻微影响性能）
+HOTKEYS START                     # 开启统计
+HOTKEYS GET                       # 查看 top 热key
+HOTKEYS STOP
+
+# 2. 老版本用 --hotkeys（需要 LFU 淘汰策略！）
+redis-cli --hotkeys               # 必须 maxmemory-policy 是 *-lfu
+
+# 3. MONITOR（仅调试，生产禁用）
+redis-cli MONITOR                 # 会打印所有命令，严重影响性能
+
+# 4. 客户端埋点（最推荐）
+# AOP 统计每个 key 的访问次数，上报到 Prometheus
+# 超过阈值告警
+
+# 5. 代理层统计（如果有 Redis Proxy，如 京东 JDHotKey / 得物自研）
+# 在 proxy 层就发现了
+
+# 6. 按前缀统计（粗粒度）
+redis-cli --hotkeys 或 通过 info commandstats</code></pre>
+<p><strong>五种治理方案：</strong></p>
+<table>
+<thead><tr><th>方案</th><th>做法</th><th>适用</th></tr></thead>
+<tbody>
+<tr><td><strong>① 本地缓存</strong></td><td>Caffeine 缓存热点数据，设置很短 TTL（如 1-5 秒）</td><td>最有效，首选。能扛住 90% 的读</td></tr>
+<tr><td><strong>② key 复制（读扩展）</strong></td><td>把 hotkey 复制成 <code class="inline">hotkey:1</code>~<code class="inline">hotkey:N</code>，读时随机选一个</td><td>Cluster 下有效，但写时要更新 N 份</td></tr>
+<tr><td><strong>③ JVM 参数调优</strong></td><td>增加 <code class="inline">io-threads</code>，开启 <code class="inline">io-threads-do-reads</code></td><td>有 IO 瓶颈时有用</td></tr>
+<tr><td><strong>④ Proxy 层热点探测</strong></td><td>京东 JDHotKey：在 proxy 层发现热点后自动缓存到本地，请求直接返回不发到 Redis</td><td>大厂方案，需要代理层</td></tr>
+<tr><td><strong>⑤ 内核/客户端改造</strong></td><td>得物：改 Redis 内核，热点 key 自动复制到其他节点。B站：HeavyKeeper 算法精确发现热 key</td><td>大厂，成本极高</td></tr>
+</tbody>
+</table>
+<p><strong>🎯 加分点（讲大厂方案，直接抬升档次）：</strong>「热 key 探测主要有三派：</p>
+<table>
+<thead><tr><th>公司</th><th>方案</th><th>特点</th></tr></thead>
+<tbody>
+<tr><td><strong>京东</strong></td><td>JDHotKey / hotkey 中间件</td><td>在 Redis 客户端侧（Jedis 包一层）做本地缓存，热点数据直接在客户端返回，不发到 Redis。本质是把热 key 缓存到 JVM 进程内</td></tr>
+<tr><td><strong>得物</strong></td><td>改内核 + proxy</td><td>在 Proxy 层做热点探测，发现热点后自动把 key 的副本扩散到多个节点，读写分离</td></tr>
+<tr><td><strong>B 站</strong></td><td>HeavyKeeper 算法</td><td>用类似 Top-K 的流式算法，以极低内存精确统计 Top-N 热 key，误差可控。比 LFU 采样准得多</td></tr>
+</tbody>
+</table>
+<p><strong>不过对我们大部分业务，方案①本地缓存就够了。</strong> 一个 Caffeine 缓存 + 1 秒 TTL，就能把 8 万 QPS 削到 8000。真正需要 B 站那种方案的公司，全国也就那么几十家。」</p>
+</div></details>
+
+<details class="qa"><summary>35. Redis 主线程阻塞有哪些原因？怎么排查？<span class="lvl lv3">L3</span></summary><div class="qa-b">
+<p><strong>六类阻塞原因（按发生频率排序）：</strong></p>
+<table>
+<thead><tr><th>类别</th><th>具体命令/操作</th><th>阻塞时长</th></tr></thead>
+<tbody>
+<tr><td><strong>① 大 key 操作</strong></td><td>HGETALL、SMEMBERS、LRANGE、ZRANGE 大集合；DEL 大 key</td><td>几十 ms ~ 几秒</td></tr>
+<tr><td><strong>② 全量扫描</strong></td><td>KEYS *、FLUSHALL、FLUSHDB（同步）</td><td>秒级 ~ 分钟级</td></tr>
+<tr><td><strong>③ 阻塞式命令</strong></td><td>BLPOP/BRPOP 未设超时、WAIT</td><td>不确定</td></tr>
+<tr><td><strong>④ 大量 key 同过期</strong></td><td>定期删除循环执行</td><td>几十 ms</td></tr>
+<tr><td><strong>⑤ fork / bgsave / aof rewrite</strong></td><td>fork 复制页表 + COW</td><td>几十 ms ~ 几百 ms</td></tr>
+<tr><td><strong>⑥ AOF 刷盘阻塞</strong></td><td>always 策略下磁盘 IO 慢</td><td>随磁盘</td></tr>
+<tr><td><strong>⑦ CPU 竞争</strong></td><td>单机部署多实例、其他进程抢占</td><td>持续</td></tr>
+</tbody>
+</table>
+<p><strong>排查套路（四步法）：</strong></p>
+<pre><code class="language-bash"># Step 1: 看慢查询日志（最直接）
+SLOWLOG GET 100
+# 返回：[1] id, [2] 时间戳, [3] 耗时(微秒), [4] 命令, [5] 客户端IP:端口, [6] 客户端名
+config set slowlog-log-slower-than 10000    # 设10ms阈值（默认10ms）
+
+# Step 2: 看客户端连接（谁在发慢命令）
+CLIENT LIST
+# 关注字段：addr（谁）、cmd（发什么命令）、age、idle
+# 建议给客户端设名字：CLIENT SETNAME order-service
+
+# Step 3: 看延迟事件（精确到事件）
+LATENCY DOCTOR        # 智能诊断，直接给建议
+LATENCY LATEST        # 最近的事件
+LATENCY HISTORY fork  # 看 fork 事件历史
+LATENCY RESET
+
+# Step 4: 实时追踪（Redis 8.x）
+CLIENT NO-EVICT on
+# 或用 redis-cli --latency 持续监控
+redis-cli --latency -h host -p port
+redis-cli --latency-history -i 5     # 每5秒报告一次
+redis-cli --intrinsic-latency 100    # 测本机固有延迟（排除网络）
+
+# Step 5: 大key定位
+redis-cli --bigkeys -i 0.1           # 从库执行！
+</code></pre>
+<p><strong>🎯 加分点：</strong>「排查顺序很重要。我的经验是<strong>『先慢日志，再客户端，最后延迟』</strong>：</p>
+<ol class="steps">
+<li class="step"><strong>SLOWLOG 告诉你『什么命令慢』</strong>——90% 的问题在这里就能定位。</li>
+<li class="step"><strong>CLIENT LIST 告诉你『谁的锅』</strong>——通过 <code class="inline">CLIENT SETNAME</code> 给每个服务打标签，一眼看出是订单服务还是搜索服务。</li>
+<li class="step"><strong>LATENCY 告诉你『是不是 Redis 自己的问题』</strong>——如果 LATENCY HISTORY 显示 fork 事件耗时 200ms，那就不是业务命令的问题，是持久化的锅。</li>
+</ol>
+<p>还有个必查项：<strong>是不是开了 THP？</strong> 透明大页会让 fork 的 COW 复制代价从 4KB 变成 2MB 一页，延迟从微秒级涨到毫秒级。这是我们踩过的最隐蔽的坑。」</p>
+</div></details>
+
+<details class="qa"><summary>36. Redis 内存为什么会涨？怎么优化内存？<span class="lvl lv3">L3</span></summary><div class="qa-b">
+<p><strong>内存构成分析：</strong></p>
+<pre><code class="language-bash">INFO memory
+# used_memory 的组成：
+#   1. 数据本身（key + value + 对象头）
+#   2. 客户端缓冲区（client-output-buffer-limit）
+#   3. 复制积压缓冲区（repl-backlog-size）
+#   4. AOF 缓冲区
+#   5. Lua 脚本缓存
+#   6. 正常开销（dictEntry、redisObject、SDS 头部等）</code></pre>
+<p><strong>优化的七个方向：</strong></p>
+<table>
+<thead><tr><th>方向</th><th>做法</th><th>收益</th></tr></thead>
+<tbody>
+<tr><td><strong>① key 命名精简</strong></td><td><code class="inline">user:profile:123</code> → <code class="inline">u:p:123</code></td><td>key 越小省越多，百万 key 能省几百 MB</td></tr>
+<tr><td><strong>② 控制 listpack 阈值</strong></td><td>hash-max-listpack-entries 调到 256（默认128）</td><td>避免小集合过早转 hashtable</td></tr>
+<tr><td><strong>③ 使用合适结构</strong></td><td>「是否存在」用 Bitmap 不用 Set</td><td>1 亿用户签到位图仅 12MB，Set 要 1GB+</td></tr>
+<tr><td><strong>④ 避免大 key</strong></td><td>拆分大 Hash/List</td><td>同时解决性能和内存</td></tr>
+<tr><td><strong>⑤ key 加 TTL</strong></td><td>所有缓存 key 都设过期</td><td>防内存泄漏的根本手段</td></tr>
+<tr><td><strong>⑥ 序列化格式</strong></td><td>用 protobuf / MessagePack 替代 JSON</td><td>省 30-60% 空间</td></tr>
+<tr><td><strong>⑦ 内存碎片整理</strong></td><td><code class="inline">activedefrag yes</code></td><td>碎片率高时能回收 10-30%</td></tr>
+</tbody>
+</table>
+<pre><code class="language-bash"># 内存碎片整理配置
+activedefrag yes
+active-defrag-ignore-bytes 100mb        # 碎片量超过100MB才触发
+active-defrag-threshold-lower 10        # 碎片率超过10%开始整理
+active-defrag-threshold-upper 100       # 碎片率100%时全力整理
+active-defrag-cycle-min 1               # 最低占用1% CPU
+active-defrag-cycle-max 25              # 最高占用25% CPU
+
+# 客户端缓冲区限制（防大key导致的输出缓冲爆炸）
+client-output-buffer-limit normal 0 0 0
+client-output-buffer-limit replica 256mb 64mb 60
+client-output-buffer-limit pubsub 32mb 8mb 60</code></pre>
+<p><strong>🎯 加分点：</strong>「<strong>内存碎片是 Redis 最容易忽视的问题。</strong> Redis 的 jemalloc 分配器会按大小类分配，删除 key 后释放的内存不一定能复用。我们线上遇到过 <code class="inline">mem_fragmentation_ratio = 2.5</code> 的情况——用了 8GB，实际占了 20GB。解决办法：</p>
+<ol class="steps">
+<li class="step"><strong>短期：</strong>开启 <code class="inline">activedefrag yes</code>，在线整理，几乎无感知。</li>
+<li class="step"><strong>中期：</strong>合理设置 <code class="inline">maxmemory</code>，给碎片留 20% 空间。</li>
+<li class="step"><strong>根治：</strong>避免大量小对象频繁创建删除，或用 Hash 聚合小对象减少分配次数。</li>
+</ol></div></details>
+
+<details class="qa"><summary>37. Redis 的线程模型演进，IO 多线程是怎么实现的？<span class="lvl lv3">L3</span></summary><div class="qa-b">
+<p><strong>演进路线：</strong></p>
+<table>
+<thead><tr><th>版本</th><th>变化</th><th>解决的问题</th></tr></thead>
+<tbody>
+<tr><td>1.0</td><td>纯单线程</td><td>—</td></tr>
+<tr><td>4.0</td><td>引入后台线程（lazyfree）</td><td>大 key 删除阻塞</td></tr>
+<tr><td>6.0</td><td>引入 IO 多线程</td><td>网络 IO 成为瓶颈</td></tr>
+<tr><td>8.x</td><td>IO 线程更成熟，默认配置优化</td><td>更好的多核利用</td></tr>
+</tbody>
+</table>
+<p><strong>IO 多线程的工作流程（关键！）：</strong></p>
+<pre><code class="language-bash">配置：
+io-threads 4                    # 总线程数，主线程 + 3 个 IO 线程
+io-threads-do-reads yes         # 读也交给 IO 线程（6.0 默认 no）
+
+# 注意：io-threads 是「总线程数」，不是「额外线程数」
+# 官网建议：4核设2-3，8核设6；超过8个没意义（主线程会成为瓶颈）</code></pre>
+<p><strong>一次请求的完整流程：</strong></p>
+<ol class="steps">
+<li class="step"><strong>主线程</strong>通过 epoll 监听所有连接，发现可读的 socket。</li>
+<li class="step"><strong>主线程</strong>把「读就绪」的 socket 分给 IO 线程（round-robin 或取模）。</li>
+<li class="step"><strong>IO 线程</strong>并行执行 <code class="inline">read()</code> 把数据读到用户态缓冲，然后通知主线程。</li>
+<li class="step"><strong>主线程</strong>阻塞等待所有 IO 线程读完，然后<strong>单线程串行执行所有命令</strong>。</li>
+<li class="step"><strong>主线程</strong>把写回任务分给 IO 线程，IO 线程并行 <code class="inline">write()</code>。</li>
+<li class="step">主线程等所有 IO 线程写完，进入下一次 epoll 循环。</li>
+</ol>
+<p><strong>为什么 IO 多线程有效？</strong>因为 <code class="inline">read()/write()</code> 涉及内核态拷贝（从 socket buffer 拷到用户态），这部分是纯 CPU 消耗，能并行。而命令执行必须串行（共享数据结构），所以保持单线程。</p>
+<p><strong>为什么 io-threads 不能设太大？</strong></p>
+<ol class="steps">
+<li class="step"><strong>主线程是瓶颈：</strong>所有命令执行还是主线程干的，IO 线程再多也帮不上。</li>
+<li class="step"><strong>同步开销：</strong>主线程要等所有 IO 线程完成（barrier），线程越多，等待和协调开销越大。</li>
+<li class="step"><strong>上下文切换：</strong>线程多了，CPU 在切换上浪费。</li>
+</ol>
+<p><strong>🎯 加分点：</strong>「<code class="inline">io-threads-do-reads</code> 默认是 <code class="inline">no</code>！很多人以为开了 <code class="inline">io-threads</code> 就自动开启读多线程，其实不是。<strong>写多线程默认开，读多线程要显式打开</strong>。官方文档也提醒：开启读多线程在部分场景下收益不明显甚至下降，建议压测后再开。我们线上是 <code class="inline">io-threads 6</code> + <code class="inline">io-threads-do-reads no</code>，压测下来 QPS 提升约 35%。」</p>
+</div></details>
+
+<details class="qa"><summary>38. 如果你来设计一个秒杀系统，Redis 扮演什么角色？<span class="lvl lv3">L3</span><span class="badge bg-red">场景真题</span></summary><div class="qa-b">
+<p><strong>整体架构（分层削峰）：</strong></p>
+<pre><code>用户 → CDN/静态页 → Nginx 限流 → 网关鉴权 → 应用层
+                                                 │
+                     ┌───────────────────────────┤
+                     ▼                           ▼
+              ┌─────────────┐            ┌──────────────┐
+              │  Redis      │            │   MQ         │
+              │  1. 库存预扣 │            │  订单异步落库 │
+              │  2. 一人一单 │            │              │
+              │  3. 限流     │            └──────┬───────┘
+              └─────────────┘                   ▼
+                                          ┌──────────┐
+                                          │ MySQL    │
+                                          │ 订单+库存 │
+                                          └──────────┘</code></pre>
+<p><strong>Redis 的三个核心职责：</strong></p>
+<h4>① 库存预扣（Lua 原子操作，防超卖）</h4>
+<pre><code class="language-lua">-- seckill.lua
+-- KEYS[1] = 库存key (stock:sku:1001)
+-- KEYS[2] = 已购用户集合 (bought:sku:1001)
+-- ARGV[1] = 用户ID
+-- ARGV[2] = 限购数量(一般1)
+
+-- 1. 判断是否重复购买
+if redis.call('SISMEMBER', KEYS[2], ARGV[1]) == 1 then
+    return -2      -- 重复下单
+end
+
+-- 2. 判断库存
+local stock = tonumber(redis.call('GET', KEYS[1]))
+if stock == nil or stock <= 0 then
+    return -1      -- 无库存
+end
+
+-- 3. 扣减库存 + 记录用户
+redis.call('DECR', KEYS[1])
+redis.call('SADD', KEYS[2], ARGV[1])
+return stock - 1   -- 返回剩余库存</code></pre>
+<p><strong>为什么必须用 Lua？</strong>「判断库存」+「扣减库存」+「记录用户」三步必须原子。<strong>用 MULTI/EXEC 做不到</strong>——事务里不能根据前一条命令的返回值做判断。</p>
+<h4>② 一人一单（Set 去重）</h4>
+<p>上面的 <code class="inline">bought:sku:1001</code> 就是 Set，<code class="inline">SISMEMBER</code> O(1) 判重。<strong>但要注意：</strong>如果用户量大（百万级），这个 Set 会变成大 key。优化方案：用 Bitmap（用户 ID 作为 offset）或分片成多个 Set。</p>
+<h4>③ 限流（防止恶意刷）</h4>
+<pre><code class="language-lua">-- 滑动窗口限流
+-- KEYS[1] = 限流key, ARGV[1] = 窗口秒数, ARGV[2] = 上限
+local now = tonumber(ARGV[1])
+local key = KEYS[1]
+redis.call('ZREMRANGEBYSCORE', key, 0, now - 1000)   -- 清理旧记录
+local count = redis.call('ZCARD', key)
+if count >= tonumber(ARGV[2]) then
+    return 0
+end
+redis.call('ZADD', key, now, now .. '-' .. math.random())
+redis.call('EXPIRE', key, 2)
+return 1</code></pre>
+<p><strong>完整时序（关键是「异步落库」）：</strong></p>
+<ol class="steps">
+<li class="step">用户点「立即抢购」→ 网关限流（令牌桶，用户维度 + IP 维度）。</li>
+<li class="step">应用层调 Redis Lua 预扣库存。<strong>这一步在内存里完成，耗时 &lt; 1ms。</strong></li>
+<li class="step">扣减成功 → 发 MQ 消息（<code class="inline">orderId + userId + skuId</code>）→ 立即返回「排队中」。</li>
+<li class="step">消费者异步创建订单、扣 MySQL 库存、扣款。<strong>这里才做真正的持久化。</strong></li>
+<li class="step">前端轮询订单状态，或服务端主动推送结果。</li>
+</ol>
+<p><strong>🎯 加分点（这是拉开差距的地方）：</strong></p>
+<ol class="steps">
+<li class="step"><strong>为什么 Redis 预扣 + MQ 异步？</strong>因为 MySQL 单机写入 ~2000 TPS，秒杀瞬间可能 10 万 QPS。<strong>Redis 把 10 万削到 2000</strong>，MQ 再做一层缓冲。</li>
+<li class="step"><strong>Redis 扣减成功了，MQ 发失败怎么办？</strong>这是经典的「本地消息表」问题。做法：在 Redis 里扣减后，把消息写进本地消息表（同事务），再用定时任务补偿投递。或者用 <code class="inline">RocketMQ 的事务消息</code>。</li>
+<li class="step"><strong>Redis 扣减成功，但用户一直不付款？</strong>用 Redis 延时队列（ZSet）做超时未付款回滚：<code class="inline">ZADD order:timeout &lt;deadline&gt; &lt;orderId&gt;</code>，定时任务 <code class="inline">ZRANGEBYSCORE 0 now</code> 捞出超时的订单，回滚库存（<code class="inline">INCR</code> 库存 + <code class="inline">SREM</code> 用户）。</li>
+<li class="step"><strong>怎么防止「扣了 Redis 但 MySQL 最终失败」导致的不一致？</strong>对账任务。定时比对 Redis 库存和 MySQL 库存，不一致就告警 + 人工介入。<strong>这是最后一道防线，任何异步方案都必须有对账。</strong></li>
+</ol>
+<p><strong>完整答法总结：</strong>「秒杀的本质是<strong>『把并发的写操作，转化成串行的内存操作 + 异步的持久化』</strong>。Redis 承担了『高并发计数』和『幂等判重』两个最重的活，因为它是内存操作、单线程无锁、Lua 保证原子。MySQL 只负责最终的持久化，压力被削掉了 98%。」</p>
+</div></details>
+
+<details class="qa"><summary>39. 如何用 Redis 实现延时队列？<span class="lvl lv3">L3</span></summary><div class="qa-b">
+<p><strong>ZSet 方案（最经典）：</strong></p>
+<pre><code class="language-java">// 投递延时消息：score 是执行时间戳
+public void delay(String topic, String msgId, long delaySeconds) {
+    long executeAt = System.currentTimeMillis() / 1000 + delaySeconds;
+    redis.opsForZSet().add("delay:" + topic, msgId, executeAt);
+}
+
+// 消费（可以用多个实例并行，但要加锁防重复消费）
+@Scheduled(fixedDelay = 1000)
+public void consume() {
+    String topic = "order-timeout";
+    String key = "delay:" + topic;
+    long now = System.currentTimeMillis() / 1000;
+
+    // 分布式锁，防止多实例重复消费
+    RLock lock = redisson.getLock("lock:consume:" + topic);
+    if (!lock.tryLock()) return;
+
+    try {
+        // 捞出到期的消息（LIMIT 100 防止一次太多）
+        Set&lt;String&gt; msgs = redis.opsForZSet()
+            .rangeByScore(key, 0, now, 0, 100);
+        for (String msgId : msgs) {
+            // 原子：先移除，移除成功才处理（防止重复）
+            Long removed = redis.opsForZSet().remove(key, msgId);
+            if (removed != null && removed > 0) {
+                handleMessage(topic, msgId);
+            }
+        }
+    } finally {
+        lock.unlock();
+    }
+}</code></pre>
+<p><strong>ZSet 方案的三个缺陷：</strong></p>
+<table>
+<thead><tr><th>缺陷</th><th>说明</th><th>解决</th></tr></thead>
+<tbody>
+<tr><td><strong>① 轮询延迟</strong></td><td>每秒扫一次，最多延迟 1 秒</td><td>要求高精度就缩短间隔，代价是 CPU</td></tr>
+<tr><td><strong>② 消息只能被消费一次</strong></td><td>ZREM 后如果处理失败，消息丢了</td><td>用 Stream 替代，或 ZREM 前先存到处理中列表</td></tr>
+<tr><td><strong>③ 空轮询浪费</strong></td><td>没消息也在扫</td><td>用 Lua 或先 ZCARD 判断</td></tr>
+</tbody>
+</table>
+<p><strong>Stream 方案（5.0+ 更好）：</strong>用 <code class="inline">XADD</code> 时指定 ID 为未来时间戳，消费时用 <code class="inline">XREAD BLOCK</code> 阻塞等待，能减少空轮询。但 Stream 本身不原生支持「延时」，还是要配合 ZSet 或定时检查。</p>
+<p><strong>🎯 加分点：</strong>「生产上我不推荐用 Redis 做延时队列，<strong>除非延时精度要求很低（秒级）且消息量不大</strong>。原因有三个：</p>
+<ol class="steps">
+<li class="step"><strong>可靠性不足：</strong>Redis 主从切换可能丢消息，而延时任务往往涉及钱（订单超时关单、优惠券过期）。</li>
+<li class="step"><strong>没有重试机制：</strong>处理失败就是失败，要自己实现重试 + 死信。</li>
+<li class="step"><strong>成本高：</strong>空轮询浪费 CPU，且消息堆积在内存里。</li>
+</ol>
+<p><strong>我们的选型：</strong>用 RocketMQ 的延时消息（支持 18 个等级），或 RabbitMQ 的 TTL + 死信队列，或专门的分布式任务调度（XXL-Job）。Redis 延时队列只在『轻量、允许丢失』的场景用，比如『5 秒后刷新缓存』这种。」</p>
+</div></details>
+
+<details class="qa"><summary>40. Lua 脚本有什么坑？操作系统级问题是什么？<span class="lvl lv3">L3</span></summary><div class="qa-b">
+<p><strong>Redis 用的是 Lua 5.1</strong>（不是 5.2/5.3），且做了沙箱化改造。这带来一批坑：</p>
+<table>
+<thead><tr><th>坑</th><th>说明</th><th>解决</th></tr></thead>
+<tbody>
+<tr><td><strong>① 没有全局变量</strong></td><td>写 <code class="inline">x = 1</code> 会报错（未声明全局变量）</td><td>用 <code class="inline">local x = 1</code></td></tr>
+<tr><td><strong>② 随机命令结果被固定</strong></td><td><code class="inline">RANDOMKEY</code>、<code class="inline">SRANDMEMBER</code> 在脚本里每次都返回同一个（写入 AOF 时要保证幂等）</td><td>理解这是设计而非 bug</td></tr>
+<tr><td><strong>③ 所有 key 必须在同一个槽</strong></td><td>Cluster 下，脚本里操作的 key 必须同槽，否则报 <code class="inline">CROSSSLOT</code></td><td>用 hash tag：<code class="inline">{user1001}:stock</code>、<code class="inline">{user1001}:order</code></td></tr>
+<tr><td><strong>④ 不能用 <code class="inline">KEYS[1]</code> 动态拼接 key</strong></td><td>只能通过 KEYS 数组传，不能脚本里拼</td><td>提前把 key 传进来</td></tr>
+<tr><td><strong>⑤ 脚本不能太慢</strong></td><td>整个脚本执行期间阻塞 Redis</td><td>脚本控制在 1ms 内，超时用 <code class="inline">lua-time-limit</code>（默认 5s，超了只记日志不中断）</td></tr>
+<tr><td><strong>⑥ 不支持浮点数的精确比较</strong></td><td>Lua 里 <code class="inline">0.1 + 0.2 ~= 0.3</code></td><td>用整数运算（金额用分）</td></tr>
+<tr><td><strong>⑦ redis.call 出错会中断</strong></td><td>报错后脚本终止，前面的操作<strong>不回滚</strong></td><td>用 <code class="inline">redis.pcall</code> 捕获错误继续</td></tr>
+</tbody>
+</table>
+<p><strong>EVALSHA 的正确用法：</strong></p>
+<pre><code class="language-java">// ❌ 每次传完整脚本，浪费带宽
+redis.eval(luaScript, keys, args);
+
+// ✅ 先加载获取 SHA，之后只传 SHA
+String sha = redis.scriptLoad(luaScript);        // 返回 SHA1
+redis.evalsha(sha, keys, args);
+
+// ⚠️ 但 Redis 重启后脚本缓存丢失，EVALSHA 会报 NOSCRIPT
+// 必须捕获 NOSCRIPT 异常，降级用 EVAL 重新加载
+try {
+    redis.evalsha(sha, keys, args);
+} catch (RedisException e) {
+    if (e.getMessage().contains("NOSCRIPT")) {
+        redis.eval(luaScript, keys, args);      // 降级
+    }
+}
+// 生产推荐：直接封装一个「优先 EVALSHA，失败降级 EVAL」的工具方法</code></pre>
+<p><strong>Redis Functions（7.0+，Lua 的进化版）：</strong></p>
+<pre><code class="language-bash"># 1. 用 FUNCTION LOAD 注册一个持久化的函数库
+FUNCTION LOAD "#!lua name=mylib
+redis.register_function('my_lock_release', function(keys, args)
+    if redis.call('GET', keys[1]) == args[1] then
+        return redis.call('DEL', keys[1])
+    end
+    return 0
+end)"
+
+# 2. 调用
+FCALL my_lock_release 1 mykey myvalue
+
+# 优势：
+# - 函数随 AOF/RDB 持久化，重启不丢（不像 EVALSHA 会 NOSCRIPT）
+# - 有命名空间，可管理（FUNCTION LIST/STATS/DUMP）
+# - 支持函数库级别的元数据</code></pre>
+<p><strong>操作系统级问题（这个点很加分）：</strong></p>
+<ol class="steps">
+<li class="step"><strong>Lua 脚本执行超时后，Redis 不中断脚本</strong>——它只是开始接受 <code class="inline">SCRIPT KILL</code> 请求。如果脚本有写操作，<code class="inline">SCRIPT KILL</code> 也杀不掉，只能 <code class="inline">SHUTDOWN NOSAVE</code> 重启。<strong>这是 Lua 最危险的特性。</strong></li>
+<li class="step"><strong>脚本内的 <code class="inline">os.time()</code> 返回的是固定的时间</strong>（脚本开始执行的时间），不是实时的。因为要保证 AOF 重放的幂等性。</li>
+<li class="step"><strong>Redis 8.x 的 Script 有内存限制</strong>：<code class="inline">lua-memory-limit</code>，防止脚本申请过多内存。</li>
+</ol>
+<p><strong>🎯 加分点：</strong>「我们有个血泪教训：一个同事写了段 Lua 脚本做批量数据处理，结果脚本里有个 <code class="inline">while</code> 循环因为边界条件写错，死循环了。<code class="inline">SCRIPT KILL</code> 杀不掉（因为已经执行了写命令），最后只能重启 Redis。<strong>所以我们的规范是：Lua 脚本必须有明确的循环上限，且必须做 Code Review，脚本里绝对不写不确定次数的循环。</strong>」</p>
+</div></details>
+
+<details class="qa"><summary>41. Redis 集群的数据倾斜怎么办？<span class="lvl lv3">L3</span></summary><div class="qa-b">
+<p><strong>数据倾斜的两种形态：</strong></p>
+<table>
+<thead><tr><th>类型</th><th>原因</th><th>现象</th></tr></thead>
+<tbody>
+<tr><td><strong>槽倾斜</strong></td><td>槽分配不均（如某节点分了 5000 槽，另一个只有 1000）</td><td>整体上某节点内存/CPU 高</td></tr>
+<tr><td><strong>key 倾斜</strong></td><td>大量 key 落到同一个槽（如都用同一个 hash tag）</td><td>单个节点内存暴涨</td></tr>
+</tbody>
+</table>
+<p><strong>槽倾斜的排查与解决：</strong></p>
+<pre><code class="language-bash"># 查看槽分配
+CLUSTER SLOTS
+redis-cli --cluster check 127.0.0.1:6379
+
+# 查看每个节点的槽数
+CLUSTER SHARDS                  # 7.0+
+redis-cli --cluster info 127.0.0.1:6379
+
+# Redis 8.x 新增：槽级别统计（超实用！）
+CLUSTER SLOT-STATS ALL              # 所有槽的key数、CPU使用
+CLUSTER SLOT-STATS SLOTSRANGE 0 100
+# 这能精确发现「哪个槽是热点」
+
+# 重新均衡
+redis-cli --cluster rebalance 127.0.0.1:6379
+redis-cli --cluster rebalance --cluster-use-empty-masters 有数据也要用空节点
+</code></pre>
+<p><strong>key 倾斜的解决：</strong></p>
+<ol class="steps">
+<li class="step"><strong>避免全局 hash tag</strong>：不要所有 key 都用 <code class="inline">{global}</code>，那等于放弃分片。</li>
+<li class="step"><strong>热点 key 打散</strong>：<code class="inline">hotkey</code> → <code class="inline">hotkey:1</code> ~ <code class="inline">hotkey:N</code>，写时全写，读时随机。这就是前面讲的「key 复制」。</li>
+<li class="step"><strong>大 key 拆分</strong>：一个 5000 字段的 Hash 拆成 50 个 100 字段的 Hash。</li>
+<li class="step"><strong>监控告警</strong>：对每个节点的 <code class="inline">used_memory</code> 做监控，偏差超过 20% 就告警。</li>
+</ol>
+<p><strong>🎯 加分点：</strong>「<code class="inline">CLUSTER SLOT-STATS</code> 是 Redis 8.0 的新命令，我特别推荐。以前排查倾斜要写脚本统计，现在一条命令直接给出每个槽的 key 数量、CPU 时间、网络流量。<strong>它能直接告诉你『3999 这个槽 CPU 占了 40%』</strong>，定位效率提升巨大。这也是我认为 Redis 8 值得升级的理由之一。」</p>
+</div></details>
+
+<details class="qa"><summary>42. Redis 如何保证消息不丢？<span class="lvl lv3">L3</span></summary><div class="qa-b">
+<p><strong>消息丢失的三个环节（必须分层讲）：</strong></p>
+<pre><code>生产者 ──①──> Redis ──②──> Redis 持久化 ──③──> 消费者</code></pre>
+<table>
+<thead><tr><th>环节</th><th>丢失原因</th><th>解决</th></tr></thead>
+<tbody>
+<tr><td><strong>① 生产端</strong></td><td>网络抖动，发了但 Redis 没收到</td><td>生产端重试 + 幂等（消息带唯一 ID，消费端去重）</td></tr>
+<tr><td><strong>② 服务端</strong></td><td>Redis 宕机，内存数据没落盘</td><td>AOF everysec/always；主从同步；<code class="inline">WAIT</code> 命令</td></tr>
+<tr><td><strong>③ 消费端</strong></td><td>取走了但处理失败/进程崩溃</td><td>Stream 的 XPENDING + XACK + XCLAIM 机制</td></tr>
+</tbody>
+</table>
+<p><strong>用 List 做队列，消息一定会丢（要讲清为什么）：</strong></p>
+<pre><code class="language-bash"># ❌ List 方案的致命缺陷
+BLPOP queue 0              # 从队列取出消息
+# 此时消息已经从 Redis 删除了！
+doBusiness();              # 如果这里进程崩溃，消息永久丢失
+# 没有任何机制能找回来</code></pre>
+<p><strong>用 Stream 才能保证：</strong></p>
+<pre><code class="language-bash"># 1. 创建消费组
+XGROUP CREATE orders g1 0
+
+# 2. 消费者读消息（读后消息进入 PEL：Pending Entries List，不是立即删除）
+XREADGROUP GROUP g1 c1 COUNT 1 STREAMS orders >
+
+# 3. 处理成功后显式 ACK
+XACK orders g1 &lt;msgId&gt;
+
+# 4. 如果消费者崩溃，消息会留在 PEL 里
+XPENDING orders g1
+# 输出：[消息数, 最小ID, 最大ID, [[消费者, 消息数], ...]]
+
+# 5. 其他消费者认领超时未 ACK 的消息（故障转移）
+XAUTOCLAIM orders g1 c2 60000 0-0 COUNT 10
+# 60000 = 最小空闲时间 60 秒，超过就认为原消费者挂了
+
+# 6. 查看认领结果
+XINFO GROUPS orders</code></pre>
+<p><strong>🎯 加分点：</strong>「完整的不丢消息方案应该是：</p>
+<ol class="steps">
+<li class="step"><strong>生产端：</strong>消息带 <code class="inline">msgId</code>（业务唯一 ID），发送失败重试，消费端用 <code class="inline">msgId</code> 做幂等。</li>
+<li class="step"><strong>存储端：</strong><code class="inline">appendonly yes</code> + <code class="inline">appendfsync everysec</code>（最多丢 1 秒）。更严格用 <code class="inline">WAIT 1 0</code> 同步到副本。</li>
+<li class="step"><strong>消费端：</strong>Stream + 消费组 + 显式 ACK + XAUTOCLAIM 认领超时消息 + 死信处理（超过 N 次重试的进死信队列）。</li>
+</ol>
+<p><strong>但必须诚实地说：Redis 永远做不到「绝对不丢」。</strong> 因为它是 AP 系统，主从异步复制。真要金融级不丢，用 Kafka（多副本 ISR + acks=all）或 RocketMQ。Redis 的定位是「高吞吐、可容忍少量丢失」。</p>
+</div></details>
+
+<details class="qa"><summary>43. 讲讲 Redis 的 Bitmap 和 HyperLogLog，什么时候用？<span class="lvl lv3">L3</span></summary><div class="qa-b">
+<h4>Bitmap：用 bit 位存布尔值，极致省内存</h4>
+<pre><code class="language-bash">SETBIT sign:20260930:1001 0 1      # 用户1001 第0天签到
+GETBIT sign:20260930:1001 0
+BITCOUNT sign:20260930:1001         # 这个 key 里有多少个1
+
+# 统计连续签到（用 BITFIELD 更灵活）
+BITFIELD sign:user1001 GET u7 0     # 取7个bit
+
+# 统计活跃用户（按天建一个bitmap，用户id作为offset）
+SETBIT active:20260930 1001 1
+SETBIT active:20260930 1002 1
+BITCOUNT active:20260930            # 当天活跃数
+BITOP AND active:week active:mon active:tue ...  # 一周都活跃的用户（位图与运算）</code></pre>
+<p><strong>内存对比（1 亿用户标签）：</strong></p>
+<table>
+<thead><tr><th>方案</th><th>内存</th></tr></thead>
+<tbody>
+<tr><td>Set（存 userId）</td><td>约 1GB+（每个元素约 50 字节开销）</td></tr>
+<tr><td>Bitmap</td><td><strong>12.5MB</strong>（1 亿 bit = 12.5MB）</td></tr>
+</tbody>
+</table>
+<h4>HyperLogLog：基数统计，误差 0.81%，内存固定 12KB</h4>
+<pre><code class="language-bash">PFADD uv:20260930 user1001 user1002 user1003
+PFCOUNT uv:20260930                  # 近似去重计数
+PFMERGE uv:week uv:mon uv:tue        # 合并多天</code></pre>
+<p><strong>HLL 的核心权衡：</strong></p>
+<table>
+<thead><tr><th>能力</th><th>Bitmap</th><th>HyperLogLog</th></tr></thead>
+<tbody>
+<tr><td>内存（1亿元素）</td><td>12.5MB（需知道 id 范围）</td><td><strong>12KB</strong>（固定）</td></tr>
+<tr><td>能否判断单个元素是否存在</td><td>✅ 可以（GETBIT）</td><td>❌ <strong>不能</strong></td></tr>
+<tr><td>误差</td><td>0（精确）</td><td>0.81%（近似）</td></tr>
+<tr><td>大范围 id</td><td>❌ offset 太大会爆内存</td><td>✅ 与 id 大小无关</td></tr>
+</tbody>
+</table>
+<h4>Bitmap 的坑（必须讲）</h4>
+<pre><code class="language-bash"># ❌ 危险：如果 userId 是雪花ID（19位数字，如 1900000000000000001）
+SETBIT active 1900000000000000001 1
+# offset = 1.9 × 10^18 bit = 237 PB！！
+# 直接 OOM
+
+# ✅ 解决：
+# 1. 用自增的小 ID 或用户表主键（从0开始）
+# 2. 或用 HashMap 把 userId 映射到紧凑的 offset
+# 3. 或直接用 HLL（不关心具体是谁）
+# 4. Redis 8 对 sparse bitmap 有优化，但仍需注意 offset 上限</code></pre>
+<p><strong>🎯 加分点：</strong>「选型口诀：<strong>『要精确、要判断个体 → Bitmap；只要总数、能容忍误差、id 很大 → HyperLogLog』</strong>。</p>
+<p>具体案例：<strong>签到</strong>用 Bitmap（要判断某人某天是否签到，且用户 id 通常不大）；<strong>UV 统计</strong>用 HLL（只关心总数，且 4 亿用户用 Bitmap 要 50MB/天，HLL 只要 12KB）；<strong>行为标签</strong>（是否买过、是否浏览过）用 Bitmap 做位运算，能一次算出「既浏览又购买」的交集，这是 Set 做不到的（Set 的 SINTER 是 O(N) 且内存高）。」</p>
+</div></details>
+
+<details class="qa"><summary>44. GEO 是怎么实现的？为什么能算距离？<span class="lvl lv3">L3</span></summary><div class="qa-b">
+<p><strong>底层就是 ZSet + GeoHash 编码。</strong></p>
+<ol class="steps">
+<li class="step"><strong>GeoHash 编码：</strong>把经纬度（2 个浮点数）编码成一个 52 位的整数。做法是「二分区间 + 交替取位」：经度二分一次得 1 bit，纬度二分一次得 1 bit，交替进行 26 轮得到 52 位。</li>
+<li class="step"><strong>存进 ZSet：</strong>这个 52 位整数就是 ZSet 的 score，member 是地点名。</li>
+<li class="step"><strong>距离查询：</strong>用 ZSet 的范围查询，找出 GeoHash 相近的点（GeoHash 前缀相同的点在空间上相近）。</li>
+<li class="step"><strong>精确距离：</strong>用 Haversine 公式算球面距离，过滤掉 GeoHash 相近但实际较远的点。</li>
+</ol>
+<pre><code class="language-bash"># 添加位置
+GEOADD restaurants 116.404 39.915 "海底捞(王府井)"
+GEOADD restaurants 116.410 39.920 "星巴克(东单)"
+
+# 查询距离
+GEODIST restaurants "海底捞(王府井)" "星巴克(东单)" km
+
+# 附近的人（以某点为中心，半径 5km 内，按距离升序，返回10个）
+GEOSEARCH restaurants FROMLONLAT 116.404 39.915 BYRADIUS 5 km ASC COUNT 10 WITHDIST
+
+# 查某个地点附近的
+GEOSEARCH restaurants FROMMEMBER "海底捞(王府井)" BYRADIUS 3 km ASC
+
+# 取坐标
+GEOPOS restaurants "海底捞(王府井)"
+# 返回经纬度
+
+# 取 GeoHash 字符串
+GEOHASH restaurants "海底捞(王府井)"</code></pre>
+<p><strong>🎯 加分点：</strong>「<code class="inline">GEOSEARCH</code> 是 6.2 新增的，统一了之前的 <code class="inline">GEORADIUS</code>（已废弃）。GeoHash 有个经典问题：<strong>边界问题</strong>——两个点实际很近，但因为跨越了 GeoHash 的分界线，前缀完全不同。Redis 的处理是查询时同时查相邻的 8 个格子。<strong>还有个坑：GeoHash 精度随纬度变化，高纬度地区误差大</strong>，所以 Redis 最后一定要用 Haversine 公式复算真实距离。」</p>
+</div></details>
+
+<details class="qa"><summary>45. 为什么 Redis 用跳表不用 B+ 树？顺便说说 B+ 树和跳表的区别。<span class="lvl lv3">L3</span></summary><div class="qa-b">
+<table>
+<thead><tr><th>维度</th><th>B+ 树</th><th>跳表</th></tr></thead>
+<tbody>
+<tr><td>设计场景</td><td><strong>磁盘</strong>（减少磁盘 IO 次数）</td><td><strong>内存</strong>（追求简单高效）</td></tr>
+<tr><td>节点大小</td><td>一个节点存多个 key（一页 16KB）</td><td>一个节点一个 key</td></tr>
+<tr><td>树高</td><td>低（3-4 层支持千万数据）</td><td>高（约 logN 层，但每层只跳关键节点）</td></tr>
+<tr><td>范围查询</td><td>叶子节点链表</td><td>底层链表</td></tr>
+<tr><td>实现复杂度</td><td>高（分裂、合并、平衡）</td><td>低</td></tr>
+<tr><td>内存开销</td><td>较高（页内可能有空隙）</td><td>较低（平均 1.33 指针/节点）</td></tr>
+<tr><td>并发修改</td><td>难（旋转/分裂影响大）</td><td>易（局部修改）</td></tr>
+</tbody>
+</table>
+<p><strong>Redis 不用 B+ 树的三个理由：</strong></p>
+<ol class="steps">
+<li class="step"><strong>内存数据库不需要 B+ 树：</strong>B+ 树的价值在于「一次磁盘 IO 读一页」，把树高压低。但 Redis 数据在内存，随机访问代价极低，树高不是问题。B+ 树的优势被抹平了。</li>
+<li class="step"><strong>跳表实现更简单：</strong>antirez 明确说过，跳表代码量是平衡树的 1/5，且不需要考虑 rebalance。「可维护性」在长期项目里价值极高。</li>
+<li class="step"><strong>范围查询和并发更友好：</strong>跳表的 <code class="inline">ZRANGEBYSCORE</code> 找到起点后沿底层链表走就行，不需要中序遍历。而且局部修改不影响大范围结构。</li>
+</ol>
+<p><strong>🎯 加分点：</strong>「总结一句：<strong>『B+ 树是为磁盘设计的，跳表是为内存设计的』</strong>。如果面试官追问『那 MySQL 为什么不用跳表』，答案是：MySQL 数据在磁盘，一次 IO 代价 10ms（相对内存的 100ns 差 10 万倍），必须用 B+ 树把树高压到 3-4 层。而 Redis 在内存，访问任何地址代价一样，跳表的 O(logN) 完全够用，简单才是美。」</p>
+</div></details>
+
+<details class="qa"><summary>46. Redis 的 Pipeline 会不会有问题？批量多少合适？<span class="lvl lv3">L3</span></summary><div class="qa-b">
+<p><strong>Pipeline 的三个风险：</strong></p>
+<ol class="steps">
+<li class="step"><strong>内存暴涨：</strong>Pipeline 会把所有命令和结果都缓存在客户端和 Redis 的输出缓冲区。一次发 10 万条命令，可能出现「客户端 OOM」或「Redis 输出缓冲超限被断开连接」（<code class="inline">client-output-buffer-limit normal</code>）。</li>
+<li class="step"><strong>阻塞其他请求：</strong>虽然 Pipeline 里每条命令还是分开执行的（不阻塞），但 Redis 一口气读 10 万条命令 + 一口气写 10 万个响应，这个 IO 过程会占用主线程，影响其他请求的响应延迟。</li>
+<li class="step"><strong>错误处理困难：</strong>中间某条命令失败，Pipeline 不会中断，你要自己遍历所有结果判断。而且无法根据前一条结果决定后一条（那是 Lua 的活）。</li>
+</ol>
+<p><strong>批量大小建议（经验值）：</strong></p>
+<table>
+<thead><tr><th>批量数</th><th>评价</th></tr></thead>
+<tbody>
+<tr><td>&lt; 100</td><td>安全，收益明显</td></tr>
+<tr><td>100 - 1000</td><td><strong>推荐区间</strong>，收益最优</td></tr>
+<tr><td>1000 - 10000</td><td>需要压测，注意内存</td></tr>
+<tr><td>&gt; 10000</td><td>危险，建议分批</td></tr>
+</tbody>
+</table>
+<pre><code class="language-java">// 分批 Pipeline 的正确写法
+private static final int BATCH_SIZE = 500;
+
+public void batchSet(Map&lt;String, String&gt; data) {
+    List&lt;Map.Entry&lt;String, String&gt;&gt; list = new ArrayList&lt;&gt;(data.entrySet());
+    for (int i = 0; i &lt; list.size(); i += BATCH_SIZE) {
+        int end = Math.min(i + BATCH_SIZE, list.size());
+        List&lt;Map.Entry&lt;String, String&gt;&gt; batch = list.subList(i, end);
+
+        redis.executePipelined((RedisCallback&lt;Object&gt;) conn -&gt; {
+            RedisSerializer&lt;String&gt; ser = redis.getStringSerializer();
+            for (Map.Entry&lt;String, String&gt; e : batch) {
+                conn.set(ser.serialize(e.getKey()), ser.serialize(e.getValue()));
+            }
+            return null;
+        });
+    }
+}
+
+// ✅ Lettuce 的 async 模式天生支持 pipeline（自动攒批）
+// ✅ 也可以用 Redisson 的 RBatch
+RBatch batch = redisson.createBatch();
+for (String key : keys) {
+    batch.getBucket(key).setAsync(value);
+}
+BatchResult&lt;?&gt; result = batch.execute();</code></pre>
+<p><strong>🎯 加分点：</strong>「我做过一组压测数据（1000 条 SET）：</p>
+<table>
+<thead><tr><th>方式</th><th>耗时</th><th>QPS</th></tr></thead>
+<tbody>
+<tr><td>逐条 SET（RTT 0.1ms）</td><td>~100ms</td><td>1 万</td></tr>
+<tr><td>Pipeline 100/批</td><td>~1.5ms</td><td>66 万</td></tr>
+<tr><td>Pipeline 500/批</td><td>~1.2ms</td><td>83 万</td></tr>
+<tr><td>Pipeline 1000/批</td><td>~1.1ms</td><td><strong>90 万</strong></td></tr>
+<tr><td>Pipeline 5000/批</td><td>~1.3ms</td><td>77 万（开始下降）</td></tr>
+</tbody>
+</table>
+<p>结论：<strong>500-1000 是甜蜜点。</strong> 超过这个数收益递减，因为 Redis 处理命令的耗时开始超过网络开销。但要注意这是本机测试，跨机房的 RTT 会大得多（0.5-2ms），那时候 Pipeline 的收益更明显（相对收益更大）。」</p>
+</div></details>
+
+<details class="qa"><summary>47. 主从复制中，从库的数据为什么可能比主库多？<span class="lvl lv3">L3</span></summary><div class="qa-b">
+<p><strong>这是个很刁的题，答案涉及三个机制：</strong></p>
+<h4>原因一：从库有自己独立的过期策略</h4>
+<p>从库<strong>不会主动删除</strong>已过期的 key（因为要等主库的 DEL 命令同步过来）。所以从库的 <code class="inline">DBSIZE</code> 可能比主库大——主库已经惰性删除了，从库还没收到删除命令。</p>
+<pre><code class="language-bash"># 主库：访问一个过期key → 发现过期 → 删除
+GET expired:key
+# 触发惰性删除，主库 DBSIZE 减少
+
+# 从库：同样访问
+GET expired:key
+# 从库不删除！返回 nil，但 key 还在，DBSIZE 不减</code></pre>
+<p><strong>但从库读已过期 key 时会返回 nil</strong>，因为从库会检查「逻辑过期」（不是物理删除）。所以数据是「看起来不存在，但物理还在」。</p>
+<h4>原因二：全量同步时主库有新写入</h4>
+<p>BGSAVE 期间主库的新写入会进 <code class="inline">repl_buffer</code>。如果这个 buffer 溢出（<code class="inline">client-output-buffer-limit replica</code>），会断开连接重来。而如果从库加载完 RDB 后又重放 buffer 中的命令，理论上应该一致。</p>
+<h4>原因三：主库的 key 被淘汰了</h4>
+<p>如果主库开启了 LRU/LFU 淘汰，主库内存满了会淘汰一些 key。<strong>淘汰操作会不会同步给从库？</strong></p>
+<table>
+<thead><tr><th>Redis 版本</th><th>行为</th></tr></thead>
+<tbody>
+<tr><td>3.2 之前</td><td>从库自己也淘汰（可能和主库淘汰的不一样，导致不一致）</td></tr>
+<tr><td>3.2 之后</td><td><strong>从库不主动淘汰</strong>，等主库的 DEL 同步。但主库淘汰时<strong>会同步 DEL 给从库</strong>（4.0+）</td></tr>
+</tbody>
+</table>
+<p><strong>🎯 加分点：</strong>「这个问题的标准答案是：<strong>『主从数据量不一致是正常现象，不一定是 bug。』</strong> 核心原因是<strong>从库不主动做过期删除，只依赖主库的 DEL 同步</strong>。</p>
+<p>但这带来一个实际问题：<strong>从库内存可能比主库高</strong>。因为过期 key 的物理内存还没释放。所以运维上要注意：<strong>从库的 maxmemory 要设得比主库大一些</strong>，或者定期在从库上做一次 <code class="inline">replica-read-only no</code> 下的手动清理（不推荐，会破坏复制）。更好的做法是用 <code class="inline">replica-ignore-maxmemory yes</code>（默认 yes），让从库忽略自己的 maxmemory 限制。」</p>
+</div></details>
+
+<details class="qa"><summary>48. 如果 Redis 突然变慢，你的排查思路是什么？<span class="lvl lv3">L3</span><span class="badge bg-red">实战题</span></summary><div class="qa-b">
+<p><strong>这是我面试必问的题，也是最能看出实战经验的题。给你一套完整的排查清单：</strong></p>
+<h4>第一层：确认是 Redis 慢还是网络慢</h4>
+<pre><code class="language-bash"># 1. 在 Redis 服务器本机执行，排除网络因素
+redis-cli --intrinsic-latency 100
+# 输出：Max latency so far: ... 如果 &lt; 1ms 说明 Redis 本身没问题
+
+# 2. 从客户端机器 ping Redis
+redis-cli --latency -h &lt;redis-host&gt;
+# 如果本机快、远程慢 → 网络问题</code></pre>
+<h4>第二层：确认是慢命令还是内部阻塞</h4>
+<pre><code class="language-bash"># 3. 慢查询日志（最先看这个）
+SLOWLOG GET 128
+# 看是不是业务发了 KEYS/HGETALL/大key操作
+
+# 4. 延迟监控（区分是命令慢还是事件慢）
+LATENCY DOCTOR
+LATENCY LATEST
+LATENCY HISTORY command / expire-cycle / fork / aof-fsync-always
+# 如果 fork 事件耗时长 → 持久化问题，不是命令问题
+
+# 5. 查看内部事件耗时统计
+INFO latencystats        # 7.0+，每条命令的平均延迟
+INFO commandstats        # 命令调用统计</code></pre>
+<h4>第三层：看资源瓶颈</h4>
+<pre><code class="language-bash"># 6. CPU
+top -H -p &lt;redis-pid&gt;     # 看哪个线程吃CPU
+# 如果主线程 100% → 命令太多或有大key操作
+# 如果是 bio 线程高 → 后台删除/持久化忙
+
+# 7. 内存
+INFO memory
+# used_memory_rss / used_memory &gt; 1.5 → 碎片严重
+# 是否在用 swap？free -h 看 swap 使用
+# 如果 swap 有使用 → 性能必然崩，这是致命问题
+
+# 8. 网络 IO
+INFO stats
+# instantaneous_input_kbps / instantaneous_output_kbps
+# 查看网络带宽是否打满
+
+# 9. 磁盘（持久化）
+iostat -x 1
+# 看 %util 是否 100%
+# AOF always + 慢磁盘 = 灾难
+
+# 10. 上下文切换
+vmstat 1
+# cs 列（context switch）异常高 → 线程竞争严重</code></pre>
+<h4>第四层：看客户端侧</h4>
+<pre><code class="language-bash"># 11. 连接数与缓冲区
+INFO clients
+# connected_clients 是否异常多
+# client_recent_max_input_buffer 是否有大输入
+
+CLIENT LIST
+# 找出 idle 很久的空闲连接（可能是连接泄漏）
+# 找出 cmd 异常的客户端
+
+# 12. 阻塞的客户端
+CLIENT LIST | grep "b"      # flags 里有 b 表示 blocked
+CLIENT NO-EVICT / CLIENT UNBLOCK
+
+# 13. 复制状态（如果有从库）
+INFO replication
+# master_link_status:up/down
+# 如果从库全量同步频繁 → 主库 fork 频繁</code></pre>
+<h4>第五层：内核参数</h4>
+<pre><code class="language-bash"># 14. THP（透明大页）—— 最重要的检查项！
+cat /sys/kernel/mm/transparent_hugepage/enabled
+# 如果输出 [always] → 【必须关闭】
+# fork 时 COW 复制 2MB 而不是 4KB，延迟暴增
+
+# 15. overcommit
+cat /proc/sys/vm/overcommit_memory
+# 必须是 1，否则 fork 可能失败
+
+# 16. swappiness
+cat /proc/sys/vm/swappiness
+# 建议 1（不是 0，0 在某些内核会导致 OOM）</code></pre>
+<p><strong>🎯 加分点（这是完整版的标准答法）：</strong>「我的排查口诀是<strong>『五层递进：网络 → 命令 → 资源 → 客户端 → 内核』</strong>。</p>
+<p>实际经验里，<strong>80% 的 Redis 变慢是这三个原因：</strong></p>
+<ol class="steps">
+<li class="step"><strong>大 key 操作</strong>（占 40%）——SLOWLOG 一眼看出。解决：拆 key + 用 SCAN 替代 KEYS。</li>
+<li class="step"><strong>THP 没关</strong>（占 20%）——最隐蔽，因为 CPU、内存都正常，就是 fork 时延迟尖刺。解决：<code class="inline">echo never &gt; /sys/kernel/mm/transparent_hugepage/enabled</code>。</li>
+<li class="step"><strong>连接泄漏 / 连接池配置不当</strong>（占 20%）——CLIENT LIST 看到几千个 ESTABLISHED 但 idle 很久的连接。解决：检查客户端有没有正确 <code class="inline">close()</code>，连接池 <code class="inline">maxIdle</code> 是否合理。</li>
+</ol>
+<p>剩下的 20% 是 <strong>AOF always + 慢盘</strong>、<strong>内存碎片</strong>、<strong>网络带宽打满</strong>、<strong>从库同步风暴</strong>。</p>
+<p><strong>最重要的一条经验：先看 SLOWLOG 和 LATENCY，不要在没定位到根因时就重启 Redis。</strong> 重启只是掩盖问题，而且会丢数据。」</p>
+</div></details>
+
+<h2>L4 · 专家级（架构与权衡）</h2>
+
+<details class="qa"><summary>49. 如果让你设计一个支撑百万 QPS 的 Redis 架构，你怎么做？<span class="lvl lv4">L4</span><span class="badge bg-purple">架构题</span></summary><div class="qa-b">
+<p><strong>先反问澄清（这一步最重要，体现架构思维）：</strong></p>
+<ol class="steps">
+<li class="step">读多写少还是读写均衡？读写比例决定了架构方向。</li>
+<li class="step">能容忍多少数据丢失？决定持久化和复制策略。</li>
+<li class="step">能容忍多少延迟？决定是否用本地缓存。</li>
+<li class="step">数据量多大？决定是哨兵还是 Cluster。</li>
+<li class="step">一致性要求？决定读写路径。</li>
+</ol>
+<p><strong>假设：读 95% / 写 5%，数据 100GB，可容忍秒级不一致。架构设计：</strong></p>
+<h4>第一层：客户端本地缓存（削掉 80% 读）</h4>
+<pre><code class="language-java">Caffeine 缓存，TTL 1-5 秒
+├─ 命中率 60-90%
+├─ 那 100 万 QPS 到这一层就只剩 10-40 万
+├─ 关键：TTL 一定要短（防一致性差），且要加随机抖动
+└─ 配合 Redis Pub/Sub 做跨实例失效通知（可选）</code></pre>
+<h4>第二层：Redis Cluster 读写分离（承担剩余读 + 全部写）</h4>
+<pre><code>┌─────────────────────────────────────────────────┐
+│              Redis Cluster（6主6从）              │
+│                                                  │
+│  shard1: master1 ──── replica1                   │
+│  shard2: master2 ──── replica2                   │
+│  shard3: master3 ──── replica3                   │
+│  shard4: master4 ──── replica4                   │
+│  shard5: master5 ──── replica5                   │
+│  shard6: master6 ──── replica6                   │
+│                                                  │
+│  写入：走 master（6 个分片并行，总写入能力 × 6）    │
+│  读取：READONLY 走 replica（读能力 × 12）          │
+└─────────────────────────────────────────────────┘
+容量：6 × 16GB = 96GB（每主库控制 16GB 以内，fork 可控）
+读能力：12 节点 × 8万 QPS ≈ 96 万
+写能力：6 节点 × 8万 QPS ≈ 48 万</code></pre>
+<h4>第三层：多级降级（保命层）</h4>
+<pre><code>L1: Caffeine（本地）
+L2: Redis Cluster（主）
+L3: Redis 备用集群（异地/独立机房，通过 MQ 双写）
+L4: 本地文件兜底数据（Redis 全挂时返回静态数据）
+L5: 限流熔断（Sentinel 保护 DB）
+
+每一层都要有「跳闸开关」，能一键降级</code></pre>
+<h4>关键设计决策</h4>
+<table>
+<thead><tr><th>决策点</th><th>选择</th><th>理由</th></tr></thead>
+<tbody>
+<tr><td>分片数</td><td>6 主</td><td>单实例 ≤ 16GB，fork 可控；6 主足够 100GB</td></tr>
+<tr><td>副本数</td><td>1 从/主</td><td>成本与可用性平衡；要求高就 2 从</td></tr>
+<tr><td>是否读写分离</td><td>是</td><td>读 95%，分离能省一半机器</td></tr>
+<tr><td>持久化</td><td>混合持久化</td><td>AOF everysec 保证秒级；RDB preamble 保证恢复快</td></tr>
+<tr><td>热点 key</td><td>本地缓存 + key 复制</td><td>Cluster 无法解决单 key 热点</td></tr>
+<tr><td>大 key</td><td>拆分 + 治理</td><td>集群倾斜的元凶</td></tr>
+<tr><td>客户端</td><td>Lettuce（共享连接）</td><td>百万 QPS 下 Jedis 的线程模型撑不住</td></tr>
+</tbody>
+</table>
+<p><strong>🎯 加分点（这是决定你能不能上 P8 的地方）：</strong>「<strong>架构设计最重要的是『知道哪里会先崩』。</strong> 我会明确说出这个架构的三个瓶颈：</p>
+<ol class="steps">
+<li class="step"><strong>单分片写入瓶颈：</strong>如果某业务写入集中在少数 key，那个分片会成为瓶颈。对策：业务层设计 key 时避免热点，或用 key 复制打散。</li>
+<li class="step"><strong>Cluster 故障转移窗口：</strong>主库挂到从库升主约 10-30 秒，期间该分片不可用。对策：客户端重试 + 降级到本地缓存。</li>
+<li class="step"><strong>网络带宽：</strong>100 万 QPS × 平均 1KB = 1GB/s，需要万兆网卡。要提前算清楚。</li>
+</ol>
+<p>还有一个经常被忽略的点：<strong>『百万 QPS』是整个集群的能力，不是单 key 的能力。</strong> 如果面试官追问『单个 key 要 100 万 QPS 怎么办』，答案是：<strong>唯一的办法是本地缓存</strong>，因为 Redis Cluster 对一个 key 只能提供一个节点的能力。」</p>
+</div></details>
+
+<details class="qa"><summary>50. Redis 在你项目里的定位是什么？如果 Redis 挂了会怎样？<span class="lvl lv4">L4</span><span class="badge bg-purple">架构题</span></summary><div class="qa-b">
+<p><strong>这是我最喜欢问的题，因为它能看出你有没有「生产思维」。</strong></p>
+<h4>标准回答框架：先分类，再说降级</h4>
+<p><strong>第一步：明确 Redis 承担的三类职责，按严重程度排序</strong></p>
+<table>
+<thead><tr><th>职责</th><th>挂了的后果</th><th>严重度</th><th>降级方案</th></tr></thead>
+<tbody>
+<tr><td><strong>① 纯缓存</strong>（商品详情、用户信息）</td><td>穿透到 DB，DB 压力 ×10</td><td>🟡 中</td><td>限流 + 本地缓存 + DB 兜底</td></tr>
+<tr><td><strong>② 分布式锁</strong></td><td>锁失效，可能重复执行</td><td>🟠 高</td><td>DB 唯一索引兜底 + 乐观锁</td></tr>
+<tr><td><strong>③ 数据存储</strong>（库存、Session、分布式 ID）</td><td><strong>业务不可用</strong></td><td>🔴 极高</td><td>基本无解，必须高可用</td></tr>
+</tbody>
+</table>
+<p><strong>第二步：针对每一类说具体方案</strong></p>
+<h4>① 纯缓存场景 —— 允许降级，关键是别把 DB 打死</h4>
+<pre><code class="language-java">// 多级缓存 + 熔断
+Product getProduct(Long id) {
+    // L1: 本地缓存（Redis挂了还有效）
+    Product p = caffeine.get(id);
+    if (p != null) return p;
+
+    try {
+        // L2: Redis
+        p = redisGet(id);
+        if (p != null) { caffeine.put(id, p); return p; }
+    } catch (Exception e) {
+        // Redis 异常：记录 + 继续走 DB（但要限流）
+        log.warn("redis down", e);
+        metrics.counter("redis.fail").increment();
+    }
+
+    // L3: DB（必须限流保护！）
+    if (!dbRateLimiter.tryAcquire()) {
+        throw new BizException("系统繁忙，请稍后重试");   // 快速失败
+    }
+    p = db.get(id);
+    // 回种缓存（Redis 恢复后自动生效）
+    return p;
+}</code></pre>
+<h4>② 分布式锁场景 —— 必须有 DB 兜底</h4>
+<p>「这就是我在第 30 题强调『三层保护』的原因：<strong>锁失效时，DB 的唯一索引和条件更新能保证正确性。</strong> 如果业务只依赖 Redis 锁而没有任何 DB 层面的保护，那这个设计本身就有问题。」</p>
+<h4>③ 存储场景 —— 只能靠高可用，不能靠降级</h4>
+<pre><code>库存扣减：
+❌ 错误做法：库存只存在 Redis
+   Redis 挂了 → 库存数据丢失 → 灾难
+
+✅ 正确做法：Redis 是「预扣」，MySQL 是「最终账本」
+   Redis 挂了 → 停止秒杀入口（开关降级）→ 订单继续异步落库
+   → Redis 恢复后从 MySQL 重建库存缓存
+
+关键：Redis 只做「加速」，不能做「唯一真相来源」</code></pre>
+<p><strong>🎯 加分点（大厂级回答）：</strong>「我们的实践有<strong>四条铁律</strong>：</p>
+<ol class="steps">
+<li class="step"><strong>Redis 永远不能是唯一数据源。</strong> 所有关键数据必须能从我 DB 重建。Redis 只是「可丢弃的加速层」。</li>
+<li class="step"><strong>所有 Redis 调用必须有超时。</strong> 我们统一设 <code class="inline">timeout=1000ms</code>，<code class="inline">maxWait=500ms</code>。绝不无限等待。</li>
+<li class="step"><strong>所有 Redis 调用必须能降级。</strong> 用 Sentinel 或 Hystrix 包裹，异常时走 fallback，而不是抛出异常让请求失败。</li>
+<li class="step"><strong>必须有全链路压测。</strong> 我们会在预发环境直接 <code class="inline">SHUTDOWN</code> Redis，看系统能不能扛住——这叫「混沌工程」，Netflix 的 Chaos Monkey 就是这个思路。第一次演练我们就把 DB 打挂了，所以才加了 DB 限流。</li>
+</ol>
+<p><strong>一句话总结：</strong>『评估 Redis 故障影响时，不能只问「Redis 挂了怎么办」，而要问「Redis 挂了之后，我的流量会打到哪一层，那一层扛得住吗」。』」</p>
+</div></details>
+
+<details class="qa"><summary>51. Redis 和 ZooKeeper/etcd 都能做分布式锁，怎么选？<span class="lvl lv4">L4</span></summary><div class="qa-b">
+<table>
+<thead><tr><th>维度</th><th>Redis</th><th>ZooKeeper</th><th>etcd</th></tr></thead>
+<tbody>
+<tr><td>一致性</td><td>AP（异步复制）</td><td>CP（ZAB 协议）</td><td>CP（Raft）</td></tr>
+<tr><td>性能</td><td><strong>最高（10 万+ QPS）</strong></td><td>中等（1 万 QPS）</td><td>中等（1 万+ QPS）</td></tr>
+<tr><td>锁的正确性</td><td>极端场景可能失效</td><td><strong>强保证</strong></td><td><strong>强保证</strong></td></tr>
+<tr><td>实现方式</td><td>SET NX / Redisson</td><td>临时顺序节点</td><td>Lease + Revision</td></tr>
+<tr><td>惊群效应</td><td>自旋重试（有惊群）</td><td><strong>Watch 前一个节点</strong>（无惊群）</td><td>Watch 机制</td></tr>
+<tr><td>锁释放</td><td>TTL 到期 / 主动删</td><td>会话断开自动删</td><td>Lease 到期</td></tr>
+<tr><td>运维成本</td><td>低（已有 Redis 集群）</td><td>高（要维护 ZK 集群）</td><td>中</td></tr>
+</tbody>
+</table>
+<p><strong>ZooKeeper 为什么能无惊群？（这是加分点）</strong></p>
+<pre><code>ZK 的锁实现：
+  1. 在 /lock 下创建临时顺序节点 lock-0001, lock-0002...
+  2. 每个客户端判断自己是不是最小的节点
+  3. 如果不是，Watch「前一个节点」（不是 Watch 父节点！）
+  4. 前一个节点删除时收到通知，再判断
+
+结果：释放锁时只唤醒一个客户端，其他继续等。
+而 Redis 锁释放后，所有等待者同时自旋抢（惊群）。</code></pre>
+<p><strong>选型决策树：</strong></p>
+<pre><code>是否已有 ZooKeeper/etcd？
+├─ 是 → 用它（避免引入新组件）
+└─ 否 → 业务的正确性要求有多高？
+        ├─ 很高（资金、库存）→ 引入 etcd/ZK，或用 DB 条件更新
+        └─ 一般（防重复、防并发）→ 用 Redis（Redisson）
+
+性能敏感 + 已有 Redis → Redis
+强一致 + 已有 ZK → ZK
+新项目 + 强一致 → etcd（比 ZK 更好维护）</code></pre>
+<p><strong>🎯 加分点：</strong>「我的实际选型是：<strong>99% 的场景用 Redis 锁，因为已经有 Redis 了，而且性能高。</strong> 但我会做两件事来补齐正确性：</p>
+<ol class="steps">
+<li class="step"><strong>关键业务加 DB 层的兜底</strong>（条件更新 / 唯一索引）——这是根本。</li>
+<li class="step"><strong>锁的粒度设计得足够小</strong>（按 orderId 而不是全局锁），这样即使偶发失效，影响面也极小。</li>
+</ol>
+<p>只有在<strong>真的需要强一致且没有 DB 兜底可能</strong>时（比如分布式选主、分片调度），我才会引入 etcd。因为 ZK 的运维成本太高了——我们的 ZK 集群有专门的运维团队维护，普通业务团队碰不起。」</p>
+</div></details>
+
+<details class="qa"><summary>52. Redis 6/7/8 版本升级要注意什么？<span class="lvl lv4">L4</span></summary><div class="qa-b">
+<p><strong>先给版本演进与取舍：</strong></p>
+<table>
+<thead><tr><th>版本</th><th>关键变化</th><th>升级价值</th></tr></thead>
+<tbody>
+<tr><td>6.0</td><td>IO 多线程、RESP3、ACL、SSL</td><td>中（多核利用、安全）</td></tr>
+<tr><td>6.2</td><td>GEOSEARCH、CLIENT NO-EVICT、ZADD GT/LT</td><td>低</td></tr>
+<tr><td>7.0</td><td>Multi-Part AOF、Function、Sharded PubSub、ACL v2</td><td><strong>高（持久化大幅改进）</strong></td></tr>
+<tr><td>7.2</td><td>性能优化、CLUSTER 改进</td><td>中</td></tr>
+<tr><td>7.4</td><td>Hash field TTL、内存优化</td><td>中</td></tr>
+<tr><td>8.0</td><td><strong>模块内置化</strong>（BF/JSON/TS/Vector）、HOTKEYS、ACL 增强</td><td><strong>高（功能大爆发）</strong></td></tr>
+<tr><td>8.2/8.4</td><td>原子槽迁移、LRM 淘汰、XADD 幂等 IDMP、mTLS</td><td>中高</td></tr>
+</tbody>
+</table>
+<p><strong>升级的五个注意点：</strong></p>
+<ol class="steps">
+<li class="step"><strong>RDB/AOF 格式兼容性：</strong>新版能读老版 RDB，反之不行。<strong>升级后无法回滚</strong>，除非备份了老版本的 RDB。必须先在测试环境验证。</li>
+<li class="step"><strong>默认配置变化：</strong>7.0 默认开启 AOF（之前默认关）；8.0 模块内置后某些命令行为变化（如 <code class="inline">BF.ADD</code> 可能和第三方模块冲突）。要 diff 两版的 <code class="inline">redis.conf</code>。</li>
+<li class="step"><strong>废弃命令：</strong>如 <code class="inline">GEORADIUS</code> 在 6.2 后建议用 <code class="inline">GEOSEARCH</code>；<code class="inline">SUBSCRIBE</code> 在 Cluster 下要用 <code class="inline">SSUBSCRIBE</code>。</li>
+<li class="step"><strong>客户端兼容性：</strong>Lettuce 5.x 对 Redis 7 的支持有限，建议 Lettuce 6.x+。升级 Redis 前先升级客户端。</li>
+<li class="step"><strong>Cluster 滚动升级顺序：</strong>先从库 → 再主库 → 最后升级哨兵/客户端。<strong>主从切换前要确认从库已升级且复制正常。</strong></li>
+</ol>
+<p><strong>🎯 加分点：</strong>「我们的升级流程是<strong>『三步走』</strong>：</p>
+<ol class="steps">
+<li class="step"><strong>影子验证：</strong>新版本部署一套影子集群，把线上流量镜像过去（用 Redis 的 copy 能力或业务双写），跑一周对比数据一致性。</li>
+<li class="step"><strong>灰度升级：</strong>先升一个非核心分片，观察 3 天。指标看：<code class="inline">LATENCY</code>、<code class="inline">SLOWLOG</code>、<code class="inline">INFO memory</code>、客户端错误率。</li>
+<li class="step"><strong>全量升级：</strong>低峰期（凌晨 2-5 点）滚动升。每升一个节点，等 10 分钟观察。</li>
+</ol>
+<p><strong>关于是否升级到 8.0，我的判断是：</strong>如果你在用 RedisBloom/RedisJSON 这些模块，8.0 内置化是巨大收益（省掉模块运维的坑）；如果你只是当缓存用，7.2/7.4 更稳。<strong>不要为新特性而升级，要为痛点而升级。</strong>」</p>
+</div></details>
+
+<details class="qa"><summary>53. 怎么设计一个高可用的 Redis 架构？说清 RTO 和 RPO。<span class="lvl lv4">L4</span></summary><div class="qa-b">
+<p><strong>先定义两个指标（这是专业度的体现）：</strong></p>
+<table>
+<thead><tr><th>指标</th><th>含义</th><th>Redis 场景下的取值</th></tr></thead>
+<tbody>
+<tr><td><strong>RTO</strong>（Recovery Time Objective）</td><td>故障后多久能恢复服务</td><td>哨兵：10-30 秒；Cluster：10-30 秒；手动：分钟级</td></tr>
+<tr><td><strong>RPO</strong>（Recovery Point Objective）</td><td>能容忍丢失多少数据</td><td>everysec：最多 1 秒；always：0</td></tr>
+</tbody>
+</table>
+<p><strong>四种架构方案与 RTO/RPO 对比：</strong></p>
+<table>
+<thead><tr><th>方案</th><th>RTO</th><th>RPO</th><th>成本</th><th>适用</th></tr></thead>
+<tbody>
+<tr><td>单机</td><td>∞（需要人工）</td><td>取决于持久化</td><td>最低</td><td>开发/测试</td></tr>
+<tr><td>主从 + 手动切换</td><td>分钟级</td><td>秒级</td><td>低</td><td>容忍长时间故障</td></tr>
+<tr><td>哨兵（3节点）</td><td>10-30 秒</td><td>秒级</td><td>中</td><td>数据 &lt; 20GB</td></tr>
+<tr><td>Cluster（3主3从）</td><td>10-30 秒（分片级）</td><td>秒级</td><td>高</td><td>数据 &gt; 20GB</td></tr>
+<tr><td>多机房（同城双活）</td><td>&lt; 5 秒（VIP 漂移）</td><td>秒级</td><td>极高</td><td>金融级</td></tr>
+</tbody>
+</table>
+<p><strong>高可用的四个层次（缺一不可）：</strong></p>
+<h4>① 数据层：副本 + 持久化</h4>
+<pre><code class="language-bash"># 一主两从（更高可用）
+replicaof master 6379
+min-replicas-to-write 1        # 至少1个从库确认才写成功
+min-replicas-max-lag 10        # 且延迟 &lt; 10 秒
+
+# 持久化双保险
+appendonly yes
+appendfsync everysec
+aof-use-rdb-preamble yes
+save 900 1                     # 保留RDB兜底</code></pre>
+<h4>② 检测层：监控 + 告警</h4>
+<pre><code>必须监控的指标（缺一个都是隐患）：
+├─ master_link_status（主从链路）
+├─ master_last_io_seconds_ago（复制延迟，&gt;10s 告警）
+├─ instantaneous_ops_per_sec（QPS 突降说明有问题）
+├─ used_memory / maxmemory（&gt; 80% 告警）
+├─ rejected_connections（连接被拒）
+├─ blocked_clients（阻塞客户端数）
+├─ latest_fork_usec（fork 耗时，&gt; 100ms 告警）
+├─ mem_fragmentation_ratio（碎片率）
+└─ cluster_state（ok / fail）
+
+用 Prometheus + redis_exporter + Grafana，配 5 级告警</code></pre>
+<h4>③ 切换层：自动故障转移</h4>
+<pre><code>哨兵配置关键点：
+sentinel monitor mymaster &lt;ip&gt; &lt;port&gt; 2      # quorum=2
+sentinel down-after-milliseconds mymaster 5000   # 5秒判定SDOWN
+sentinel failover-timeout mymaster 60000         # 60秒超时
+sentinel parallel-syncs mymaster 1               # 一次只同步1个从库
+
+⚠️ 重要：客户端必须实现「哨兵感知」
+   - Jedis: JedisSentinelPool
+   - Lettuce: RedisSentinelConfiguration
+   不要硬编码 master IP！否则切了主客户端不知道</code></pre>
+<h4>④ 降级层：兜底方案</h4>
+<pre><code>Redis 全挂时的三级兜底：
+L1: 本地缓存（Caffeine）—— 顶住 30% 请求
+L2: 静态兜底数据（本地文件）—— 返回默认值/热门数据
+L3: 限流 + 友好提示 —— 保护 DB，快速失败</code></pre>
+<p><strong>🎯 加分点（这是专家的回答）：</strong>「高可用设计有三个<strong>反直觉的真相</strong>：</p>
+<ol class="steps">
+<li class="step"><strong>『高可用』不等于『不丢数据』。</strong> 哨兵能在 10 秒内切主（高可用），但主库宕机前没同步的数据会丢（RPO &gt; 0）。要 RPO=0 必须 <code class="inline">appendfsync always</code> + 同步复制，性能会掉一个数量级。<strong>这是必须和业务方确认的取舍。</strong></li>
+<li class="step"><strong>『脑裂』比『宕机』更可怕。</strong> 网络分区时，如果旧主库还在接受写入，会产生两个「真相」。必须配 <code class="inline">min-replicas-to-write</code>，让隔离的主库主动拒绝写入。</li>
+<li class="step"><strong>客户端不感知故障转移 = 没有高可用。</strong> 我见过很多团队配了哨兵，但客户端硬编码了 master IP，切主后所有请求打到旧主库（现在是只读从库），全部报 <code class="inline">READONLY</code> 错误。<strong>必须用 SentinelPool / ClusterClient，并在压测时真的 kill 掉主库验证。</strong>」</li>
+</ol></div></details>
+
+<details class="qa"><summary>54. 跨机房（异地多活）的 Redis 怎么设计？<span class="lvl lv4">L4</span></summary><div class="qa-b">
+<p><strong>先明确：Redis 官方不支持多主（Multi-Master）</strong>，所以异地多活要自己做。</p>
+<h4>方案一：单向同步（主备机房）—— 最简单</h4>
+<pre><code>┌─────────────┐          ┌─────────────┐
+│  机房A（主） │ ──异步──> │  机房B（备） │
+│  Cluster    │  复制    │  Cluster    │
+│  读写       │           │  只读       │
+└─────────────┘           └─────────────┘
+        ↑
+     所有流量
+
+优点：简单，一致性靠 Redis 原生复制
+缺点：机房A挂了，机房B要人工/自动提升为主
+     跨机房复制延迟高（同城 1-5ms，异地 30-100ms）</code></pre>
+<h4>方案二：双写 + 冲突解决 —— 真双活</h4>
+<pre><code class="language-java">// 业务层双写两个机房
+public void set(String key, String value) {
+    // 并行双写，任一成功即可（用 CompletableFuture）
+    CompletableFuture&lt;Void&gt; f1 = CompletableFuture.runAsync(
+        () -> redisA.set(key, value));
+    CompletableFuture&lt;Void&gt; f2 = CompletableFuture.runAsync(
+        () -> redisB.set(key, value));
+    // 等两个都完成（或超时）
+    CompletableFuture.allOf(f1, f2).join();
+}
+
+// 冲突解决：依赖业务语义
+// - 如果是覆盖写（SET），用「最后写入胜」（靠时间戳）
+// - 如果是计数（INCR），必须用 CRDT 或统一到一个机房计数</code></pre>
+<h4>方案三：单元化（大厂主流）</h4>
+<pre><code>按用户维度分片，每个单元（机房）只服务一部分用户：
+┌──────────────┐        ┌──────────────┐
+│  机房A        │        │  机房B        │
+│  用户 0-4999  │        │  用户 5000+   │
+│  Redis A     │        │  Redis B     │
+│  （完整服务）  │        │  （完整服务）  │
+└──────────────┘        └──────────────┘
+        │                        │
+        └──── 元数据同步 ────────┘
+
+用户5000访问机房A → 网关路由到机房B
+关键：数据不跨机房，天然无冲突
+
+优点：无冲突、延迟低、能做真双活
+缺点：架构复杂、资源利用率低（要留冗余）</code></pre>
+<p><strong>跨机房复制的三个技术难题：</strong></p>
+<table>
+<thead><tr><th>难题</th><th>说明</th><th>应对</th></tr></thead>
+<tbody>
+<tr><td><strong>① 延迟</strong></td><td>异地带宽有限 + RTT 高（30-100ms）</td><td>只同步必要数据；用增量同步；带宽 QoS 保障</td></tr>
+<tr><td><strong>② 带宽成本</strong></td><td>跨机房流量贵，且全量同步会打满带宽</td><td>调大 <code class="inline">repl-backlog-size</code> 避免全量；压缩</td></tr>
+<tr><td><strong>③ 脑裂</strong></td><td>机房之间网络断开，两边都认为自己是主</td><td>用「多数派」仲裁；必要时人工介入</td></tr>
+</tbody>
+</table>
+<p><strong>🎯 加分点：</strong>「说实话，<strong>Redis 做异地多活是很痛苦的，因为官方没有多主方案。</strong> 我们的实践是：</p>
+<ol class="steps">
+<li class="step"><strong>核心数据不做异地多活，用「同城双活 + 异地备份」。</strong> 同城双机房（延迟 &lt; 3ms），异地的只做冷备（只为容灾，不承载流量）。</li>
+<li class="step"><strong>非核心数据用单元化。</strong> 比如用户 Session 按 userId 分片到不同机房，天然隔离。</li>
+<li class="step"><strong>数据同步用 DTS（数据传输服务）而不是 Redis 原生复制。</strong> 阿里云 DTS、美团 DTS 支持跨机房、断点续传、冲突检测，比裸复制可靠得多。</li>
+</ol>
+<p><strong>最重要的一点：异地多活要先问业务值不值。</strong> 双活的成本是单机房的 2-3 倍（冗余 + 复杂性），但收益是「机房级故障不中断」。如果业务 SLA 是 99.9%（年停机 8.7 小时），双活完全没必要；如果是 99.99%，才需要认真考虑。」</p>
+</div></details>
+
+<details class="qa"><summary>55. 如何给 Redis 做容量规划？<span class="lvl lv4">L4</span></summary><div class="qa-b">
+<p><strong>容量规划四步法：</strong></p>
+<h4>Step 1：算内存</h4>
+<pre><code>总内存 = 数据量 × 单条开销 × (1 + 碎片率) × (1 + 预留系数)
+
+示例：1000 万用户信息，每个 value 1KB
+├─ 原始数据：1000万 × 1KB = 10GB
+├─ key 开销：平均 30 字节 → 300MB
+├─ redisObject 开销：16 字节 → 160MB
+├─ dictEntry + SDS 头部：约 50 字节 → 500MB
+├─ 小计：约 11GB
+├─ 碎片率 1.3：14.3GB
+├─ fork 预留（COW 最坏翻倍）：需要 28GB 可用内存
+└─ 结论：单机 32GB 内存，单实例控制在 14GB 数据以内
+
+⚠️ 关键：fork 时的 COW 会复制页面，最坏情况内存翻倍
+   所以 maxmemory 不能设成机器内存，要留 50% 给 fork</code></pre>
+<h4>Step 2：算 QPS</h4>
+<pre><code>峰值 QPS = 日活 × 人均请求数 × 峰值系数 / 86400
+
+示例：
+├─ 日活 100 万，人均 50 次请求 = 5000 万请求/天
+├─ 平均 QPS = 5000万 / 86400 ≈ 580
+├─ 峰值系数 10（电商业务峰谷比大）→ 5800 QPS
+├─ 单实例能力 8 万 QPS → 1 个实例绰绰有余
+└─ 但要考虑：读写比、大key影响、命令复杂度
+
+通常：单实例 5-8 万 QPS 是安全线</code></pre>
+<h4>Step 3：算分片数</h4>
+<pre><code>分片数 = max(内存需求 / 单实例上限, QPS 需求 / 单实例能力)
+
+示例：
+├─ 内存：100GB / 16GB = 6.25 → 7 个分片
+├─ QPS：50万 / 8万 = 6.25 → 7 个分片
+├─ 取 max(7, 7) = 7
+└─ 但考虑冗余，配 8 主 8 从
+
+⚠️ 分片数建议取 2 的幂或整数，便于后续扩容时均分
+⚠️ 槽数 16384 是固定的，分片数不能太多（否则每片槽太少）</code></pre>
+<h4>Step 4：算带宽</h4>
+<pre><code>带宽 = 峰值 QPS × 平均请求/响应大小 × 2（收发）
+
+示例：
+├─ 峰值 50 万 QPS（整个集群）
+├─ 平均请求 200B + 响应 1KB = 1.2KB
+├─ 带宽 = 50万 × 1.2KB × 2 = 1.2 GB/s ≈ 9.6 Gbps
+└─ 结论：需要万兆网卡（10GbE）
+
+⚠️ 主从复制还要额外消耗带宽！
+   如果写入 5万 QPS × 1KB = 50MB/s 的复制流量
+   要单独预留带宽，否则复制会拖慢主库</code></pre>
+<p><strong>🎯 加分点：</strong>「容量规划里最容易被忽略的是<strong>『fork 的内存预留』</strong>。很多人把 <code class="inline">maxmemory</code> 设成机器内存的 80%，结果 BGSAVE 时 COW 让内存翻倍，直接被 OOM Killer 干掉。</p>
+<p><strong>我们的规范是：maxmemory ≤ 机器内存 × 50%</strong>。32GB 机器，maxmemory 最多 16GB。看起来浪费，但这是保命的。</p>
+<p>还有一个经验值：<strong>单实例内存最好控制在 10GB 以内</strong>。因为这个量级下 fork 耗时在 100ms 内（可接受），全量同步一个从库约 30 秒（可接受）。20GB 以上，fork 就到几百毫秒，会出现明显的延迟尖刺。</p>
+<p><strong>最后提醒：容量规划不是一次性的。</strong> 要定期（每季度）复盘：实际内存增长曲线 vs 预测，QPS 峰值变化，识别哪些业务在快速增长。我们有个「Redis 容量看板」，能看到每个业务的增速和剩余容量。」</p>
+</div></details>
+
+<details class="qa"><summary>56. AOF 重写（rewrite）是怎么做的？会阻塞吗？<span class="lvl lv4">L4</span></summary><div class="qa-b">
+<p><strong>为什么需要重写：</strong>AOF 是「追加命令日志」，如果对一个 key 做了 100 次 INCR，AOF 就有 100 条命令。重写后会合并成 <code class="inline">SET key 100</code> 一条。</p>
+<p><strong>重写的完整流程：</strong></p>
+<ol class="steps">
+<li class="step"><strong>fork 子进程</strong>（和 BGSAVE 一样）。子进程拥有 fork 时刻的数据快照。</li>
+<li class="step"><strong>子进程遍历内存</strong>，把每个 key 的当前值转成最少的写命令，写入<strong>新的 AOF 临时文件</strong>。</li>
+<li class="step"><strong>父进程同时</strong>把新收到的写命令，追加到：
+  <ul>
+    <li>旧的 AOF 文件（保证不丢）</li>
+    <li><strong>AOF 重写缓冲区</strong>（<code class="inline">aof_rewrite_buf</code>，这是关键）</li>
+  </ul>
+</li>
+<li class="step">子进程完成后，通知父进程。父进程把 <strong>AOF 重写缓冲区</strong>的内容追加到新 AOF 文件末尾。</li>
+<li class="step"><strong>原子替换：</strong>用新 AOF 文件替换旧文件。</li>
+</ol>
+<p><strong>会阻塞吗？会，但很短：</strong></p>
+<table>
+<thead><tr><th>阶段</th><th>是否阻塞</th><th>原因</th></tr></thead>
+<tbody>
+<tr><td>fork</td><td><strong>阻塞</strong>（几十~几百 ms）</td><td>复制页表</td></tr>
+<tr><td>子进程重写</td><td>不阻塞</td><td>子进程独立工作</td></tr>
+<tr><td>写入 aof_rewrite_buf</td><td>不阻塞</td><td>内存操作</td></tr>
+<tr><td>追加缓冲区到新文件</td><td><strong>可能阻塞</strong></td><td>要看缓冲区大小</td></tr>
+<tr><td>rename 替换</td><td>几乎不阻塞</td><td>文件系统原子操作</td></tr>
+</tbody>
+</table>
+<p><strong>7.0 的 Multi-Part AOF 改进（重要）：</strong></p>
+<pre><code>老版本（单文件 AOF）：
+├─ 重写时要生成一个完整的新文件
+├─ 如果 AOF 有 50GB，就要写 50GB 临时文件
+├─ 磁盘空间要 2 倍，且写入耗时长
+└─ 重写期间若崩溃，整个文件可能损坏
+
+7.0 Multi-Part AOF：
+├─ manifest 文件（清单）
+├─ base.rdb / base.aof（基础快照，全量）
+├─ incr.aof（增量命令）
+└─ 重写时只需合并成新的 base，不用重写全部
+
+优势：
+├─ 磁盘占用更少（不用 2 倍空间）
+├─ 重写更快
+├─ 崩溃恢复更安全（文件小，损坏范围小）</code></pre>
+<p><strong>触发重写的条件：</strong></p>
+<pre><code class="language-bash">auto-aof-rewrite-percentage 100    # 增长100%时触发
+auto-aof-rewrite-min-size 64mb     # 且文件至少64MB
+
+# 例：当前AOF是100MB，增长到200MB时触发重写
+BGREWRITEAOF                       # 手动触发
+
+# ⚠️ 注意：7.0 默认开启 AOF，如果不配 auto-aof-rewrite，
+#    某些场景下 AOF 会无限增长</code></pre>
+<p><strong>🎯 加分点：</strong>「AOF 重写最大的坑是<strong>『重写期间的写入放大』</strong>。因为父进程要把新命令同时写到旧 AOF 和重写缓冲区，等于写两份。如果重写期间写入压力很大，旧 AOF 会快速增长，可能触发<strong>「重写风暴」</strong>——重写还没完成，又触发了下一次重写。</p>
+<p>我们的对策是：</p>
+<ol class="steps">
+<li class="step"><strong>调大 <code class="inline">auto-aof-rewrite-percentage</code></strong>（我们设 200%），减少重写频率。</li>
+<li class="step"><strong>监控 <code class="inline">aof_rewrite_in_progress</code></strong>，如果长期是 1，说明重写卡住了。</li>
+<li class="step"><strong>控制单实例大小</strong>（10GB 以内），这样重写很快（几十秒）。</li>
+<li class="step"><strong>用 Multi-Part AOF</strong>（7.0+），从根本上减少重写成本。</li>
+</ol>
+<p>另外一个重要认知：<strong>『RDB 和 AOF 不能互相替代』。</strong> RDB 负责「快速恢复」（加载快），AOF 负责「少丢数据」（增量）。生产环境用混合持久化，两者兼得。」</p>
+</div></details>
+
+<details class="qa"><summary>57. 说一下 Redis 的 RESP 协议，为什么它比 HTTP 快？<span class="lvl lv4">L4</span></summary><div class="qa-b">
+<p><strong>RESP（REdis Serialization Protocol）：</strong>Redis 的客户端-服务端通信协议，设计目标是<strong>简单、可读、解析快</strong>。</p>
+<p><strong>五种数据类型（首字节标识）：</strong></p>
+<table>
+<thead><tr><th>类型</th><th>首字节</th><th>格式示例</th></tr></thead>
+<tbody>
+<tr><td>Simple String</td><td><code class="inline">+</code></td><td><code class="inline">+OK\r\n</code></td></tr>
+<tr><td>Error</td><td><code class="inline">-</code></td><td><code class="inline">-ERR unknown command\r\n</code></td></tr>
+<tr><td>Integer</td><td><code class="inline">:</code></td><td><code class="inline">:1000\r\n</code></td></tr>
+<tr><td>Bulk String</td><td><code class="inline">$</code></td><td><code class="inline">$6\r\nfoobar\r\n</code></td></tr>
+<tr><td>Array</td><td><code class="inline">*</code></td><td><code class="inline">*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n</code></td></tr>
+</tbody>
+</table>
+<p><strong>RESP3（6.0+）新增：</strong><code class="inline">%</code>（Map）、<code class="inline">~</code>（Set）、<code class="inline">&gt;</code>（Push）、<code class="inline">_</code>（Null）、<code class="inline">#</code>（Boolean）、<code class="inline">,</code>（Double）。解决了 RESP2 无法区分「空数组」和「空字符串」等歧义。</p>
+<p><strong>为什么 RESP 比 HTTP 快：</strong></p>
+<table>
+<thead><tr><th>维度</th><th>HTTP</th><th>RESP</th></tr></thead>
+<tbody>
+<tr><td>header 大小</td><td>几百字节（User-Agent、Cookie、Accept...）</td><td><strong>0 字节</strong>，没有 header</td></tr>
+<tr><td>解析</td><td>要考虑 header 分割、chunked、gzip</td><td>按首字节 + <code class="inline">\r\n</code> 分割，状态机极简</td></tr>
+<tr><td>连接复用</td><td>HTTP/1.1 要 keep-alive，HTTP/2 要多路复用</td><td>长连接，天然多路复用（按顺序响应）</td></tr>
+<tr><td>语义</td><td>REST 风格（GET/POST/PUT/DELETE）</td><td>命令 + 参数，无冗余</td></tr>
+<tr><td>文本/二进制</td><td>通常文本（JSON）</td><td>二进制安全（Bulk String 带长度）</td></tr>
+</tbody>
+</table>
+<p><strong>一个实际对比：</strong></p>
+<pre><code>HTTP 请求：
+POST /api/cache HTTP/1.1\r\n
+Host: redis.example.com\r\n
+User-Agent: Java/1.8\r\n
+Content-Type: application/json\r\n
+Content-Length: 25\r\n
+\r\n
+{"key":"user:1","cmd":"GET"}
+总计约 150 字节
+
+RESP 请求：
+*2\r\n$3\r\nGET\r\n$6\r\nuser:1\r\n
+总计 25 字节
+
+差距：6 倍</code></pre>
+<p><strong>🎯 加分点：</strong>「Redis 的单线程模型能跑到 10 万 QPS，RESP 的极简解析是重要原因之一。对比 MySQL 的协议——MySQL 协议复杂得多（握手、认证、prepare、execute），单条查询的协议开销就有几十微秒。<strong>Redis 的解析器是个状态机，处理一个 GET 请求只需几百纳秒</strong>，几乎可以忽略不计。</p>
+<p>另外要提一点：<strong>RESP3 是 6.0 引入的，但默认还是 RESP2。</strong> 需要客户端显式协商（Lettuce 支持 <code class="inline">HELLO 3</code>）。RESP3 的价值主要在客户端能做更精确的类型映射（比如 Map 直接映射成 Java Map，不用自己解析数组）。」</p>
+</div></details>
+
+<details class="qa"><summary>58. 什么情况下 Redis 会成为系统瓶颈？怎么突破？<span class="lvl lv4">L4</span></summary><div class="qa-b">
+<p><strong>识别五个瓶颈点（按出现顺序）：</strong></p>
+<table>
+<thead><tr><th>瓶颈</th><th>特征</th><th>突破方案</th></tr></thead>
+<tbody>
+<tr><td><strong>① 单线程 CPU</strong></td><td>单核 100%，QPS 上不去</td><td>开 IO 多线程；水平分片（多实例）</td></tr>
+<tr><td><strong>② 内存上限</strong></td><td>used_memory 接近 maxmemory，开始淘汰</td><td>Cluster 分片；内存优化（压缩 value）</td></tr>
+<tr><td><strong>③ 网络带宽</strong></td><td>网卡打满，延迟上升</td><td>减少响应大小（只取需要的字段）；升级网卡</td></tr>
+<tr><td><strong>④ 单 key 热点</strong></td><td>某分片 CPU 远超其他</td><td>本地缓存；key 复制；读写分离</td></tr>
+<tr><td><strong>⑤ 大 key 阻塞</strong></td><td>延迟尖刺，SLOWLOG 有记录</td><td>拆 key；用 SCAN/HSCAN 分批</td></tr>
+</tbody>
+</table>
+<p><strong>突破的三个层次：</strong></p>
+<h4>层次一：优化现有（成本最低）</h4>
+<pre><code class="language-bash"># 1. 开 IO 多线程
+io-threads 6
+io-threads-do-reads yes    # 需压测决定
+
+# 2. 关闭不必要的开销
+# - 关闭 THP
+# - 合理设置 hz（默认10，太高浪费CPU，太低过期不及时）
+
+# 3. 减少网络往返
+# - 用 Pipeline 批量
+# - 用 Lua 合并多命令
+# - 用 MULTI/EXEC
+
+# 4. 客户端优化
+# - Lettuce 共享连接（Jedis 每线程一连接，连接数爆炸）
+# - 合理设置连接池
+
+# 5. 减少数据量
+# - 用 HASH 代替多个 String（省 key 开销）
+# - 用 protobuf 代替 JSON
+# - 精简 key 名</code></pre>
+<h4>层次二：水平扩展</h4>
+<pre><code>读扩展：
+├─ 加从库 + 读写分离（READONLY）
+├─ 本地缓存（Caffeine）—— 最有效
+└─ 多个只读副本 + 负载均衡
+
+写扩展：
+├─ Cluster 分片（按 key 分散）
+├─ 业务层分片（如按 userId 路由到不同实例）
+└─ 写合并（把多次 INCR 合并成一次批量）
+
+⚠️ 注意：分片能扩展「整体能力」，不能解决「单 key 热点」</code></pre>
+<h4>层次三：架构替换（成本最高）</h4>
+<table>
+<thead><tr><th>场景</th><th>替代方案</th><th>理由</th></tr></thead>
+<tbody>
+<tr><td>海量 KV（TB 级）</td><td>Redis on Flash / 阿里云 Tair</td><td>内存成本太高，用 SSD 做二级存储</td></tr>
+<tr><td>持久化 MQ</td><td>Kafka / RocketMQ</td><td>Redis 内存有限，不适合堆积</td></tr>
+<tr><td>复杂查询</td><td>Elasticsearch / ClickHouse</td><td>Redis 只支持 key 查询</td></tr>
+<tr><td>强一致 KV</td><td>etcd / TiKV</td><td>Redis 是 AP</td></tr>
+<tr><td>大 value（图片、文件）</td><td>对象存储（S3/OSS）</td><td>Redis 存大对象成本极高</td></tr>
+</tbody>
+</table>
+<p><strong>🎯 加分点：</strong>「我的经验是<strong>『先优化，再扩展，最后替换』</strong>，因为成本递增。</p>
+<p>但有个反直觉的点：<strong>很多时候瓶颈不在 Redis，而在客户端或网络。</strong> 我遇到过「Redis 慢」的案例，最后一查是：</p>
+<ol class="steps">
+<li class="step">客户端用的是 Jedis，每个线程一个连接，200 个线程 = 200 个连接，连接数太高导致 Redis 上下文切换频繁。换成 Lettuce 共享连接后 QPS 翻倍。</li>
+<li class="step">客户端没有配连接池，每次请求都新建连接（三次握手 + 认证）。加连接池后延迟从 5ms 降到 0.5ms。</li>
+<li class="step">序列化用 JDK 序列化，一个 1KB 的对象序列化成 3KB。换 protobuf 后网络流量降 60%。</li>
+</ol>
+<p><strong>所以我排查 Redis 性能问题时，一定先看客户端配置，再看 Redis 本身。</strong> 这个顺序很重要，能省很多冤枉路。」</p>
+</div></details>
+
+<details class="qa"><summary>59. 如果要在 Redis 里存 10 亿条数据，你会怎么设计？<span class="lvl lv4">L4</span></summary><div class="qa-b">
+<p><strong>先算账（架构师的第一反应）：</strong></p>
+<pre><code>10 亿条 × 每条平均 500 字节 = 500 GB
+├─ 加 key 和对象开销：约 600 GB
+├─ 加碎片率 1.3：约 780 GB
+└─ 加 fork 预留：需要 1.5 TB 可用内存（峰值）
+
+结论：单机绝无可能，必须 Cluster 分片</code></pre>
+<p><strong>分片方案：</strong></p>
+<pre><code>方案A：Redis Cluster（大集群）
+├─ 每分片 16GB，需 780 / 16 ≈ 49 个分片
+├─ 建议 64 主 64 从（取整，便于槽分配）
+├─ 问题：节点太多，Gossip 通信是 O(N²)
+│        64 节点的心跳风暴会消耗大量带宽
+└─ 可行但运维复杂
+
+方案B：客户端分片（多套独立 Cluster）
+├─ 业务层按 key 前缀路由到不同 Cluster
+├─ 每个 Cluster 16 主 16 从
+├─ 4 个 Cluster = 64 主
+├─ 优势：每个 Cluster 独立，故障隔离
+├─ 劣势：业务层要维护路由逻辑，扩缩容麻烦
+
+方案C：分层存储（最推荐）
+├─ 热数据（20%，占 80% 访问）→ Redis（内存）
+├─ 温数据（30%）→ Redis on Flash / Tair（SSD）
+├─ 冷数据（50%）→ MySQL / 对象存储
+└─ 用 LRU 或业务规则定期把冷数据下沉</code></pre>
+<p><strong>数据建模要点（这才是关键）：</strong></p>
+<table>
+<thead><tr><th>要点</th><th>做法</th><th>收益</th></tr></thead>
+<tbody>
+<tr><td><strong>① 用 Hash 聚合小对象</strong></td><td>10 个相关字段存一个 Hash，而不是 10 个 String</td><td>省 90% 的 key 开销和 redisObject 开销</td></tr>
+<tr><td><strong>② 控制单 value 大小</strong></td><td>用 protobuf 压缩；只存必要字段</td><td>省 50%+ 内存</td></tr>
+<tr><td><strong>③ 用 Bitmap / HLL</strong></td><td>布尔值、计数场景不要用 Set</td><td>省 99% 内存</td></tr>
+<tr><td><strong>④ 合理 TTL</strong></td><td>所有 key 都设过期，且 TTL 分散</td><td>自动淘汰冷数据</td></tr>
+<tr><td><strong>⑤ key 名精简但可读</strong></td><td><code class="inline">u:1:p</code> 而非 <code class="inline">user:1:profile</code></td><td>10 亿 key 省几十 GB</td></tr>
+</tbody>
+</table>
+<p><strong>必须考虑的问题（专家视角）：</strong></p>
+<ol class="steps">
+<li class="step"><strong>全量同步怎么办？</strong> 16GB 数据全量同步一个从库要几分钟，期间主库 fork + COW 压力大。<strong>对策：</strong>从库预热（先从其他从库复制）+ 低峰期加从库。</li>
+<li class="step"><strong>扩容怎么做？</strong> 加节点要迁移槽，迁移 10 亿 key 中的一部分，耗时长且影响性能。<strong>对策：</strong>提前预留 30% 容量；用 <code class="inline">--cluster rebalance</code> 渐进迁移；选低峰期。</li>
+<li class="step"><strong>监控怎么做？</strong> 64 个节点，每个都要监控。<strong>对策：</strong>Prometheus + redis_exporter + 统一的 Grafana 大盘；告警聚合（不要 64 个节点告 64 次）。</li>
+<li class="step"><strong>成本怎么控？</strong> 780GB 内存，按 1GB 内存 30 元/月算，月成本 2.3 万。<strong>对策：</strong>冷热分离，把 50% 冷数据下沉到 MySQL，内存成本降一半。</li>
+</ol>
+<p><strong>🎯 加分点（这是 P8 级别的思考）：</strong>「我会先反问：<strong>『这 10 亿条数据，全部都需要用 Redis 吗？』</strong></p>
+<p>这是最关键的问题。10 亿条数据如果是「用户画像」这种，80% 的访问集中在 20% 的热门用户上。<strong>正确的做法不是「怎么存 10 亿条」，而是「怎么只存那 2 亿条热的」。</strong></p>
+<p>具体做法：</p>
+<ol class="steps">
+<li class="step"><strong>大数据侧跑离线任务</strong>，统计每个 key 的访问频率（比如过去 7 天）。</li>
+<li class="step"><strong>只把 Top 20% 的热数据灌进 Redis</strong>，其余留在 HBase/MySQL 或存 HDD。</li>
+<li class="step"><strong>访问冷数据时</strong>，走一个「回源 + 预热」的异步流程（用户第一次访问稍慢，然后把数据提升到 Redis）。</li>
+</ol>
+<p>这样 Redis 只需要 156GB（2 亿条），成本降 75%，而命中率可能还有 90%+（因为 80% 的访问集中在热数据）。<strong>这是典型的『用业务特征降维，而不是用技术硬扛』。</strong>」</p>
+</div></details>
+
+<details class="qa"><summary>60. 总结：一个资深 Redis 工程师应该具备哪些能力？<span class="lvl lv4">L4</span></summary><div class="qa-b">
+<p><strong>四层能力模型（可以对照自评）：</strong></p>
+<table>
+<thead><tr><th>层级</th><th>能力</th><th>对应年限</th></tr></thead>
+<tbody>
+<tr><td><strong>L1 会用</strong></td><td>掌握常用命令、会配连接池、会写缓存代码、知道五种数据结构</td><td>1-3 年</td></tr>
+<tr><td><strong>L2 懂原理</strong></td><td>能讲清底层结构、持久化、主从、哨兵、Cluster 原理；能排查常见问题（大key、慢查询、内存）</td><td>3-5 年</td></tr>
+<tr><td><strong>L3 能设计</strong></td><td>能设计缓存架构、分布式锁、热点治理、限流方案；能定位线上复杂故障；能给出容量规划</td><td>5-8 年</td></tr>
+<tr><td><strong>L4 能权衡</strong></td><td>能在一致性/性能/成本间做取舍；能判断何时不该用 Redis；能设计跨机房架构；能主导技术选型和演进</td><td>8-12 年</td></tr>
+</tbody>
+</table>
+<p><strong>五个必须刻进本能的原则：</strong></p>
+<ol class="steps">
+<li class="step"><strong>Redis 不是数据源，是可丢弃的加速层。</strong> 任何「Redis 挂了就完蛋」的设计都是错的。所有数据必须能从 DB 重建。</li>
+<li class="step"><strong>所有调用必须有超时和降级。</strong> 无限等待、异常直接抛——这两个是线上事故的常见根因。</li>
+<li class="step"><strong>单线程模型决定了「一个慢命令阻塞所有人」。</strong> 所以 SLOWLOG、大 key 治理、禁用 KEYS 是纪律而非建议。</li>
+<li class="step"><strong>分布式锁不能保证正确性，正确性必须由 DB 兜底。</strong> 锁只是「提高效率」，不是「保证正确」。</li>
+<li class="step"><strong>先量化，再优化。</strong> 内存多少？QPS 多少？延迟多少？瓶颈在哪？没有数据的优化都是猜。</li>
+</ol>
+<p><strong>三个常见的能力陷阱：</strong></p>
+<table>
+<thead><tr><th>陷阱</th><th>表现</th><th>纠正</th></tr></thead>
+<tbody>
+<tr><td><strong>只会背八股</strong></td><td>能说清跳表、渐进式 rehash，但线上遇到问题不知从哪查</td><td>多做故障演练，理解「怎么定位」比「原理是什么」更重要</td></tr>
+<tr><td><strong>过度设计</strong></td><td>简单缓存场景上 Cluster；用 Redlock 保护非关键业务</td><td>先问业务需求，再选最简单能用的方案</td></tr>
+<tr><td><strong>忽视成本</strong></td><td>无脑加机器、存全量数据、不做冷热分离</td><td>内存比磁盘贵 100 倍，要有成本意识</td></tr>
+</tbody>
+</table>
+<p><strong>🎯 最后的建议：</strong>「如果你要面试大厂 Redis 岗位，我的建议是把这 60 题的<strong>每个答案都用「四层递进法」重新组织一遍</strong>（结论 → 原理 → 代价 → 实践），然后针对你简历上的项目，准备 3 个<strong>「Redis 相关的故障复盘」</strong>——这是最能体现深度的素材。面试官不关心你背了多少，关心你「踩过什么坑、怎么定位、怎么解决、怎么预防」。」</p>
+</div></details>
+
+<h2>附录 A · 高频命令速查（面试手写代码用）</h2>
+
+<div class="box b-tip">
+<div class="box-t">按场景组织，把最常考的命令整理成「肌肉记忆」</div>
+<table>
+<thead><tr><th>场景</th><th>命令</th><th>要点</th></tr></thead>
+<tbody>
+<tr><td rowspan="3"><strong>缓存</strong></td><td><code class="inline">SET k v EX 300 NX</code></td><td>一条命令搞定「不存在才设 + 过期」</td></tr>
+<tr><td><code class="inline">MGET k1 k2 k3</code></td><td>批量 GET，减少 RTT</td></tr>
+<tr><td><code class="inline">SCAN 0 MATCH prefix:* COUNT 100</code></td><td>替代 KEYS，渐进式遍历</td></tr>
+<tr><td rowspan="3"><strong>分布式锁</strong></td><td><code class="inline">SET lock uuid NX EX 30</code></td><td>加锁（value 用唯一标识）</td></tr>
+<tr><td>Lua: <code class="inline">GET + 比对 + DEL</code></td><td>解锁（必须原子）</td></tr>
+<tr><td><code class="inline">lock.tryLock(0, 30, SECONDS)</code></td><td>Redisson 不等待尝试</td></tr>
+<tr><td rowspan="4"><strong>计数/限流</strong></td><td><code class="inline">INCR key</code> / <code class="inline">INCRBY key 5</code></td><td>原子自增</td></tr>
+<tr><td><code class="inline">EXPIRE key 60 NX</code></td><td>只在没设过期时设置</td></tr>
+<tr><td><code class="inline">ZADD + ZREMRANGEBYSCORE + ZCARD</code></td><td>滑动窗口限流三件套</td></tr>
+<tr><td><code class="inline">ZCOUNT key min max</code></td><td>统计窗口内请求数</td></tr>
+<tr><td rowspan="3"><strong>排行榜</strong></td><td><code class="inline">ZINCRBY rank 1 user</code></td><td>加分</td></tr>
+<tr><td><code class="inline">ZREVRANGE rank 0 9 WITHSCORES</code></td><td>取 Top 10</td></tr>
+<tr><td><code class="inline">ZREVRANK rank user</code></td><td>查某人排名（O(logN)）</td></tr>
+<tr><td rowspan="3"><strong>延时队列</strong></td><td><code class="inline">ZADD delay &lt;timestamp&gt; msgId</code></td><td>投递</td></tr>
+<tr><td><code class="inline">ZRANGEBYSCORE delay 0 &lt;now&gt;</code></td><td>取到期</td></tr>
+<tr><td><code class="inline">ZREM delay msgId</code></td><td>消费后移除（防重复）</td></tr>
+<tr><td rowspan="2"><strong>去重/UV</strong></td><td><code class="inline">PFADD uv userId</code> + <code class="inline">PFCOUNT uv</code></td><td>海量去重，误差 0.81%</td></tr>
+<tr><td><code class="inline">SETBIT active userId 1</code></td><td>精确判断个体，省内存</td></tr>
+<tr><td rowspan="3"><strong>排查</strong></td><td><code class="inline">SLOWLOG GET 100</code></td><td>慢查询</td></tr>
+<tr><td><code class="inline">MEMORY USAGE key</code></td><td>单 key 内存</td></tr>
+<tr><td><code class="inline">CLIENT LIST</code> / <code class="inline">LATENCY DOCTOR</code></td><td>客户端与延迟诊断</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2>附录 B · 面试临场应对策略</h2>
+
+<div class="box b-warn">
+<div class="box-t">四种高频困境的标准应对</div>
+<table>
+<thead><tr><th>困境</th><th>错误做法</th><th>正确做法</th></tr></thead>
+<tbody>
+<tr><td><strong>题目完全不会</strong></td><td>硬编、瞎蒙</td><td>「这个点我了解不深，但我会从 X 角度思考……」<strong>展示思路比给错答案好</strong></td></tr>
+<tr><td><strong>被问到知识盲区</strong></td><td>含糊其辞</td><td>「这个我确实没深入研究过，能说下您的思路吗？」<strong>坦诚 + 求知欲</strong></td></tr>
+<tr><td><strong>面试官追问到底</strong></td><td>慌乱、编造</td><td>「到这一层我理解就到这了，再深我需要查资料」<strong>诚实划边界</strong></td></tr>
+<tr><td><strong>被挑战方案</strong></td><td>立刻改口、全盘否定自己</td><td>「您提的这点确实是我方案的不足。我当时的取舍是 X，为了 Y；如果 Z 更重要，我会改成……」<strong>守住逻辑，承认局限</strong></td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="box b-int">
+<div class="box-t">最后：一句让你加分的话术模板</div>
+<p><strong>当被问「你怎么保证 XX」时，用这个模板：</strong></p>
+<p>「<strong>首先我会明确这个需求的容忍度</strong>（一致性/性能/成本分别是多少）——<strong>然后</strong>基于这个约束选方案，比如我选 A 是因为它满足 X 且实现成本低——<strong>但 A 在 Y 场景下会失效，所以我会加 B 作为兜底</strong>——<strong>最后我会用 C 指标监控，一旦异常立即降级/告警</strong>。」</p>
+<p>这个模板的价值在于：<strong>它展示了「澄清需求 → 方案选型 → 识别风险 → 兜底监控」的完整工程思维</strong>，而不是只回答一个技术点。这是我面试别人时最看重的素质。</p>
+</div>
+
+<div class="track">
+<label><input type="checkbox" data-k="d5-4a"><span>L1 基础题（1-12）能秒答，不看答案</span></label>
+<label><input type="checkbox" data-k="d5-4b"><span>L2 进阶题（13-29）能讲清原理和实战</span></label>
+<label><input type="checkbox" data-k="d5-4c"><span>L3 高级题（30-48）能结合项目经验回答</span></label>
+<label><input type="checkbox" data-k="d5-4d"><span>L4 架构题（49-60）能说出取舍和权衡</span></label>
+<label><input type="checkbox" data-k="d5-4e"><span>准备好 3 个真实的 Redis 故障复盘故事</span></label>
+<label><input type="checkbox" data-k="d5-4f"><span>能用「结论→原理→代价→实践」四层法回答任意题目</span></label>
+</div>
+
+</section>

@@ -1,0 +1,140 @@
+<section id="c00-roadmap" class="anchor" data-title="0 · 课程总览与学习路线">
+<div class="hero">
+  <h1>Redis 大师之路：5 天速成 · 大厂级深度</h1>
+  <p class="sub">面向已有 12 年后端经验、目标直指华为 / 阿里 / 腾讯等一线大厂的工程师。<br>
+  不讲空话：每一节都能在你本机跑起来，每一个原理都能对应到线上真实故障，每一道面试题都给出「答到什么程度算好」。</p>
+  <div class="ch-meta" style="margin-top:16px">
+    <span class="badge bg-red">Redis 8.6 版本基线</span>
+    <span class="badge bg-blue">19 个章节 · 100+ 面试题</span>
+    <span class="badge bg-green">可执行案例 · Docker 模拟大厂环境</span>
+    <span class="badge bg-purple">离线单文件 · 左侧文档树</span>
+  </div>
+</div>
+
+<h2 id="c00-1">为什么要「重新」学 Redis</h2>
+<p>你写了 12 年代码，Redis 一定用过。但面试官在 10 年+ 岗位上的问法，和你日常用 Redis 的方式是两件事：</p>
+<table>
+<thead><tr><th style="width:32%">层级</th><th>面试官想听到的</th><th>典型的「不合格回答」</th></tr></thead>
+<tbody>
+<tr><td><strong>会用</strong>（1-3年）</td><td>set/get、5 种数据类型、能缓存</td><td>「Redis 就是个缓存」</td></tr>
+<tr><td><strong>懂原理</strong>（3-5年）</td><td>单线程/epoll、SDS/跳表、RDB/AOF、过期淘汰</td><td>「Redis 是单线程所以快」——不问为什么快、瓶颈在哪</td></tr>
+<tr><td><strong>能架构</strong>（5-8年）</td><td>主从/哨兵/Cluster 选型、脑裂、槽迁移、跨机房容灾</td><td>「集群就是分片，扩容加机器」</td></tr>
+<tr><td><strong>能治问题</strong>（8-10年）</td><td>热 Key 打爆单分片怎么定位、双写一致性怎么兜底、大 Key 怎么平滑治理</td><td>「加本地缓存就行」——说不出怎么发现、怎么兜底、怎么回滚</td></tr>
+<tr><td><strong>能做 trade-off</strong>（10年+ / 专家）</td><td>在一致性、可用性、成本、复杂度之间做决策，并说清代价</td><td>「都上 Cluster + Redlock 就完事了」</td></tr>
+</tbody>
+</table>
+
+<div class="box b-warn">
+  <div class="box-t">⚠️ 速成的边界（先说清楚，免得你期待错）</div>
+  <p>5 天能让你：<strong>建立完整的知识地图 + 掌握高频深度答法 + 具备可上手操作的能力</strong>。<br>
+  5 天不能让你：真正拥有「扛过 618 大促」的经验，那是实战沉淀。<br>
+  本教程的策略是——<strong>用真实的线上故障复盘，把别人的实战经验压缩成你的认知</strong>。你在面试里讲这些案例，效果远好于背八股。</p>
+</div>
+
+<h2 id="c00-2">5 天学习路线图</h2>
+<p>节奏是「先跑通，再深挖，再架构，再治问题，最后打磨面试表达」。每天建议 6-8 小时。</p>
+
+<div class="toc-tree">
+  <div class="toc-day">
+    <div class="d-t"><span class="pill">Day 1</span>会用：环境 + 数据类型 + 客户端</div>
+    <ol>
+      <li><a href="#c01-install">环境与部署</a>：Docker Compose 一键起「大厂同构」环境（单机 + 主从 + 哨兵 + Cluster + 密码/ACL）</li>
+      <li><a href="#c02-datatype">八大数据结构与场景选型</a>：String/Hash/List/Set/ZSet + Bitmap/HLL/GEO/Stream，每种都有完整案例</li>
+      <li><a href="#c03-command">命令行与 Java 客户端实战</a>：redis-cli 高效用法、Jedis/Lettuce 连接池、Pipeline、批量效率实测</li>
+    </ol>
+    <p style="margin:8px 0 0;font-size:13px;color:var(--fg-soft)"><strong>产出</strong>：本地跑起一套可用的 Redis 环境，能独立完成常见业务建模。</p>
+  </div>
+  <div class="toc-day">
+    <div class="d-t"><span class="pill">Day 2</span>懂原理：为什么快 + 怎么不丢</div>
+    <ol>
+      <li><a href="#c04-thread">线程模型与 epoll</a>：单线程为什么扛 10 万 QPS、Redis 6.0 多线程改了什么、瓶颈到底在哪</li>
+      <li><a href="#c05-struct">底层数据结构源码级剖析</a>：SDS、listpack、quicklist、跳表、渐进式 rehash</li>
+      <li><a href="#c06-expire">过期删除与内存淘汰</a>：惰性 + 定期、8+2 种淘汰策略、LRU 近似实现、LFU 计数器</li>
+      <li><a href="#c07-persist">持久化</a>：RDB fork/COW、AOF 三策略、Multi-Part AOF、混合持久化选型</li>
+    </ol>
+    <p style="margin:8px 0 0;font-size:13px;color:var(--fg-soft)"><strong>产出</strong>：能把「Redis 为什么快 / 会不会丢数据」讲成一整套有因果链的答案。</p>
+  </div>
+  <div class="toc-day">
+    <div class="d-t"><span class="pill">Day 3</span>会架构：高可用与扩展</div>
+    <ol>
+      <li><a href="#c08-repl">主从复制与哨兵</a>：PSYNC 全量/增量、repl_backlog、哨兵选举、脑裂与 min-replicas</li>
+      <li><a href="#c09-cluster">Cluster 集群</a>：16384 槽、MOVED/ASK、Gossip、故障转移、8.4 原子槽迁移</li>
+    </ol>
+    <p style="margin:8px 0 0;font-size:13px;color:var(--fg-soft)"><strong>产出</strong>：能根据业务规模选型，能画出容灾架构并说明故障切换行为。</p>
+  </div>
+  <div class="toc-day">
+    <div class="d-t"><span class="pill">Day 4</span>会治问题：缓存治理与线上实战</div>
+    <ol>
+      <li><a href="#c10-cache">缓存三大问题与双写一致性</a>：穿透/击穿/雪崩 + Cache Aside / 延时双删 / Canal 方案</li>
+      <li><a href="#c11-lock">分布式锁与 Lua/Function</a>：SETNX 演进、Redisson 看门狗、Redlock 争议、Lua 原子性</li>
+      <li><a href="#c12-hotkey">大 Key / 热 Key 与线上治理</a>：京东 JDHotKey、得物内核改造、B站 HeavyKeeper 三大流派 + 真实故障复盘</li>
+      <li><a href="#c13-new8">Redis 8.x 新特性全景</a>：8.0 → 8.6 逐版本差异、HOTKEYS、LRM 淘汰、FT.HYBRID、Vector Set</li>
+    </ol>
+    <p style="margin:8px 0 0;font-size:13px;color:var(--fg-soft)"><strong>产出</strong>：能独立排查线上 Redis 抖动，能说清方案代价与兜底。</p>
+  </div>
+  <div class="toc-day">
+    <div class="d-t"><span class="pill">Day 5</span>会面试：表达与实战答题</div>
+    <ol>
+      <li><a href="#c14-java">Java 生态</a>：Jedis/Lettuce/Redisson/Spring Data Redis 选型与坑</li>
+      <li><a href="#c15-tuning">性能调优与可观测性</a>：慢日志、--latency、INFO 指标、监控告警、内核参数</li>
+      <li><a href="#c16-scenario">场景题实战手册</a>：秒杀、排行榜、延时队列、限流、UV 统计等 12 个大厂真题</li>
+      <li><a href="#c17-interview">面试八股深度问答</a>：100+ 题，分 4 个深度等级</li>
+      <li><a href="#c18-checklist">生产上线 Checklist 与进度追踪</a></li>
+    </ol>
+    <p style="margin:8px 0 0;font-size:13px;color:var(--fg-soft)"><strong>产出</strong>：一套能直接用在面试里的表述，以及一份可落地的生产规范。</p>
+  </div>
+</div>
+
+<h2 id="c00-3">如何使用这份教程</h2>
+<div class="grid2">
+  <div class="card">
+    <h4 style="margin-top:0">🎯 三种读法</h4>
+    <ul style="margin-bottom:0">
+      <li><strong>速成冲刺（面试前 3 天）</strong>：读每章的「一句话结论」+「面试深度问答」，跳过源码细节。</li>
+      <li><strong>标准 5 天</strong>：按 Day1→Day5 顺序，每节的命令都在本机敲一遍。</li>
+      <li><strong>问题驱动</strong>：线上遇到什么就跳到 <a href="#c12-hotkey">热 Key/大 Key</a>、<a href="#c10-cache">缓存治理</a>、<a href="#c15-tuning">调优</a>章节。</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4 style="margin-top:0">💡 每个知识点的结构</h4>
+    <ul style="margin-bottom:0">
+      <li><strong>结论先行</strong>：一段话给出最该记住的东西</li>
+      <li><strong>原理展开</strong>：带因果链，不是名词堆砌</li>
+      <li><strong>可运行案例</strong>：命令 / 配置 / Java 代码</li>
+      <li><strong>面试深度问答</strong>：折叠面板，标注难度等级</li>
+      <li><strong>大厂视角</strong>：真实故障复盘与 trade-off</li>
+    </ul>
+  </div>
+</div>
+
+<h3>难度标记说明</h3>
+<table>
+<thead><tr><th style="width:130px">标记</th><th>含义</th><th>对应岗位</th></tr></thead>
+<tbody>
+<tr><td><span class="lvl lv1">基础</span></td><td>初级必答，答不出直接挂</td><td>1-3 年</td></tr>
+<tr><td><span class="lvl lv2">进阶</span></td><td>中级分水岭，需要理解原理</td><td>3-5 年</td></tr>
+<tr><td><span class="lvl lv3">高级</span></td><td>高级 / 资深必备，需要架构视野</td><td>5-8 年</td></tr>
+<tr><td><span class="lvl lv4">专家</span></td><td>专家 / 面试官拉分题，考察 trade-off</td><td>8-10 年+</td></tr>
+</tbody>
+</table>
+
+<div class="box b-tip">
+  <div class="box-t">💡 一个建议</div>
+  <p>你已经有 12 年经验，最大的优势是<strong>能把原理和工程现实对上</strong>。所以学的时候不要停在「Redis 用跳表实现 ZSet」，要接着想「那我项目里哪个业务用了 ZSet？为什么当时用 ZSet 不用 MySQL 排序？如果数据涨到 1 亿会怎样？」——这种串联式思考，正是 10 年岗位面试官要听的。</p>
+</div>
+
+<h2 id="c00-4">环境准备（开始前 5 分钟）</h2>
+<p>本教程的案例默认你有一台能跑 Docker 的机器（Windows / macOS / Linux 均可）。如果你只想快速开始，Day1 会给出三种安装路径。</p>
+<pre><code class="lang-bash"><span class="cm"># 先确认 Docker 可用（Day1 会详细讲）</span>
+docker --version
+docker compose version
+
+<span class="cm"># 网络受限时的备选：直连官方镜像或使用国内源</span>
+docker pull redis:8.6</code></pre>
+
+<div class="box b-warn">
+  <div class="box-t">📌 关于版本</div>
+  <p>本教程以 <strong>Redis 8.6</strong>（2026-02-10 GA）为主要基线，同时标注 6.x / 7.x 的差异——因为很多公司生产还是 6.x/7.x，面试时能说清版本差异是加分项。<br>
+  如果你所在公司用的是 <strong>Valkey</strong>（Redis 7.2.4 分叉）或 <strong>KeyDB / Tair</strong>，核心原理一致，本教程内容同样适用。</p>
+</div>
+</section>

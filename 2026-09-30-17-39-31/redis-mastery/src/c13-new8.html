@@ -1,0 +1,467 @@
+<section id="c13-new8" class="anchor" data-title="Day4.4 · Redis 8.x 新特性全景">
+<div class="ch-meta">
+  <span class="ch-num">Day 4 · 第 4 节</span>
+  <span class="badge bg-blue">预计 70 分钟</span>
+  <span class="badge bg-red">差异化加分项</span>
+</div>
+<h1>Day4.4 · Redis 8.x 新特性全景（8.0 → 8.6）</h1>
+
+<div class="box b-tip">
+  <div class="box-t">一句话结论</div>
+  <p>Redis 8.x 是<strong>「模块内置化 + 检索一体化 + 可观测性增强」</strong>的大版本。对面试最有价值的三个点：<strong>① 8.0 把 Bloom/Cuckoo/JSON/TimeSeries 等模块直接内置（不再需要单独编译加载）；② 8.x 引入 Vector Set 与 FT.HYBRID，把 Redis 推向「AI 应用的向量检索层」；③ 8.2 的 CLUSTER SLOT-STATS + 8.4 的原子槽迁移 + 8.6 的 HOTKEYS 构成了一套完整的「集群可观测性与平滑扩缩容」能力。</strong></p>
+  <p>⚠️ 本节内容以官方发布说明为准。<strong>版本号和具体特性在不同的小版本可能有调整，面试时如果被追问细节，可以诚实说明「我了解的是 8.x 的大方向，具体小版本特性我会查 release notes」——这比编造细节好得多。</strong></p>
+</div>
+
+<h2 id="c13-1">1. Redis 版本演进脉络（一张图看懂）</h2>
+<table>
+<thead><tr><th style="width:14%">版本</th><th style="width:16%">大致时间</th><th>划时代的变化</th><th>面试关注度</th></tr></thead>
+<tbody>
+<tr><td><strong>4.0</strong></td><td>2017</td><td>模块系统（Modules）、<code class="inline">UNLINK</code> 异步删除、<code class="inline">PSYNC2</code>、LFU 淘汰</td><td>⭐⭐⭐ 大 key 治理基础</td></tr>
+<tr><td><strong>5.0</strong></td><td>2018</td><td><strong>Stream 数据结构</strong>（真正的消息队列）、Redis Cluster 改进</td><td>⭐⭐⭐⭐ 流处理场景</td></tr>
+<tr><td><strong>6.0</strong></td><td>2020</td><td><strong>I/O 多线程</strong>（网络读写多线程，命令执行仍单线程）、ACL、SSL、客户端缓存（Tracking）</td><td>⭐⭐⭐⭐⭐ 面试高频</td></tr>
+<tr><td><strong>6.2</strong></td><td>2021</td><td><code class="inline">COPY</code>、<code class="inline">GETDEL/GETEX</code>、<code class="inline">EXAT/PXAT</code>、<code class="inline">SMISMEMBER</code>、<code class="inline">ZRANGESTORE</code>；RDB 支持 LFU/LRU 元数据</td><td>⭐⭐⭐</td></tr>
+<tr><td><strong>7.0</strong></td><td>2022</td><td><strong>Multi-Part AOF</strong>、<strong>Functions</strong>、<strong>Sharded Pub/Sub</strong>、ACL v2、Listpack 替代 ziplist</td><td>⭐⭐⭐⭐⭐ 面试高频</td></tr>
+<tr><td><strong>7.2</strong></td><td>2023</td><td><code class="inline">WAITAOF</code>、<code class="inline">CLIENT NO-TOUCH</code>、性能优化</td><td>⭐⭐</td></tr>
+<tr><td><strong>7.4</strong></td><td>2024</td><td>哈希字段过期（<code class="inline">HEXPIRE</code> 系列）、<code class="inline">HGETEX</code>、内存优化</td><td>⭐⭐⭐ 新特性</td></tr>
+<tr><td><strong>8.0</strong></td><td>2025</td><td><strong>模块内置化</strong>（Bloom/JSON/TS/TopK/CMS 等直接可用）、<strong>Vector Set（beta）</strong>、<strong>HOTKEYS</strong>、<strong>LRM 淘汰策略</strong>、8 种新数据结构整合</td><td>⭐⭐⭐⭐⭐ 新版本加分项</td></tr>
+<tr><td><strong>8.2</strong></td><td>2025</td><td><code class="inline">CLUSTER SLOT-STATS</code>（槽位级统计）、<strong>FT.HYBRID</strong>（向量 + 全文混合检索）</td><td>⭐⭐⭐⭐</td></tr>
+<tr><td><strong>8.4</strong></td><td>2025/2026</td><td><strong>原子槽迁移</strong>（Atomic Slot Migration）、支持零停机扩缩容</td><td>⭐⭐⭐⭐ 集群运维</td></tr>
+<tr><td><strong>8.6</strong></td><td>2026-02</td><td><strong>HOTKEYS 增强</strong>、mTLS 自动认证、TimeSeries NaN、XADD 幂等（IDMP）</td><td>⭐⭐⭐⭐ 最新基线</td></tr>
+</tbody>
+</table>
+
+<div class="box b-warn">
+  <div class="box-t">⚠️ 面试务实提醒</div>
+  <p>面试官问「你用过 Redis 什么版本」，<strong>诚实回答很重要</strong>。如果你的生产环境是 6.x/7.x（这是大多数公司的现状），就大方说「生产是 7.2，我关注过 8.x 的新特性但还没在生产验证」。<br>
+  <strong>然后补一句加分的话</strong>：「不过我注意到 8.x 有几个特性和我们的痛点直接相关——比如 8.6 的 HOTKEYS 能原生做热 key 检测，我们目前是靠客户端埋点，如果升级可以省掉这部分自研成本。」<br>
+  <strong>这种回答既诚实，又展示了你对新技术的关注和与业务的结合能力。</strong></p>
+</div>
+
+<h2 id="c13-2">2. Redis 8.0：模块内置化（最有实际价值的变化）</h2>
+
+<div class="box b-big">
+  <div class="box-t">✅ 从「自己编译模块」到「开箱即用」</div>
+  <p><strong>过去（7.x 及以前）</strong>：想用布隆过滤器、JSON、时序数据，需要：</p>
+  <ol>
+  <li>单独下载 RedisBloom / RedisJSON / RedisTimeSeries 源码；</li>
+  <li>编译成 <code class="inline">.so</code> 文件；</li>
+  <li>在 <code class="inline">redis.conf</code> 里 <code class="inline">loadmodule</code> 加载；</li>
+  <li><strong>跟着 Redis 版本升级时，还要重新编译模块</strong>（版本兼容性是持续的痛苦来源）。</li>
+  </ol>
+  <p><strong>Redis 8.0 之后</strong>：这些模块<strong>直接内置</strong>，安装完 Redis 就有全部命令，<strong>不需要 loadmodule</strong>。</p>
+  <p><strong>内置的数据结构/能力（8.0）</strong>：</p>
+  <table style="margin:8px 0">
+  <thead><tr><th style="width:22%">能力</th><th>命令前缀</th><th>典型用途</th></tr></thead>
+  <tbody>
+  <tr><td><strong>JSON</strong></td><td><code class="inline">JSON.SET/GET/ARRAPPEND</code></td><td>存对象、局部更新 JSON 字段（不用整体取出再写回）</td></tr>
+  <tr><td><strong>Bloom Filter</strong></td><td><code class="inline">BF.RESERVE/ADD/EXISTS</code></td><td>缓存穿透拦截</td></tr>
+  <tr><td><strong>Cuckoo Filter</strong></td><td><code class="inline">CF.ADD/EXISTS/DEL</code></td><td><strong>支持删除</strong>的布隆过滤器</td></tr>
+  <tr><td><strong>Count-Min Sketch</strong></td><td><code class="inline">CMS.INCRBY/QUERY</code></td><td>频次估计（热 key 发现的理论基础）</td></tr>
+  <tr><td><strong>Top-K</strong></td><td><code class="inline">TOPK.RESERVE/ADD/QUERY</code></td><td>近似 Top-K 统计（热 key、热搜榜）</td></tr>
+  <tr><td><strong>t-digest</strong></td><td><code class="inline">TDIGEST.ADD/QUANTILE</code></td><td>分位数统计（P50/P99 延迟统计）</td></tr>
+  <tr><td><strong>TimeSeries</strong></td><td><code class="inline">TS.CREATE/ADD/RANGE</code></td><td>时序数据（监控指标、IoT）</td></tr>
+  <tr><td><strong>Vector Set</strong>（新）</td><td><code class="inline">VADD/VSIM</code></td><td>向量相似度检索（AI 应用）</td></tr>
+  </tbody>
+  </table>
+  <p><strong>面试价值</strong>：这是能体现你「跟进新技术」的具体证据。而且这些模块和 Day4.1/4.3 的内容直接对应——布隆过滤器解决穿透、TopK/CMS 用于热 key 发现。</p>
+</div>
+
+<pre><code class="lang-bash"><span class="cm">########## Redis 8.x 内置模块实战 ##########</span>
+
+<span class="cm"># ===== 1. JSON：局部更新，不用整体读改写 =====</span>
+JSON.SET user:1001 $ <span class="st">'{"name":"张三","age":30,"tags":["java","redis"]}'</span>
+
+<span class="cm"># 只改 age 字段（原子操作，不需要把整个 JSON 取出来再写回）</span>
+JSON.SET user:1001 $.age 31
+
+<span class="cm"># 往数组追加</span>
+JSON.ARRAPPEND user:1001 $.tags <span class="st">'"mysql"'</span>
+
+<span class="cm"># 只取需要的字段（减少网络传输）</span>
+JSON.GET user:1001 $.name $.age
+
+<span class="cm"># 条件查询（比取出来在应用层过滤高效）</span>
+JSON.GET user:1001 <span class="st">'$..tags'</span>
+
+<span class="cm"># ===== 2. Bloom：穿透拦截 =====</span>
+BF.RESERVE sku:filter 0.001 10000000   <span class="cm"># 误判率 0.1%，容量 1000 万</span>
+BF.MADD sku:filter sku001 sku002 sku003
+BF.EXISTS sku:filter sku001            <span class="cm"># 1</span>
+BF.EXISTS sku:filter sku999            <span class="cm"># 0 → 一定不存在，直接返回</span>
+
+<span class="cm"># ===== 3. TopK：近似统计热搜/热 key =====</span>
+TOPK.RESERVE hotsearch 10              <span class="cm"># 只保留 Top 10</span>
+TOPK.ADD hotsearch <span class="st">"redis教程"</span> <span class="st">"java面试"</span> <span class="st">"redis教程"</span>
+TOPK.QUERY hotsearch <span class="st">"redis教程"</span>      <span class="cm"># 1 = 在 Top-K 中</span>
+TOPK.LIST hotsearch                    <span class="cm"># 列出当前 Top-K</span>
+
+<span class="cm"># ===== 4. t-digest：分位数统计（延迟监控）=====</span>
+TDIGEST.CREATE latency
+TDIGEST.ADD latency 12 15 18 120 200 15 18
+TDIGEST.QUANTILE latency 0.5 0.95 0.99   <span class="cm"># P50 / P95 / P99</span>
+
+<span class="cm"># ===== 5. TimeSeries：时序数据 =====</span>
+TS.CREATE temperature RETENTION 86400000   <span class="cm"># 保留 1 天</span>
+TS.ADD temperature * 25.3                  <span class="cm"># * = 当前时间戳</span>
+TS.RANGE temperature - +                   <span class="cm"># 查询全部</span>
+TS.RANGE temperature - + AGGREGATION avg 60000   <span class="cm"># 按分钟聚合平均</span></code></pre>
+
+<h2 id="c13-3">3. Redis 8.0：Vector Set 与向量检索</h2>
+
+<div class="box b-big">
+  <div class="box-t">✅ Vector Set：Redis 进军 AI 应用层</div>
+  <p><strong>背景</strong>：RAG（检索增强生成）、语义搜索、推荐系统都需要「<strong>向量相似度检索</strong>」——把文本/图片编码成向量（embedding），然后找最相似的 Top-K。</p>
+  <p>传统做法要用专门的向量数据库（Milvus / Qdrant / Pinecone / pgvector）。<strong>Vector Set 让 Redis 原生支持这个能力</strong>——好处是「向量和你的业务数据在同一个 Redis 里」，不需要维护两套系统。</p>
+  <p><strong>核心命令</strong>：</p>
+  <ul>
+  <li><code class="inline">VADD key [REDUCE dim] element vector [SETATTR json]</code> — 添加向量</li>
+  <li><code class="inline">VSIM key query [COUNT n] [WITHSCORES] [WITHSCORES] [FILTER expr]</code> — 相似度检索</li>
+  <li><code class="inline">VDIM key</code> / <code class="inline">VCARD key</code> / <code class="inline">VREM key element</code> / <code class="inline">VLINKS</code> / <code class="inline">VINFO</code> — 元信息与维护</li>
+  </ul>
+  <p><strong>特性与限制</strong>：</p>
+  <ul>
+  <li>支持 <strong>HNSW</strong>（分层可导航小世界图）索引——近似最近邻搜索，速度快。</li>
+  <li>支持<strong>量化压缩</strong>（如 <code class="inline">Q8</code> 把 float32 压到 int8），大幅降低内存。</li>
+  <li><strong>支持属性过滤</strong>（<code class="inline">FILTER</code>），能在向量检索时同时按业务属性筛选。</li>
+  <li><strong>8.0 是 beta 状态</strong>——API 可能变化，生产使用需谨慎评估。</li>
+  <li>相比专业向量库，在超大规模（亿级以上）、复杂索引类型上仍有差距。</li>
+  </ul>
+</div>
+
+<pre><code class="lang-bash"><span class="cm">########## Vector Set 实战 ##########</span>
+
+<span class="cm"># 添加向量（element 是元素名，后面是向量值）</span>
+VADD doc:vectors <span class="st">"doc1"</span> VALUES 3 0.1 0.2 0.3 SETATTR <span class="st">'{"title":"Redis入门"}'</span>
+VADD doc:vectors <span class="st">"doc2"</span> VALUES 3 0.9 0.8 0.7 SETATTR <span class="st">'{"title":"Redis集群"}'</span>
+VADD doc:vectors <span class="st">"doc3"</span> VALUES 3 0.15 0.25 0.35 SETATTR <span class="st">'{"title":"Redis持久化"}'</span>
+
+<span class="cm"># 相似度检索：找与 query 向量最像的 2 个</span>
+VSIM doc:vectors VALUES 3 0.12 0.22 0.32 COUNT 2 WITHSCORES
+<span class="cm"># 返回：doc1 (最像), doc3</span>
+
+<span class="cm"># 带属性过滤</span>
+VSIM doc:vectors VALUES 3 0.12 0.22 0.32 FILTER <span class="st">'.title == "Redis入门"'</span> COUNT 1
+
+<span class="cm"># 量化压缩：把 float32 压成 int8，内存降到 1/4</span>
+VADD doc:vectors Q8 <span class="st">"doc4"</span> VALUES 3 0.5 0.6 0.7
+
+<span class="cm"># 查看信息</span>
+VINFO doc:vectors
+VDIM doc:vectors     <span class="cm"># 维度</span>
+VCARD doc:vectors    <span class="cm"># 元素数</span>
+
+<span class="cm">########## RAG 场景的完整数据流（面试可讲）##########</span>
+<span class="cm"># ① 文档入库：文本 → embedding 模型 → 向量 → VADD 存入 Redis</span>
+<span class="cm"># ② 用户提问：问题 → embedding → VSIM 找最相似的 Top-K 文档片段</span>
+<span class="cm"># ③ 把检索到的片段作为上下文，拼进 prompt 交给 LLM</span>
+<span class="cm"># ④ LLM 生成答案返回</span>
+<span class="cm">#</span>
+<span class="cm"># Redis 在这里的优势：向量检索 + 会话上下文（会话存 Redis）+ 结果缓存（缓存 LLM 回答）</span>
+<span class="cm"># 都能用同一个 Redis 完成，减少系统复杂度</span></code></pre>
+
+<div class="box b-tip">
+  <div class="box-t">💡 面试话术：Redis 在 AI 时代的定位</div>
+  <p>「Redis 8.x 的 Vector Set 体现了一个方向——<strong>Redis 从『缓存/数据结构服务』向『AI 应用的记忆层与检索层』扩展</strong>。</p>
+  <p>在 RAG 场景里，Redis 能承担三个角色：① <strong>向量检索</strong>（VSIM 找相关文档）；② <strong>会话记忆</strong>（多轮对话的上下文）；③ <strong>结果缓存</strong>（缓存 LLM 回答，降低成本）。<strong>用一个 Redis 解决三个问题，比引入专业的向量库 + 会话存储 + 缓存三层要简单。</strong></p>
+  <p>但我会诚实地评估：<strong>如果向量规模到了亿级、或者需要复杂的多路召回和重排，专业向量库（Milvus 等）仍然更合适</strong>。Redis 的 Vector Set 更适合『中小规模、且已经重度使用 Redis』的场景。」</p>
+</div>
+
+<h2 id="c13-4">4. Redis 8.x：可观测性与运维增强</h2>
+
+<div class="box b-big">
+  <div class="box-t">✅ 8.6 HOTKEYS：原生热 key 检测（Day4.3 的官方答案）</div>
+  <p><strong>解决了什么</strong>：以前找热 key 要靠 <code class="inline">--hotkeys</code>（<strong>必须先切到 LFU 策略</strong>）或者自己写客户端埋点。8.x 提供了<strong>服务端原生的热 key 检测</strong>，不依赖淘汰策略。</p>
+  <pre style="margin:8px 0"><code class="lang-bash">HOTKEYS START     <span class="cm"># 开始采样统计</span>
+<span class="cm"># ... 让业务运行一段时间 ...</span>
+HOTKEYS GET       <span class="cm"># 获取当前热 key 列表（含访问计数）</span>
+HOTKEYS STOP      <span class="cm"># 停止统计</span>
+HOTKEYS RESET     <span class="cm"># 重置统计</span>
+
+<span class="cm"># 配置</span>
+<span class="kw">hotkeys-enabled</span> <span class="st">yes</span>
+<span class="kw">hotkeys-sampling-factor</span> <span class="nu">10</span></code></pre>
+  <p><strong>面试价值</strong>：能说出「8.6 有原生的 HOTKEYS 命令，我们目前用的是客户端埋点，后面可以考虑用原生能力替代自研」——展示你既了解现状也关注演进方向。</p>
+</div>
+
+<div class="box b-big">
+  <div class="box-t">✅ 8.2 CLUSTER SLOT-STATS：找到「热槽」</div>
+  <p><strong>解决了什么</strong>：Cluster 扩容时，怎么知道该迁哪些槽？只知道「某个节点 CPU 高」，但不知道是哪个槽造成的。</p>
+  <pre style="margin:8px 0"><code class="lang-bash"><span class="cm"># 开启槽位统计</span>
+CONFIG SET cluster-slot-stats-enabled yes
+
+<span class="cm"># 按 CPU 使用排序，找出最耗 CPU 的槽 ⭐</span>
+CLUSTER SLOT-STATS ORDERBY CPU LIMIT 10
+
+<span class="cm"># 其他排序维度</span>
+CLUSTER SLOT-STATS ORDERBY KEY-COUNT LIMIT 10    <span class="cm"># 按 key 数量</span>
+CLUSTER SLOT-STATS ORDERBY MEMORY  LIMIT 10      <span class="cm"># 按内存</span>
+CLUSTER SLOT-STATS ORDERBY NETWORK LIMIT 10      <span class="cm"># 按网络</span>
+
+<span class="cm"># 输出示例：
+# 1) 1) (integer) 866         ← 槽号
+#    2) 1) "key-count"        ← 统计维度
+#       2) (integer) 152300
+#    3) 1) "cpu-usec"</span>
+    <span class="cm">#    2) (integer) 8943210</span></code></pre>
+  <p><strong>面试关键洞察</strong>：<strong>「先找热槽，再找槽内热 key」</strong>是一个非常有价值的排查路径：</p>
+  <ol style="margin-bottom:0">
+  <li><code class="inline">CLUSTER SLOT-STATS ORDERBY CPU</code> → 定位到最热的槽。</li>
+  <li><code class="inline">HOTKEYS</code>（在对应节点上）→ 定位到槽内的具体热 key。</li>
+  <li>针对具体热 key 做治理（本地缓存/多副本/业务打散）。</li>
+  </ol>
+  <p><strong>⚠️ 但要做对判断</strong>：如果热槽里是「一个热 key」造成的，<strong>迁移槽解决不了问题</strong>（热 key 迁到新节点，新节点照样被打满）。<strong>只有「一大堆不同的热 key」才适合靠迁移分摊。</strong>这个判断能体现你真的理解了原理。</p>
+</div>
+
+<div class="box b-big">
+  <div class="box-t">✅ 8.4 原子槽迁移（Atomic Slot Migration）：平滑扩缩容</div>
+  <p><strong>传统槽迁移的问题</strong>（Day3.2 讲过）：</p>
+  <ul>
+  <li>逐个 key <code class="inline">MIGRATE</code>，慢（百万 key 要几十分钟）。</li>
+  <li><code class="inline">MIGRATE</code> 阻塞源和目标节点主线程。</li>
+  <li>中间状态（槽一半在源、一半在目标）需要靠 ASK 重定向维持，期间大量重定向影响性能。</li>
+  <li>迁移中断会留下不一致的中间状态，需要人工介入。</li>
+  </ul>
+  <p><strong>8.4 的原子槽迁移</strong>：</p>
+  <ul>
+  <li>把「一个槽的迁移」变成一个<strong>原子操作</strong>——要么全部成功，要么完全回滚，<strong>不留中间状态</strong>。</li>
+  <li>使用类似「全量快照 + 增量同步 + 短暂停顿切换」的机制（类似主从复制的思路）。</li>
+  <li>相关命令：<code class="inline">CLUSTER MIGRATION</code>。</li>
+  <li><strong>收益</strong>：① 迁移速度大幅提升；② 迁移期间对业务影响极小；③ 支持<strong>零停机扩缩容</strong>；④ 失败可自动重试/回滚。</li>
+  </ul>
+  <p><strong>为什么这个特性重要</strong>：Cassandra/DynamoDB 这类系统早就支持「自动分片再平衡」，Redis Cluster 一直在这方面比较弱（需要人工用 <code class="inline">redis-cli --cluster reshard</code> 慢慢迁）。<strong>原子槽迁移让 Redis Cluster 的弹性能力追上来了。</strong></p>
+</div>
+
+<div class="box b-big">
+  <div class="box-t">✅ 8.x 其他值得知道的变化</div>
+  <table style="margin:8px 0">
+  <thead><tr><th style="width:22%">特性</th><th>版本</th><th>价值</th></tr></thead>
+  <tbody>
+  <tr><td><strong>LRM 淘汰策略</strong>（<code class="inline">allkeys-lrm</code> / <code class="inline">volatile-lrm</code>）</td><td>8.0</td><td>「最近最少使用 + 频率」的混合策略，比单独 LRU/LFU 更适应复杂访问模式</td></tr>
+  <tr><td><strong>FT.HYBRID</strong></td><td>8.2</td><td>向量检索 + 全文检索混合，一条命令完成「语义 + 关键词」的混合召回（RAG 场景很实用）</td></tr>
+  <tr><td><strong>mTLS 自动认证</strong></td><td>8.6</td><td>双向 TLS 的客户端证书自动校验，简化集群内的安全配置</td></tr>
+  <tr><td><strong>XADD 幂等</strong>（<code class="inline">IDMP</code> / <code class="inline">IDMPAUTO</code>）</td><td>8.6</td><td>Stream 支持「生产者幂等」——同一个生产者的重复消息不会重复写入。<strong>解决消息队列场景的重复投递问题</strong></td></tr>
+  <tr><td><strong>TimeSeries NaN</strong></td><td>8.6</td><td>时序数据支持 NaN（空值），方便处理「数据缺失」的时段</td></tr>
+  <tr><td><strong>哈希字段级过期增强</strong></td><td>7.4 → 8.x</td><td><code class="inline">HEXPIRE/HPEXPIRE/HEXPIREAT</code> 系列，可以为 Hash 的单个 field 设置过期时间</td></tr>
+  <tr><td><strong>ACL 增强</strong></td><td>7.0 → 8.x</td><td>支持按 key 模式、命令、频道更细粒度的权限控制</td></tr>
+  </tbody>
+  </table>
+</div>
+
+<h2 id="c13-5">5. 版本选型：生产上该怎么选</h2>
+
+<div class="box b-big">
+  <div class="box-t">✅ 版本选型的决策框架（面试能答出这个就很好）</div>
+  <table style="margin:8px 0">
+  <thead><tr><th style="width:16%">考虑因素</th><th>选择倾向</th></tr></thead>
+  <tbody>
+  <tr><td><strong>稳定性优先</strong></td><td>选「已被大规模验证」的版本，通常是<strong>上一个 major 的最新小版本</strong>（如现在选 7.4 而不是 8.6）</td></tr>
+  <tr><td><strong>需要新特性</strong></td><td>如果确实需要 Vector Set / 原子槽迁移，评估后用 8.x</td></tr>
+  <tr><td><strong>云托管</strong></td><td><strong>跟着云厂商走</strong>——云服务商支持的版本是经过他们验证和运维的，比自己搭更稳</td></tr>
+  <tr><td><strong>社区版 vs 商业版</strong></td><td>⚠️ <strong>重要背景</strong>：Redis 7.4 起改成了 RSALv2/SSPLv1 许可（不再完全是 BSD）。这导致 Linux 基金会分叉出了 <strong>Valkey</strong>（基于 7.2.4）。<strong>很多公司在评估或已经迁到 Valkey。</strong></td></tr>
+  <tr><td><strong>已有系统</strong></td><td><strong>升级收益 vs 升级风险</strong>。如果 6.x/7.x 稳定运行且没有需要的特性，<strong>不升也是一种正确决策</strong>——这句话在面试里很加分</td></tr>
+  </tbody>
+  </table>
+</div>
+
+<div class="box b-warn">
+  <div class="box-t">⚠️ 关于 Redis 许可证与 Valkey（重要背景知识）</div>
+  <p><strong>事件背景</strong>：</p>
+  <ul>
+  <li>2024 年 3 月，Redis Ltd. 宣布从 BSD-3-Clause 改为 <strong>RSALv2 / SSPLv1</strong> 双许可——这两个许可<strong>不是 OSI 认可的开源许可</strong>，主要限制是「不能把 Redis 作为托管服务出售」。</li>
+  <li>这引发社区强烈反应。<strong>Linux 基金会随后将 Redis 7.2.4 分叉为 Valkey</strong>，由 AWS、Google Cloud、Oracle、Ericsson 等公司支持，保持 BSD 许可。</li>
+  <li><strong>2025 年 5 月，Redis 宣布 Redis 8.0 重新采用 AGPLv3 许可</strong>（AGPL 是 OSI 认可的开源许可），并重新加入部分开源社区组织。</li>
+  </ul>
+  <p><strong>对工程师的实际影响</strong>：</p>
+  <ul>
+  <li><strong>技术层面：Valkey 与 Redis 高度兼容</strong>——命令、协议、数据结构基本一致（因为同源）。所以本教程的知识<strong>对 Valkey 同样适用</strong>。</li>
+  <li><strong>选型层面</strong>：如果用云厂商的托管服务，可能已经是 Valkey（如 AWS ElastiCache 提供 Valkey 选项）。<strong>面试时知道这个背景，能说明你关注生态而不只是技术细节。</strong></li>
+  <li><strong>面试话术</strong>：「我关注到 Redis 的许可证变更和 Valkey 分叉这件事。<strong>从工程师角度，好消息是两者技术同源、命令兼容，所以底层原理（数据结构、持久化、集群）是通用的，学习成本很低。</strong>选型上主要看：① 是否依赖 Redis 商业版特性（如某些高级模块）；② 云厂商支持哪个；③ 公司对开源许可的合规要求。」</li>
+  </ul>
+</div>
+
+<h2 id="c13-6">6. 把 8.x 新特性映射到你的项目（面试加分点）</h2>
+
+<table>
+<thead><tr><th style="width:26%">8.x 特性</th><th>解决的痛点</th><th>面试时的表述</th></tr></thead>
+<tbody>
+<tr>
+  <td><strong>BF.* 布隆过滤器内置</strong></td>
+  <td>穿透拦截需要额外引入 RedisBloom</td>
+  <td>「我们以前用 Guava 的 BloomFilter 放在应用层，重启就要重建。如果升级到 8.x，可以用 Redis 原生的 BF，多实例共享、持久化不用自己管。」</td>
+</tr>
+<tr>
+  <td><strong>HOTKEYS 原生热 key 检测</strong></td>
+  <td>热 key 发现要靠客户端埋点自研</td>
+  <td>「我们的热 key 监控是自己写的客户端埋点 + Kafka 聚合。8.6 的 HOTKEYS 可以省掉这套自研成本，而且服务端采样比客户端聚合更准确。」</td>
+</tr>
+<tr>
+  <td><strong>CLUSTER SLOT-STATS 槽位统计</strong></td>
+  <td>扩容时不知道迁哪些槽</td>
+  <td>「以前扩容只能凭经验估，或者全量对比。SLOT-STATS 能直接按 CPU/内存/网络排序看哪些槽最重，迁移决策有数据支撑了。」</td>
+</tr>
+<tr>
+  <td><strong>原子槽迁移</strong></td>
+  <td>传统迁移慢、有中间状态、需人工介入</td>
+  <td>「我们的集群扩缩容要选在凌晨低峰、分批发、人工盯着。原子槽迁移能做到零停机平滑扩缩容，这是运维效率的质变。」</td>
+</tr>
+<tr>
+  <td><strong>Hash field 级过期（7.4+）</strong></td>
+  <td>整个 Hash 只能整体过期</td>
+  <td>「我们有个场景是『用户维度的多个限流计数器』放在一个 Hash 里，但每个计数器的窗口不同。以前只能拆成多个 key，现在可以用 HEXPIRE 精细化控制。」</td>
+</tr>
+<tr>
+  <td><strong>Vector Set</strong></td>
+  <td>AI 场景要额外维护向量库</td>
+  <td>「如果做 RAG，Redis 可以同时承担向量检索、会话记忆、结果缓存三个角色，减少系统复杂度。但我会评估规模——亿级向量还是用专业向量库。」</td>
+</tr>
+<tr>
+  <td><strong>XADD 幂等（IDMP）</strong></td>
+  <td>Stream 作为 MQ 时的重复投递</td>
+  <td>「用 Stream 做 MQ 时，生产者重试会导致重复消息，消费者必须自己做幂等。IDMP 把幂等能力下沉到了 Redis 层，简化了消费者逻辑。」</td>
+</tr>
+</tbody>
+</table>
+
+<h2 id="c13-7">面试深度问答</h2>
+
+<details class="qa"><summary>Redis 8.x 有哪些重要新特性？<span class="lvl lv2">进阶</span></summary>
+<div class="qa-b">
+<p>按「能力类别」组织回答，比按版本罗列更好：</p>
+<p><strong>一、模块内置化（8.0，最实用的变化）</strong></p>
+<p>Bloom、Cuckoo、Count-Min Sketch、TopK、t-digest、JSON、TimeSeries 等从「需要单独编译加载模块」变成<strong>开箱即用</strong>。这解决了长期以来的版本兼容痛点。</p>
+<p><strong>二、AI / 检索能力</strong></p>
+<ul>
+<li><strong>Vector Set（8.0 beta）</strong>：<code class="inline">VADD/VSIM</code> 支持 HNSW 索引的向量相似度检索，支持量化压缩和属性过滤。让 Redis 能参与 RAG、语义搜索场景。</li>
+<li><strong>FT.HYBRID（8.2）</strong>：向量 + 全文的混合检索。</li>
+</ul>
+<p><strong>三、可观测性与运维</strong></p>
+<ul>
+<li><strong>HOTKEYS（8.0/8.6 增强）</strong>：原生热 key 检测，<strong>不再要求 LFU 策略</strong>。</li>
+<li><strong>CLUSTER SLOT-STATS（8.2）</strong>：按槽统计 CPU/内存/网络/key 数，用于定位热槽和指导扩容。</li>
+<li><strong>原子槽迁移（8.4）</strong>：槽迁移变成原子操作，支持零停机扩缩容。</li>
+</ul>
+<p><strong>四、其他</strong></p>
+<ul>
+<li><strong>LRM 淘汰策略</strong>（8.0）：LRU + LFU 混合。</li>
+<li><strong>XADD 幂等 IDMP（8.6）</strong>：生产者幂等，解决 Stream 的重复投递。</li>
+<li><strong>mTLS 自动认证（8.6）</strong>、<strong>TimeSeries NaN（8.6）</strong>。</li>
+</ul>
+<p><strong>加分收尾</strong>：「从趋势看，Redis 8.x 在做两件事：<strong>一是『把生态收进来』</strong>（模块内置，减少拼装成本）；<strong>二是『向 AI 和数据平台延伸』</strong>（向量检索、混合检索、时序数据）。<strong>后者是战略级的方向变化——Redis 不再只是缓存。</strong>」</p>
+</div></details>
+
+<details class="qa"><summary>Vector Set 是什么？能替代专业向量数据库吗？<span class="lvl lv4">专家</span></summary>
+<div class="qa-b">
+<p><strong>是什么</strong>：Redis 8.0 引入的原生向量集合数据类型。用 <code class="inline">VADD</code> 添加向量（可选带属性），用 <code class="inline">VSIM</code> 做近似最近邻检索。底层用 <strong>HNSW</strong> 索引，支持量化压缩（如 Q8 把 float32 压到 int8）。</p>
+<p><strong>优势</strong>：</p>
+<ul>
+<li><strong>与业务数据同库</strong>：向量、会话、缓存都在 Redis，不需要维护两套系统。</li>
+<li><strong>支持属性过滤</strong>：<code class="inline">VSIM ... FILTER '.category == "tech"'</code>，能在检索时同时做业务筛选。</li>
+<li><strong>运维成本低</strong>：如果公司已经重度使用 Redis，不需要引入新的技术栈。</li>
+</ul>
+<p><strong>局限（要说清楚，才显得客观）</strong>：</p>
+<ul>
+<li><strong>8.0 是 beta</strong>，API 可能变化，生产使用有风险。</li>
+<li><strong>规模上限</strong>：Redis 是内存型，亿级向量的内存成本高。专业向量库有磁盘索引、更激进的压缩。</li>
+<li><strong>功能深度</strong>：专业向量库支持多种索引（IVF、PQ）、更复杂的过滤、分布式检索、更强的召回调优能力。</li>
+<li><strong>生态</strong>：专业库有更成熟的与 LangChain / LlamaIndex 等框架的集成。</li>
+</ul>
+<p><strong>选型判断</strong>：</p>
+<ul>
+<li><strong>用 Redis Vector Set</strong>：中小规模（百万级以内）、已经重度用 Redis、需要「向量 + 业务数据」协同、想减少系统复杂度。</li>
+<li><strong>用专业向量库</strong>：亿级以上、需要复杂索引/重排、对召回率有很高要求、团队有能力维护。</li>
+</ul>
+<p><strong>面试话术</strong>：「我会把它理解为『<strong>Redis 把向量检索作为一个内置能力提供，而不是要取代专业向量库</strong>』。对大部分中小规模的 AI 应用，用 Redis 一个组件解决『检索 + 会话 + 缓存』是性价比最高的；但对大规模、高要求的场景，专业库的深度优势还是明显的。<strong>关键是按规模和需求判断，而不是非此即彼。</strong>」</p>
+</div></details>
+
+<details class="qa"><summary>你们公司用的 Redis 什么版本？如果升级你会考虑什么？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p>这是「务实性」考察。诚实 + 有方法论是得分的核心。</p>
+<p><strong>第一步：诚实说明现状</strong></p>
+<p>「我们生产是 Redis 7.2」（或你的实际版本）。<strong>不要编造用了 8.x。</strong></p>
+<p><strong>第二步：说清不升级的理由（这是加分的）</strong></p>
+<p>「暂时没升级的原因有三个：</p>
+<ul>
+<li><strong>收益不足</strong>：我们目前遇到的痛点（热 key 发现、大 key 治理）都能用现有版本 + 自研方案解决，8.x 的特性是『锦上添花』而非『解决卡脖子问题』。</li>
+<li><strong>风险考虑</strong>：Redis 是大促核心链路，升级涉及全链路压测、客户端兼容性验证（Lettuce/Jedis 版本）、运维流程改造。<strong>没有明确收益的升级是在引入风险。</strong></li>
+<li><strong>我们做了版本冻结</strong>：大促前后 2 周禁止任何中间件版本变更，这是铁律。」</li>
+</ul>
+<p><strong>第三步：说清如果要升级会怎么做（展示方法论）</strong></p>
+<ol>
+<li><strong>明确目标</strong>：升级是为了哪个具体特性？解决什么痛点？（比如「为了 HOTKEYS 替代自研埋点」）<strong>没有目标不升级。</strong></li>
+<li><strong>兼容性评估</strong>：命令兼容性（新版本弃用的命令）、客户端兼容（Lettuce/Jedis/Redisson 版本）、持久化格式兼容（RDB 版本）、模块依赖。</li>
+<li><strong>搭建影子环境</strong>：用灰度/影子流量验证新版本，对比延迟、内存、CPU 指标。</li>
+<li><strong>分阶段灰度</strong>：先非核心业务 → 再核心业务的一个分片 → 逐步放量。<strong>每阶段有明确的回滚预案。</strong></li>
+<li><strong>回滚方案</strong>：保留旧版本实例、数据格式双向兼容、准备好切回流程。</li>
+<li><strong>观察期</strong>：升级后至少观察一个完整业务周期（含峰值）。</li>
+</ol>
+<p><strong>第四步：加分的一句</strong></p>
+<p>「其实很多公司在升级 Redis 版本时，会<strong>顺便评估 Valkey</strong>——因为技术同源、命令兼容，迁移成本低，而且许可是 BSD。<strong>所以我做版本规划时会把『Redis 8.x 还是 Valkey』作为一个并列选项一起评估，而不是默认只有升级这一条路。</strong>」</p>
+</div></details>
+
+<details class="qa"><summary>CLUSTER SLOT-STATS 怎么用？扩容时怎么决定迁哪些槽？<span class="lvl lv4">专家</span></summary>
+<div class="qa-b">
+<p><strong>命令</strong>：</p>
+<pre style="margin:8px 0"><code class="lang-bash">CONFIG SET cluster-slot-stats-enabled yes    <span class="cm"># 先开启</span>
+CLUSTER SLOT-STATS ORDERBY CPU LIMIT 10
+CLUSTER SLOT-STATS ORDERBY MEMORY LIMIT 10
+CLUSTER SLOT-STATS ORDERBY KEY-COUNT LIMIT 10
+CLUSTER SLOT-STATS ORDERBY NETWORK LIMIT 10</code></pre>
+<p><strong>扩容决策的正确流程（关键在于「判断根因」）</strong>：</p>
+<ol>
+<li><strong>先看是哪个节点过载</strong>：通过监控确认是「单节点过载」还是「整体过载」。</li>
+<li><strong>再看是哪些槽造成过载</strong>：<code class="inline">CLUSTER SLOT-STATS ORDERBY CPU</code>。如果是「很多槽的 CPU 都较高」→ 说明是<strong>整体负载</strong>问题，扩容能解决（把槽打散到更多节点）。</li>
+<li><strong>但如果发现「一两个槽的 CPU 极高」</strong>——<strong>这时必须继续往下查</strong>（这一步是分水岭）：</li>
+</ol>
+<pre style="margin:8px 0"><code class="lang-bash"><span class="cm"># 在过载节点上检查这个热槽里的 key 分布</span>
+CLUSTER COUNTKEYSINSLOT 866          <span class="cm"># 槽内有多少 key</span>
+CLUSTER GETKEYSINSLOT 866 20         <span class="cm"># 取 20 个 key 看看</span>
+
+<span class="cm"># 用 HOTKEYS 定位槽内的具体热 key（8.x）</span>
+HOTKEYS START
+HOTKEYS GET</code></pre>
+<ol start="4">
+<li><strong>做出关键判断</strong>：
+<ul>
+<li><strong>情况 A：槽内是「一堆不同的热 key」</strong> → <strong>迁移槽有效</strong>。把这些槽分散到新节点，负载就摊开了。用 <code class="inline">--cluster reshard</code> 或 8.4 的原子槽迁移。</li>
+<li><strong>情况 B：槽内是「某一个超级热 key」</strong> → <strong>迁移槽无效！</strong> 因为这个 key 无论迁到哪个节点都会打满那个节点。<strong>必须做业务治理</strong>：本地缓存、多副本 key、业务层打散。</li>
+</ul>
+</li>
+<li><strong>限速分批执行</strong>：如果决定迁移，每批 100-500 个槽，每批之间观察延迟、CPU、ASK/MOVED 次数。<strong>不要在高峰期迁。</strong></li>
+</ol>
+<p><strong>面试关键句</strong>：「SLOT-STATS 的价值不只是『告诉你迁哪些槽』，更重要的是<strong>让你能判断『迁移到底有没有用』</strong>——如果过载是单个热 key 造成的，迁移只会把问题搬个地方。这个判断能避免一次无效的运维操作。」</p>
+</div></details>
+
+<details class="qa"><summary>Redis 的许可证变更是怎么回事？Valkey 是什么？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p><strong>事件经过</strong>：</p>
+<ol>
+<li>2024 年 3 月，Redis Ltd. 把许可从 <strong>BSD-3-Clause 改为 RSALv2 / SSPLv1 双许可</strong>——这两个许可<strong>不是 OSI 认可的开源许可</strong>，核心限制是「不能将 Redis 作为托管服务出售」。</li>
+<li>这触发了社区强烈反弹。<strong>Linux 基金会将 Redis 7.2.4 分叉为 Valkey</strong>，由 AWS、Google Cloud、Oracle、Ericsson 等支持，保持 <strong>BSD 许可</strong>。</li>
+<li>2025 年 5 月，<strong>Redis 8.0 宣布回归 AGPLv3 许可</strong>（OSI 认可的开源许可）。</li>
+</ol>
+<p><strong>技术关系</strong>：Valkey 与 Redis <strong>同源</strong>——命令、协议（RESP）、数据结构、持久化格式基本一致。所以<strong>底层知识完全通用</strong>。差异主要在：新特性跟进速度、部分企业级功能、以及各自社区的方向。</p>
+<p><strong>对工程师的实际影响</strong>：</p>
+<ul>
+<li><strong>学习成本低</strong>：本教程的知识对 Valkey 同样适用。</li>
+<li><strong>云服务选型</strong>：AWS ElastiCache 等云服务已提供 Valkey 选项。<strong>你实际用的「Redis」可能底层就是 Valkey。</strong></li>
+<li><strong>合规考虑</strong>：公司如果有开源合规审查，SSPL/RSAL 这类许可可能被禁止使用。</li>
+</ul>
+<p><strong>面试话术</strong>：「我认为这件事给工程师的启示是：<strong>技术选型不只看技术，还要看许可、社区和生态</strong>。好消息是 Valkey 与 Redis 同源，所以我的 Redis 知识不会浪费，切换成本很低。<strong>实际选型时我会看三点：① 云厂商/公司基础设施支持哪个；② 是否依赖某个版本独有的特性；③ 公司的开源合规要求。</strong>」</p>
+</div></details>
+
+<h2 id="c13-8">本节自测</h2>
+<div class="track">
+  <label><input type="checkbox" data-k="d4-44"><span>我能说出 6.0 / 7.0 / 8.0 三个大版本各自的核心变化</span></label>
+  <label><input type="checkbox" data-k="d4-45"><span>我知道 8.0 把 Bloom/Cuckoo/JSON/TS/TopK 等模块内置，不再需要 loadmodule</span></label>
+  <label><input type="checkbox" data-k="d4-46"><span>我能写出 JSON.SET 局部更新、BF.RESERVE、TOPK.ADD、TS.ADD 的基本用法</span></label>
+  <label><input type="checkbox" data-k="d4-47"><span>我能讲清 Vector Set 的原理（HNSW、量化）、优势与局限</span></label>
+  <label><input type="checkbox" data-k="d4-48"><span>我能描述 Redis 在 RAG 场景里承担的三种角色</span></label>
+  <label><input type="checkbox" data-k="d4-49"><span>我能说出 HOTKEYS（8.x）与 --hotkeys 的区别（不依赖 LFU）</span></label>
+  <label><input type="checkbox" data-k="d4-50"><span>我能用 CLUSTER SLOT-STATS 找热槽，并判断「迁移是否有效」</span></label>
+  <label><input type="checkbox" data-k="d4-51"><span>我能说清原子槽迁移（8.4）解决了传统迁移的什么问题</span></label>
+  <label><input type="checkbox" data-k="d4-52"><span>我知道 LRM 淘汰策略、XADD 幂等 IDMP、Hash field 级过期这些点</span></label>
+  <label><input type="checkbox" data-k="d4-53"><span>我能给出 Redis 版本选型的决策框架（含不升级也是一种正确决策）</span></label>
+  <label><input type="checkbox" data-k="d4-54"><span>我能说清 Redis 许可变更与 Valkey 分叉的背景及其影响</span></label>
+  <label><input type="checkbox" data-k="d4-55"><span>我能把至少 3 个 8.x 新特性映射到自己项目的痛点上</span></label>
+</div>
+</section>

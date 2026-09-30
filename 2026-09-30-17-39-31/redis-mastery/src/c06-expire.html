@@ -1,0 +1,394 @@
+<section id="c06-expire" class="anchor" data-title="Day2.3 · 过期删除与内存淘汰">
+<div class="ch-meta">
+  <span class="ch-num">Day 2 · 第 3 节</span>
+  <span class="badge bg-blue">预计 70 分钟</span>
+  <span class="badge bg-red">高频必考</span>
+</div>
+<h1>Day2.3 · 过期删除与内存淘汰：Redis 如何管住内存</h1>
+
+<div class="box b-tip">
+  <div class="box-t">一句话结论</div>
+  <p>「过期」和「淘汰」是两件完全不同的事：<strong>过期删除（expire）管的是「key 到时间该消失了」；内存淘汰（eviction）管的是「内存满了要腾地方」</strong>。面试官最爱考的组合是：<strong>为什么 key 过期了内存没降？为什么设了 TTL 还会 OOM？</strong>——答案就在这两套机制的配合方式里。</p>
+</div>
+
+<h2 id="c06-1">1. 过期删除策略：惰性 + 定期（组合拳）</h2>
+
+<h3>先看数据结构：怎么存 TTL</h3>
+<p>Redis 用两个 dict 存数据：</p>
+<ul>
+<li><code class="inline">dict</code>（键空间）：key → value</li>
+<li><code class="inline">expires</code>（过期字典）：key → 过期时间戳（毫秒，long long）</li>
+</ul>
+<p><strong>所以设 TTL 是有额外内存开销的</strong>——expires dict 里也要一份 dictEntry（约 24 字节）+ 一份 key 的引用。这也是「不是所有 key 都该设 TTL」的原因之一。</p>
+
+<pre><code class="lang-bash"><span class="cm">########## TTL 相关命令全集 ##########</span>
+<span class="cm"># 设置过期（相对时间）</span>
+EXPIRE key 60                <span class="cm"># 60 秒后过期</span>
+PEXPIRE key 60000            <span class="cm"># 毫秒</span>
+SET key value EX 60          <span class="cm"># 等价写法（推荐，一次原子完成）</span>
+SETEX key 60 value
+PSETEX key 60000 value
+
+<span class="cm"># 设置过期（绝对时间）</span>
+EXPIREAT key 1790000000      <span class="cm"># Unix 秒时间戳</span>
+PEXPIREAT key 1790000000000  <span class="cm"># Unix 毫秒时间戳</span>
+
+<span class="cm"># 查询</span>
+TTL key      <span class="cm"># 剩余秒数：-1 = 永不过期，-2 = key 不存在（或已过期）</span>
+PTTL key     <span class="cm"># 毫秒精度</span>
+
+<span class="cm"># 移除过期</span>
+PERSIST key                  <span class="cm"># 转为永久（返回 1 成功，0 表示 key 不存在或本来就没 TTL）</span>
+
+<span class="cm"># 条件设置过期（7.0+）</span>
+EXPIRE key 60 NX             <span class="cm"># 只在 key 没有 TTL 时设置</span>
+EXPIRE key 60 XX             <span class="cm"># 只在 key 已有 TTL 时设置</span>
+EXPIRE key 60 GT             <span class="cm"># 只在新 TTL 大于当前 TTL 时设置</span>
+EXPIRE key 60 LT             <span class="cm"># 只在新 TTL 小于当前 TTL 时设置</span>
+
+<span class="cm"># ⚠️ 重要：对 key 执行 SET / GETSET / *STORE 等操作会清掉 TTL！</span>
+SET k v EX 60
+SET k v2                     <span class="cm"># TTL 被清除！变成永久 key</span>
+SET k v3 KEEPTTL             <span class="cm"># ✅ 保留 TTL（6.0+）</span>
+APPEND k suffix              <span class="cm"># APPEND 不会清除 TTL</span>
+INCR counter                 <span class="cm"># INCR 不会清除 TTL</span>
+DEL k / RENAME k k2          <span class="cm"># 会（RENAME 后 TTL 跟随 key 走）</span></code></pre>
+
+<h3>两种删除策略</h3>
+<table>
+<thead><tr><th style="width:15%">策略</th><th>机制</th><th>优点</th><th>缺点</th></tr></thead>
+<tbody>
+<tr><td><strong>惰性删除</strong></td><td>访问 key 时先检查是否过期（<code class="inline">expireIfNeeded</code>），过期则删除并返回 nil</td><td>CPU 友好，不浪费算力在无人访问的 key 上</td><td><strong>内存不友好</strong>——冷 key 永远不被访问，就永远不会被删，内存泄漏</td></tr>
+<tr><td><strong>定期删除</strong></td><td>每 100ms（<code class="inline">hz=10</code>）执行一次：<strong>随机抽取 20 个</strong>设了 TTL 的 key，删除其中已过期的；<strong>若过期比例 &gt; 25%，立刻再抽 20 个继续</strong>，循环直到比例 ≤25% 或本轮耗时超过 CPU 时间上限（默认 25% 的 CPU 时间）</td><td>能清理冷 key，且通过限时限量避免阻塞</td><td>抽样不是全扫，可能有「漏网之鱼」；受 CPU 时间上限约束，高负载时清理变慢</td></tr>
+</tbody>
+</table>
+
+<div class="box b-big">
+  <div class="box-t">✅ 定期删除的算法细节（面试深挖高频）</div>
+  <pre style="margin:10px 0 0"><code class="lang-c">// 伪代码（activeExpireCycle 简化版）
+<span class="kw">do</span> {
+    <span class="cm">// 1) 从 expires dict 中随机抽取 20 个 key</span>
+    num = <span class="nu">20</span>;
+    expired = <span class="nu">0</span>;
+    <span class="kw">while</span> (num--) {
+        <span class="kw">if</span> (当前 key 已过期) {
+            删除该 key;
+            expired++;
+        }
+    }
+    <span class="cm">// 2) 如果过期比例 &gt; 25%，继续循环（说明过期 key 还很多）</span>
+} <span class="kw">while</span> (expired &gt; <span class="nu">20</span> * <span class="nu">0.25</span> &amp;&amp; 本轮未超过时间上限);</code></pre>
+<p><strong>三个关键设计意图</strong>：</p>
+<ol>
+<li><strong>随机抽样而非全扫</strong>：全扫 O(N) 会阻塞，采样 20 个足以在统计上判断「过期密度」。</li>
+<li><strong>25% 阈值动态加速</strong>：如果抽出来 5 个以上都过期，说明过期 key 密集，就继续抽——这样能快速清理大量同时过期的 key（比如雪崩后的场景）。</li>
+<li><strong>时间上限保护</strong>：无论如何不能在清理上花超过 25% 的 CPU 时间（<code class="inline">ACTIVE_EXPIRE_CYCLE_SLOW_TIME_PERC</code>），到点就退出，把时间让给正常请求。<strong>这是「可用性优先于清理及时性」的取舍。</strong></li>
+</ol>
+</div>
+
+<div class="box b-warn">
+  <div class="box-t">⚠️ 从库的过期策略完全不同（高频追问）</div>
+  <p><strong>从库不会主动删除过期 key！</strong></p>
+  <ul>
+    <li>从库对过期 key 的处理是：<strong>逻辑上认为它已过期</strong>（读的时候返回 nil），但<strong>不物理删除</strong>。</li>
+    <li>只有<strong>主库</strong>删除（惰性 or 定期）后，会发送一个 <code class="inline">DEL</code> 命令同步给从库，从库收到后才真正删除。</li>
+    <li><strong>为什么这么设计</strong>：保证主从数据一致。如果从库自己删了，主库还没删，那主从数据就不一致了（主库还有这个 key，从库已经没了）。</li>
+    <li><strong>生产影响</strong>：如果主库长期不访问某个过期 key 且定期删除没抽到它，<strong>从库上这个 key 会一直占着内存</strong>。这就是「从库内存比主库高」的常见原因之一。</li>
+  </ul>
+  <p><strong>面试话术</strong>：「从库不会主动淘汰过期 key，只做逻辑过期判断，物理删除由主库的 DEL 命令驱动同步。这是为了保证主从数据一致——如果从库自己删了，主从数据就不一致了。所以运维上会看到从库内存略高于主库，这是正常现象。」</p>
+</div>
+
+<div class="box b-x">
+  <div class="box-t">🚨 经典问题：为什么 key 过期了内存没降？</div>
+  <p>三个可能原因，按概率排序：</p>
+  <ol>
+    <li><strong>惰性删除 + 定期删除都没覆盖到</strong>：冷 key 一直没人访问，定期删除又是抽样的。这种情况用 <code class="inline">INFO stats</code> 看 <code class="inline">expired_keys</code> 是否在增长。<strong>解法</strong>：<code class="inline">SCAN</code> + <code class="inline">TTL</code> 主动清理，或调大 <code class="inline">hz</code>（10 → 100，代价是 CPU）。</li>
+    <li><strong>内存碎片</strong>：key 确实被删了，但释放的内存是碎片化的，jemalloc 不会立刻还给操作系统。<strong>证据</strong>：看 <code class="inline">mem_fragmentation_ratio = used_memory_rss / used_memory</code>，大于 1.5 说明碎片严重。<strong>解法</strong>：开 <code class="inline">activedefrag yes</code>（在线碎片整理），或重启（不推荐）。</li>
+    <li><strong>被编码转换或大 key 占住</strong>：比如一个 Hash 变成 hashtable 后，即使字段删到很少，也不会退回 listpack，内存不降。<strong>解法</strong>：重建 key。</li>
+  </ol>
+  <p style="margin-bottom:0"><strong>还有一个容易忽略的</strong>：<code class="inline">used_memory</code> 是 Redis 分配器统计的，包含各种缓冲区（客户端输出缓冲区、AOF 缓冲区、复制缓冲区）。如果某个客户端因为慢连接积累了 500MB 输出缓冲区，删 key 也没用。<strong>看 <code class="inline">INFO memory</code> 里的 <code class="inline">mem_clients_normal</code> 和 <code class="inline">mem_clients_slaves</code>。</strong></p>
+</div>
+
+<h2 id="c06-2">2. 内存淘汰策略：8 + 2 种</h2>
+<p>当 <code class="inline">maxmemory</code> 达到上限，且客户端还要写入时，Redis 按 <code class="inline">maxmemory-policy</code> 决定行为。</p>
+
+<table>
+<thead><tr><th style="width:19%">策略</th><th>淘汰范围</th><th>依据</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><code class="inline">noeviction</code><br><span class="badge bg-gray">默认</span></td><td>—</td><td>—</td><td><strong>不淘汰，写命令直接报错</strong> <code class="inline">OOM command not allowed</code>。读命令仍可用</td></tr>
+<tr><td><code class="inline">allkeys-lru</code><br><span class="badge bg-green">纯缓存首选</span></td><td>所有 key</td><td>近似 LRU</td><td>淘汰最久未使用的 key</td></tr>
+<tr><td><code class="inline">allkeys-lfu</code></td><td>所有 key</td><td>近似 LFU</td><td>淘汰访问<strong>频率</strong>最低的 key（4.0+）</td></tr>
+<tr><td><code class="inline">allkeys-random</code></td><td>所有 key</td><td>随机</td><td>随机淘汰。所有 key 访问概率相近时可用</td></tr>
+<tr><td><code class="inline">volatile-lru</code></td><td>仅设了 TTL 的 key</td><td>近似 LRU</td><td>⚠️ 如果都没设 TTL，会退化成 noeviction 报错</td></tr>
+<tr><td><code class="inline">volatile-lfu</code></td><td>仅设了 TTL 的 key</td><td>近似 LFU</td><td>同上</td></tr>
+<tr><td><code class="inline">volatile-random</code></td><td>仅设了 TTL 的 key</td><td>随机</td><td>同上</td></tr>
+<tr><td><code class="inline">volatile-ttl</code></td><td>仅设了 TTL 的 key</td><td>剩余 TTL 最小</td><td>优先淘汰快过期的（让即将过期的先走）</td></tr>
+<tr><td><code class="inline">allkeys-lrm</code><br><span class="badge bg-purple">8.6 新增</span></td><td>所有 key</td><td>最近<strong>修改</strong>时间</td><td>淘汰最久未被修改的 key（适合 AI 场景 / 时序数据）</td></tr>
+<tr><td><code class="inline">volatile-lrm</code><br><span class="badge bg-purple">8.6 新增</span></td><td>仅设了 TTL 的 key</td><td>最近<strong>修改</strong>时间</td><td>同上，但限 TTL key</td></tr>
+</tbody>
+</table>
+
+<pre><code class="lang-bash"><span class="cm">########## 配置与观察 ##########</span>
+CONFIG SET maxmemory 1gb
+CONFIG SET maxmemory-policy allkeys-lru
+CONFIG SET maxmemory-samples 5         <span class="cm"># 采样数量，默认 5</span>
+
+<span class="cm"># 观察淘汰情况</span>
+INFO stats | grep evicted_keys          <span class="cm"># 累计淘汰数（持续增长说明内存不足）</span>
+INFO memory | grep -E <span class="st">'used_memory_human|maxmemory_human|maxmemory_policy'</span>
+INFO stats | grep -E <span class="st">'keyspace_hits|keyspace_misses'</span>
+
+<span class="cm"># 计算命中率</span>
+<span class="cm"># hit_rate = keyspace_hits / (keyspace_hits + keyspace_misses)</span>
+<span class="cm"># 一般要求 &gt; 90%；低于 80% 说明缓存设计或容量有问题</span>
+
+<span class="cm"># 查看单个 key 的访问信息（LRU/LFU）</span>
+OBJECT IDLETIME key                    <span class="cm"># LRU 策略下：空闲秒数</span>
+OBJECT FREQ key                        <span class="cm"># LFU 策略下：访问频率计数器（0-255，对数）</span>
+<span class="cm"># ⚠️ 注意：这两个命令会消耗性能，生产慎用</span></code></pre>
+
+<h2 id="c06-3">3. 近似 LRU：为什么不是「真 LRU」</h2>
+<div class="box b-big">
+  <div class="box-t">✅ Redis 的 LRU 是「近似」的——这是刻意的取舍</div>
+  <p><strong>标准 LRU 的问题</strong>：需要维护一个双向链表，每次访问都把节点移到链表头。这有两个代价：① 每个 key 需要两个额外指针（16 字节 × 所有 key，内存开销巨大）；② 每次访问都要改链表，在单线程下有性能开销。</p>
+  <p><strong>Redis 的做法</strong>：</p>
+  <ol>
+    <li>在 <code class="inline">redisObject.lru</code>（24 bit）里记录<strong>最后一次访问的时间戳</strong>（精度为秒级，2^24 秒 ≈ 194 天循环）。</li>
+    <li>需要淘汰时，<strong>随机采样 <code class="inline">maxmemory-samples</code>（默认 5）个 key</strong>，从中选<strong>空闲时间最长</strong>的那个淘汰。</li>
+  </ol>
+  <p><strong>效果</strong>：采样 5 个时，淘汰的 key 与「真正最久未使用」的重合度约 90%+；采样 10 个时可接近 100%。<strong>用一点准确度换大量内存和 CPU。</strong></p>
+  <p><strong>3.0 的改进：候选池（eviction pool）</strong><br>
+  纯随机采样有个问题：每次都要重新采样，可能错过之前找到的「很旧」的 key。Redis 3.0 引入了<strong>候选池</strong>——把历次采样找到的「较旧」的 key 放进一个 16 大小的池子里（按空闲时间排序），淘汰时从池子里选最旧的。<strong>这让淘汰更接近真 LRU，同时也让「淘汰分布」更均匀。</strong></p>
+  <p><strong>面试标准答法</strong>：「Redis 用的是近似 LRU，不维护完整链表，而是在 redisObject 里存 24 位的时间戳。淘汰时随机采样 N 个 key（默认 5），选最久未用的。3.0 之后引入候选池进一步提升准确度。这样做的原因是——真 LRU 需要每个 key 两个额外指针，内存开销大且每次访问都要改链表；Redis 用准确度的微小损失换取了内存和性能。」</p>
+</div>
+
+<h2 id="c06-4">4. LFU：比 LRU 更适合缓存</h2>
+<div class="box b-big">
+  <div class="box-t">✅ 为什么需要 LFU？LRU 的致命缺陷</div>
+  <p><strong>场景</strong>：一个 key 在过去 1 秒被访问了 10000 次（秒杀商品），但之后就再也没人访问。用 LRU 的话，这个 key 的时间戳最新，<strong>会一直被认为「很热」而保留</strong>，挤掉真正长期高频的 key（比如首页配置）。</p>
+  <p><strong>LFU（Least Frequently Used）</strong>按「访问频率」淘汰，更符合缓存的本质——<strong>长期被频繁访问的才是好缓存</strong>。</p>
+  <p><strong>Redis 的 LFU 实现（很巧妙的地方）</strong>：</p>
+  <p>redisObject 的 24 bit <code class="inline">lru</code> 字段在 LFU 模式下被拆成两部分：</p>
+  <table style="margin:8px 0">
+  <thead><tr><th style="width:20%">字段</th><th style="width:14%">位宽</th><th>含义</th></tr></thead>
+  <tbody>
+  <tr><td><strong>ldt</strong>（last decrement time）</td><td>16 bit</td><td>上次衰减时间（分钟级，2^16 分钟 ≈ 45 天循环）</td></tr>
+  <tr><td><strong>logc</strong>（logistic counter）</td><td>8 bit</td><td>访问频率计数器，范围 0-255</td></tr>
+  </tbody>
+  </table>
+  <p><strong>两个关键机制</strong>：</p>
+  <ol>
+  <li><strong>对数递增</strong>：每访问一次，计数器不是简单 +1，而是按概率增加——<strong>计数器越大，增加的概率越小</strong>（类似 <code class="inline">1/(counter×lfu-log-factor + 1)</code>）。<strong>lfu-log-factor（默认 10）越大，增长越慢。</strong>这使得 8 bit 就能表示很大的访问量级（百万级）。</li>
+  <li><strong>时间衰减</strong>：为了防止「曾经很热但现在不热」的 key 永久占位，Redis 会按时间衰减计数器——<strong>每经过 <code class="inline">lfu-decay-time</code>（默认 1 分钟），计数器 -1</strong>。这样旧的热 key 会随时间自然降温。</li>
+  </ol>
+  <p><strong>参数</strong>：</p>
+  <pre style="margin:8px 0 0"><code class="lang-bash">CONFIG GET lfu-log-factor      <span class="cm"># 默认 10：越大，计数器增长越慢（能区分更高的频次）</span>
+CONFIG GET lfu-decay-time       <span class="cm"># 默认 1（分钟）：衰减速度，0 表示不衰减</span>
+
+<span class="cm"># 调优思路：
+# - 如果热点变化快，调小 lfu-decay-time（衰减更快，更"健忘"）
+# - 如果热点稳定，调大 lfu-log-factor（能区分更细的频次差异）</span></code></pre>
+</div>
+
+<div class="box b-tip">
+  <div class="box-t">💡 LRU vs LFU 怎么选（面试常问）</div>
+  <table style="margin:8px 0 0">
+  <thead><tr><th style="width:16%">场景</th><th>推荐</th><th>理由</th></tr></thead>
+  <tbody>
+  <tr><td>缓存有明显热点，且热点长期稳定</td><td><strong>allkeys-lfu</strong></td><td>能识别「持续高频」，不受偶发突发访问干扰</td></tr>
+  <tr><td>访问模式是「最近访问的还会再访问」（时间局部性）</td><td>allkeys-lru</td><td>符合该访问规律</td></tr>
+  <tr><td>数据有冷热分层，且都设了 TTL</td><td>volatile-lru / volatile-lfu</td><td>只淘汰缓存区，不动持久数据</td></tr>
+  <tr><td>混合存储（缓存 + 持久数据在同一实例）</td><td><strong>volatile-*</strong></td><td>关键：<strong>绝对不要用 allkeys-*</strong>，否则会把不该淘汰的持久数据淘汰掉</td></tr>
+  <tr><td>所有 key 访问概率差不多</td><td>allkeys-random</td><td>此时 LRU/LFU 的计算开销是浪费</td></tr>
+  </tbody>
+  </table>
+</div>
+
+<div class="box b-x">
+  <div class="box-t">🚨 三个淘汰策略的致命误配（真实事故）</div>
+  <ol style="margin-bottom:0">
+  <li><strong>默认值 noeviction 用在纯缓存场景</strong>：内存满了，所有写请求报 <code class="inline">OOM command not allowed when used memory > 'maxmemory'</code>。业务侧如果没处理这个异常，会造成大面积失败。<strong>纯缓存必须有明确策略（通常 allkeys-lru）。</strong></li>
+  <li><strong>混合存储用了 allkeys-lru</strong>：把队列/持久数据也淘汰了。最典型的是——用同一个 Redis 实例既做缓存又做延时队列，结果队列数据被 LRU 淘汰，任务丢失。</li>
+  <li><strong>volatile-lru 但数据没设 TTL</strong>：淘汰范围为空，等价于 noeviction，同样 OOM。<strong>上线前必须用 <code class="inline">INFO keyspace</code> 和抽样确认「设了 TTL 的 key 占比」。</strong></li>
+  </ol>
+</div>
+
+<h2 id="c06-5">5. 内存监控指标体系</h2>
+<pre><code class="lang-bash"><span class="cm">########## 必看指标（建议配成告警）##########</span>
+redis-cli info memory | grep -E <span class="st">\
+'used_memory_human|used_memory_peak_human|used_memory_rss_human|maxmemory_human|\
+mem_fragmentation_ratio|mem_fragmentation_bytes|mem_clients_normal|mem_clients_slaves|\
+mem_aof_buffer|mem_replication_backlog|mem_not_counted_for_evict'</span>
+
+<span class="cm"># 关键指标解读：</span>
+<span class="cm"># used_memory             → Redis 分配器统计的内存（逻辑内存）</span>
+<span class="cm"># used_memory_rss         → 操作系统看到的物理内存（RSS）</span>
+<span class="cm"># mem_fragmentation_ratio → rss/used。&gt;1.5 碎片严重；&lt;1 说明用了 swap（危险！）</span>
+<span class="cm"># used_memory_peak         → 历史峰值，用于判断 fork/COW 的最坏情况</span>
+<span class="cm"># mem_clients_normal       → 所有普通客户端的输出缓冲区总和</span>
+<span class="cm"># mem_clients_slaves       → 从节点复制缓冲区</span>
+
+redis-cli info stats | grep -E <span class="st">'evicted_keys|expired_keys|keyspace_hits|keyspace_misses|rejected_connections'</span>
+<span class="cm"># evicted_keys       → 淘汰计数（持续增长 = 内存不足）</span>
+<span class="cm"># expired_keys       → 过期删除计数</span>
+<span class="cm"># rejected_connections → 因 maxclients 被拒绝的连接数（&gt;0 说明连接不够）</span>
+
+redis-cli info keyspace
+<span class="cm"># 输出：db0:keys=1000,expires=800,avg_ttl=3600000
+#       expires 表示设了 TTL 的 key 数量 —— 验证 volatile-* 策略是否有效</span>
+
+<span class="cm">########## 内存碎片治理 ##########</span>
+CONFIG GET activedefrag                    <span class="cm"># 是否开启在线碎片整理</span>
+CONFIG SET activedefrag yes
+CONFIG SET active-defrag-ignore-bytes 100mb
+CONFIG SET active-defrag-threshold-lower 10
+CONFIG SET active-defrag-threshold-upper 100
+<span class="cm"># 整理会消耗 CPU，建议在低峰期开启，或只在高碎片时触发</span>
+
+<span class="cm">########## 内存扩容判断公式 ##########</span>
+<span class="cm"># 需要的 maxmemory ≈ 业务数据量 × 1.3（碎片与开销） + 复制缓冲区 + 客户端缓冲区
+# 且物理内存 ≥ maxmemory × 1.4（留给 fork/COW 峰值）</span></code></pre>
+
+<h2 id="c06-6">面试深度问答</h2>
+
+<details class="qa"><summary>Redis 的过期删除策略是什么？为什么要两种结合？<span class="lvl lv1">基础</span></summary>
+<div class="qa-b">
+<p><strong>惰性删除 + 定期删除</strong>组合，理由是单一策略都有明显缺陷：</p>
+<ul>
+<li><strong>只用惰性删除</strong>：CPU 省，但冷 key（再也不被访问）永远不删，<strong>内存泄漏</strong>。</li>
+<li><strong>只用定期删除</strong>：内存能及时清理，但如果全量扫描，O(N) 会阻塞；即使抽样，也可能<strong>漏掉没被抽中的过期 key</strong>。</li>
+</ul>
+<p>组合后：惰性删除兜底「被访问的过期 key 一定失效」，定期删除兜底「冷 key 也能被清理」。</p>
+<p><strong>定期删除的具体参数</strong>（这是区分深浅的关键）：</p>
+<ul>
+<li>频率：<code class="inline">hz</code> 默认 10，即每 100ms 一次。</li>
+<li>每次随机抽 20 个设了 TTL 的 key，删除过期的。</li>
+<li>如果过期比例 &gt; 25%，立即再抽 20 个，循环。</li>
+<li>本轮总耗时不得超过 25% 的 CPU 时间（<code class="inline">ACTIVE_EXPIRE_CYCLE_SLOW_TIME_PERC</code>），超时就让出。# 这是可用性优先的取舍</li>
+</ul>
+<p><strong>还能再说一层</strong>：内存里还有个兜底——<strong>如果两种策略都漏了，最终靠淘汰策略（maxmemory-policy）清理</strong>。所以「过期 + 淘汰」是两层防线。</p>
+</div></details>
+
+<details class="qa"><summary>主库和从库的过期删除有什么不同？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p><strong>核心差异：从库不主动物理删除过期 key。</strong></p>
+<table>
+<thead><tr><th style="width:18%">维度</th><th>主库</th><th>从库</th></tr></thead>
+<tbody>
+<tr><td>惰性删除</td><td>访问时检查 → 删除 + 返回 nil</td><td>访问时检查 → <strong>返回 nil，但不删除</strong></td></tr>
+<tr><td>定期删除</td><td>执行（随机抽样）</td><td><strong>不执行</strong></td></tr>
+<tr><td>物理删除来源</td><td>自己删</td><td><strong>等主库发来的 DEL 命令</strong></td></tr>
+</tbody>
+</table>
+<p><strong>为什么这么设计</strong>：保证主从数据一致。如果从库自己删了而主库没删，主从数据就不一致——这在主从切换时会导致数据丢失或行为异常。</p>
+<p><strong>生产影响（这才是加分点）</strong>：</p>
+<ul>
+<li>从库内存可能<strong>长期略高于主库</strong>，因为过期 key 要等主库的 DEL 通知。这是正常现象，不需要处理。</li>
+<li>但如果差值很大（比如 30%），说明主库有大量过期 key 没被清理——<strong>可以调大 <code class="inline">hz</code>，或主动 scan + 清理</strong>。</li>
+<li>极端情况下（主库对该 key 长期无读写，定期删除又一直没抽中），这个 key 会一直占内存。所以「<strong>不要依赖 TTL 做内存管理</strong>」——TTL 是数据语义，内存管理要靠淘汰策略和容量规划。</li>
+</ul>
+</div></details>
+
+<details class="qa"><summary>Redis 的内存淘汰策略有哪些？你们生产用哪个？<span class="lvl lv2">进阶</span></summary>
+<div class="qa-b">
+<p>先说清分类维度：<strong>「淘汰范围」（allkeys / volatile）× 「淘汰依据」（lru / lfu / random / ttl）</strong>，加上 <code class="inline">noeviction</code> 和 8.6 新增的 <code class="inline">lrm</code> 系列。</p>
+<p>完整列出（不要漏）：</p>
+<ol>
+<li><code class="inline">noeviction</code>（默认）：不淘汰，写报错。</li>
+<li><code class="inline">allkeys-lru</code> / <code class="inline">allkeys-lfu</code> / <code class="inline">allkeys-random</code>：所有 key 中按 LRU / LFU / 随机淘汰。</li>
+<li><code class="inline">volatile-lru</code> / <code class="inline">volatile-lfu</code> / <code class="inline">volatile-random</code> / <code class="inline">volatile-ttl</code>：只在设了 TTL 的 key 中淘汰。</li>
+<li><strong>8.6 新增</strong>：<code class="inline">allkeys-lrm</code> / <code class="inline">volatile-lrm</code>——按<strong>最近修改时间</strong>淘汰（LRM = Least Recently Modified），适合 AI 特征库、时序数据这类「写入时间」比「访问时间」更重要的场景。</li>
+</ol>
+<p><strong>生产选型（结合场景说）</strong>：</p>
+<ul>
+<li><strong>纯缓存实例</strong> → <code class="inline">allkeys-lru</code>（或访问有稳定热点时用 <code class="inline">allkeys-lfu</code>）。理由：所有数据都是可再生的，内存满了就淘汰最冷的。</li>
+<li><strong>混用实例（缓存 + 业务数据）</strong> → <code class="inline">volatile-lru</code>，并且<strong>强制要求缓存必须设 TTL</strong>。理由：保护业务数据不被淘汰。</li>
+<li><strong>绝对不能</strong>：混用实例配 <code class="inline">allkeys-*</code>——曾经有公司因此把延时队列的任务淘汰了，导致大量订单超时未处理。</li>
+</ul>
+<p><strong>追问准备：为什么不是 noeviction？</strong><br>
+因为 noeviction 下内存满时写命令直接失败，业务会大面积报错，<strong>故障是「立刻可见的、全量的」</strong>；而淘汰策略下只是「部分数据被清掉、需要回源」，<strong>故障是「渐进的、部分降级的」</strong>。缓存场景下后者明显更好。</p>
+</div></details>
+
+<details class="qa"><summary>LRU 在 Redis 里是怎么实现的？和标准 LRU 有什么区别？<span class="lvl lv2">进阶</span></summary>
+<div class="qa-b">
+<p><strong>标准 LRU</strong>：哈希表 + 双向链表，访问时把节点移到链表头，淘汰时取链表尾。O(1)，但需要每 key 两个额外指针，且每次访问都要改链表。</p>
+<p><strong>Redis 的近似 LRU</strong>：</p>
+<ol>
+<li>在 <code class="inline">redisObject</code> 的 24 bit <code class="inline">lru</code> 字段里存<strong>最后访问时间戳</strong>（秒级精度，2^24 秒约 194 天循环）。</li>
+<li>淘汰时<strong>随机采样 <code class="inline">maxmemory-samples</code>（默认 5）个 key</strong>，选空闲时间最长的淘汰。</li>
+<li><strong>3.0+ 引入候选池（eviction pool，大小 16）</strong>：把历次采样中较旧的 key 放进去按空闲时间排序，淘汰时从池里选最旧的。这让淘汰结果更接近真 LRU，分布更均匀。</li>
+</ol>
+<p><strong>区别总结</strong>：</p>
+<table>
+<thead><tr><th style="width:20%">对比项</th><th>标准 LRU</th><th>Redis 近似 LRU</th></tr></thead>
+<tbody>
+<tr><td>额外内存</td><td>每 key 2 个指针（16 字节）</td><td>0（复用 robj 里已有的 24 bit）</td></tr>
+<tr><td>访问开销</td><td>每次改链表</td><td>只更新时间戳字段</td></tr>
+<tr><td>准确度</td><td>精确</td><td>采样 5 约 90%+，采样 10 接近 100%</td></tr>
+<tr><td>时间精度</td><td>精确</td><td>秒级（且 194 天循环）</td></tr>
+</tbody>
+</table>
+<p><strong>加分细节</strong>：24 bit 的 lru 字段被设计成「从当前时间戳取低 24 位」，所以理论上存在「194 天前的 key 看起来比刚访问的更近」的时钟回绕问题。但实践中 key 活不到 194 天，可忽略。<strong>这种「知道设计边界」的表述很能加分。</strong></p>
+</div></details>
+
+<details class="qa"><summary>LFU 是怎么实现的？为什么用 8 bit？<span class="lvl lv4">专家</span></summary>
+<div class="qa-b">
+<p>见本节第 4 部分。关键点：</p>
+<ol>
+<li><strong>复用 lru 的 24 bit</strong>：拆成 16 bit 的 ldt（衰减时间）+ 8 bit 的 logc（计数器）。</li>
+<li><strong>对数递增</strong>：访问时按概率增加计数器，<code class="inline">P = 1/(logc × lfu-log-factor + 1)</code>。<strong>logc 越小增长越快</strong>——这样 8 bit 也能覆盖 0 到百万级的访问量，因为它是「指数刻度」。</li>
+<li><strong>时间衰减</strong>：每 <code class="inline">lfu-decay-time</code> 分钟（默认 1），logc 减 1。防止「旧热点」永久占位。</li>
+<li><strong>lfu-log-factor 的语义</strong>：默认 10 表示「计数器从 0 涨到 100 大约需要 1000 万次访问」；设为 100 则需要更多访问才能达到同样计数（能区分更高频次，但对低频次的分辨率下降）。</li>
+</ol>
+<p><strong>为什么非得用 8 bit</strong>：因为 lru 字段总共只有 24 bit。这在 <code class="inline">redisObject</code> 的位域里是硬约束——如果要多分配位，每个 key 都要多占内存，而 Redis 有几亿个 key。所以选择<b>「用对数编码压缩计数范围」</b>，而不是「扩大位宽」。</p>
+<p><strong>专家级洞察</strong>：这个设计体现了一个通用原则——<strong>在内存敏感的系统里，用「对数/概率编码」代替「线性编码」，可以在有限位宽下表达更大的动态范围，代价是精度损失</strong>。同样的思路也出现在 HyperLogLog（用桶内最大前导零个数）和 SkipList（用概率决定层数）里。<strong>能把这个原则抽象出来，说明你不只是记住了 Redis。</strong></p>
+</div></details>
+
+<details class="qa"><summary>线上 Redis 内存持续增长，怎么排查？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p>给一套可执行的排查路径（这段可以直接当项目经验讲）：</p>
+<div class="steps">
+<div class="step"><div class="st-t">第一步：区分是「逻辑内存」还是「碎片」</div>
+<pre style="margin:8px 0"><code class="lang-bash">INFO memory | grep -E <span class="st">'used_memory:|used_memory_rss:|mem_fragmentation_ratio'</span></code></pre>
+<p>若 <code class="inline">used_memory</code> 也在涨 → 是真实数据在涨（继续第二步）。<br>
+若只有 <code class="inline">rss</code> 涨、<code class="inline">ratio &gt; 1.5</code> → 内存碎片，开 <code class="inline">activedefrag</code> 或优化分配器。</p>
+</div>
+<div class="step"><div class="st-t">第二步：区分是「key 数量」还是「单个 key 大小」</div>
+<pre style="margin:8px 0"><code class="lang-bash">INFO keyspace        <span class="cm"># keys 数量增长趋势</span>
+DBSIZE
+redis-cli --memkeys  <span class="cm"># 低峰期执行，找内存最大的 key</span></code></pre>
+<p>key 数量暴涨 → 检查业务是否忘了设 TTL、是否有 key 命名带时间戳导致无限堆积（如 <code class="inline">rate:uid:1001:202609301730</code> 这种按分钟分桶的限流 key，如果没设 TTL 就是灾难）。<br>
+单个 key 巨大 → 大 key 问题，进第四步。</p>
+</div>
+<div class="step"><div class="st-t">第三步：看是不是「非数据内存」在涨</div>
+<pre style="margin:8px 0"><code class="lang-bash">INFO memory | grep -E <span class="st">'mem_clients_normal|mem_clients_slaves|mem_aof_buffer|mem_replication_backlog'</span>
+CLIENT LIST | awk <span class="st">'{print $2,$3,$12,$18}'</span> | sort -k4 -hr | head</code></pre>
+<p><code class="inline">mem_clients_normal</code> 大 → 有慢客户端（网络差或消费慢）导致输出缓冲区堆积。<strong>这是最容易被忽略的内存泄漏来源</strong>，配合 <code class="inline">client-output-buffer-limit</code> 处理。</p>
+</div>
+<div class="step"><div class="st-t">第四步：定位到具体业务</div>
+<p>用 key 前缀统计（写个 <code class="inline">SCAN</code> + 分组统计的脚本），找出「哪个前缀的 key 在涨」或「哪个前缀的总内存最大」，然后去找对应的业务方。</p>
+<pre style="margin:8px 0"><code class="lang-bash"><span class="cm"># 统计各前缀的 key 数量（示例，生产用 Lua 或 SCAN+管道更高效）</span>
+redis-cli --scan --pattern <span class="st">'*'</span> | awk -F: <span class="st">'{print $1":"$2}'</span> | sort | uniq -c | sort -rn | head -20</code></pre>
+</div>
+<div class="step"><div class="st-t">第五步：确认淘汰策略是否生效</div>
+<pre style="margin:8px 0"><code class="lang-bash">INFO stats | grep evicted_keys
+CONFIG GET maxmemory-policy
+INFO keyspace   <span class="cm"># 看 expires 占比，验证 volatile-* 是否有效</span></code></pre>
+<p>若 <code class="inline">maxmemory</code> 为 0（不限制）→ <strong>这是最大的隐患</strong>，内存涨到物理上限会被 OOM Killer 杀掉，比报错严重得多。</p>
+</div>
+</div>
+<p><strong>长效治理</strong>：① 所有缓存强制 TTL（可以通过中间件或代码规范检查）；② 接入大 key / 热 key 定期巡检；③ 建立 key 前缀清单与负责人制度；④ 内存使用率 70% 告警，而不是等到 90%。</p>
+</div></details>
+
+<h2 id="c06-7">本节自测</h2>
+<div class="track">
+  <label><input type="checkbox" data-k="d2-17"><span>我能说出定期删除的完整算法（20个采样/25%阈值/25%CPU上限）</span></label>
+  <label><input type="checkbox" data-k="d2-18"><span>我能解释从库为什么不主动删除过期 key，以及它的生产影响</span></label>
+  <label><input type="checkbox" data-k="d2-19"><span>我能列出全部 10 种淘汰策略，并说出纯缓存/混合存储分别该用哪种</span></label>
+  <label><input type="checkbox" data-k="d2-20"><span>我能说清近似 LRU 的采样机制与候选池的改进</span></label>
+  <label><input type="checkbox" data-k="d2-21"><span>我能解释 LFU 的 8bit 对数计数器 + 时间衰减机制</span></label>
+  <label><input type="checkbox" data-k="d2-22"><span>我能说出三个淘汰策略误配导致的事故场景</span></label>
+  <label><input type="checkbox" data-k="d2-23"><span>我能给出「内存持续增长」的五步排查路径</span></label>
+  <label><input type="checkbox" data-k="d2-24"><span>我能解释 mem_fragmentation_ratio &lt; 1 意味着什么危险</span></label>
+</div>
+</section>

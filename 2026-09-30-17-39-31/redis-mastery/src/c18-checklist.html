@@ -1,0 +1,572 @@
+<section id="c18-checklist" class="anchor" data-title="Day5 · 生产上线 Checklist 与学习进度追踪">
+<div class="ch-meta"><span class="ch-num">Day 5 · 第 5 节</span><span class="badge bg-blue">预计 40 分钟</span></div>
+<h1>生产上线 Checklist 与学习进度追踪</h1>
+
+<div class="box b-big">
+<div class="box-t">这一节的价值</div>
+<p>前面 18 节教的是「知识」，这一节给的是「可以贴在工位上的检查清单」。<strong>知识会在紧张时遗忘，但清单不会。</strong></p>
+<p>我把这套 Checklist 分成五类：<strong>部署前、配置项、上线前、监控告警、故障应急</strong>。每一类都是可以直接拿去用的「生产标准」，也是你入职大厂后第一天就会用到的规范。</p>
+<p><strong>建议：</strong>把这一节的内容复制一份到你自己的笔记里，每次上线 Redis 相关功能前过一遍。</p>
+</div>
+
+<h2>一、部署前 Checklist</h2>
+
+<div class="box b-tip">
+<div class="box-t">机器与系统层（这些不做好，后面全白搭）</div>
+</div>
+
+<table>
+<thead><tr><th>✔</th><th>检查项</th><th>命令 / 配置</th><th>为什么</th></tr></thead>
+<tbody>
+<tr><td>☐</td><td>关闭透明大页（THP）</td><td><code class="inline">echo never &gt; /sys/kernel/mm/transparent_hugepage/enabled</code></td><td><strong>最重要的项。</strong>fork 时 COW 复制代价从 4KB 变 2MB，延迟暴增</td></tr>
+<tr><td>☐</td><td>overcommit_memory=1</td><td><code class="inline">vm.overcommit_memory = 1</code></td><td>否则 fork 可能直接失败，BGSAVE 报错</td></tr>
+<tr><td>☐</td><td>swappiness=1</td><td><code class="inline">vm.swappiness = 1</code></td><td>不要 0（某些内核会导致 OOM），1 是最优</td></tr>
+<tr><td>☐</td><td>somaxconn 调大</td><td><code class="inline">net.core.somaxconn = 1024</code></td><td>默认 128 太小，高并发下会丢连接</td></tr>
+<tr><td>☐</td><td>TCP backlog</td><td><code class="inline">net.ipv4.tcp_max_syn_backlog = 1024</code></td><td>配合 somaxconn</td></tr>
+<tr><td>☐</td><td>文件描述符上限</td><td><code class="inline">ulimit -n 65535</code> / <code class="inline">LimitNOFILE=65535</code></td><td>默认 1024，客户端一多就 <code class="inline">Too many open files</code></td></tr>
+<tr><td>☐</td><td>禁用 NUMA 或绑核</td><td><code class="inline">numactl --interleave=all</code></td><td>避免跨 NUMA 节点访问内存导致延迟不稳</td></tr>
+<tr><td>☐</td><td>磁盘用 SSD</td><td>—</td><td>AOF 刷盘频繁，HDD 会成为瓶颈</td></tr>
+<tr><td>☐</td><td>禁掉机器上的其他重负载进程</td><td>—</td><td>Redis 对 CPU 抢占极其敏感</td></tr>
+<tr><td>☐</td><td>单机不部署多实例（或至少绑核）</td><td><code class="inline">taskset -c 0-3</code></td><td>多实例互相抢 CPU，延迟抖动</td></tr>
+</tbody>
+</table>
+
+<pre><code class="language-bash"># 一键检查脚本（把这些做成一个 check_env.sh）
+#!/bin/bash
+echo "=== THP ==="
+cat /sys/kernel/mm/transparent_hugepage/enabled
+# 期望：[never] always madvise
+
+echo "=== overcommit ==="
+cat /proc/sys/vm/overcommit_memory
+# 期望：1
+
+echo "=== swappiness ==="
+cat /proc/sys/vm/swappiness
+# 期望：1
+
+echo "=== somaxconn ==="
+cat /proc/sys/net/core/somaxconn
+# 期望：>= 1024
+
+echo "=== ulimit -n ==="
+ulimit -n
+# 期望：>= 65535
+
+echo "=== NUMA ==="
+numactl --hardware 2>/dev/null | head -3
+
+echo "=== swap使用 ==="
+free -h
+# !!!! swap used 必须接近 0</code></pre>
+
+<h2>二、redis.conf 生产配置清单</h2>
+
+<div class="box b-warn">
+<div class="box-t">下面是可直接使用的生产配置模板（按重要度分级）</div>
+</div>
+
+<pre><code class="language-bash">########################################
+# 1. 网络与安全（P0）
+########################################
+bind 0.0.0.0                    # 或指定内网IP
+protected-mode yes
+port 6379
+tcp-backlog 1024
+tcp-keepalive 300               # 探测死连接，防止连接泄漏
+timeout 0                       # 连接空闲不断开（由客户端控制）
+
+# ⚠️ 生产必须配密码（或 ACL）
+requirepass &lt;强密码&gt;
+masterauth &lt;同上&gt;               # 从库连主库的密码
+
+# 危险命令禁用（rename-command 在 7.0 后已废弃，用 ACL 替代）
+# 7.0+ 用 ACL：
+# ACL SETUSER default on &gt;pass ~* +@all -@dangerous
+
+########################################
+# 2. 内存（P0）
+########################################
+maxmemory 12gb                  # ⚠️ ≤ 机器内存 50%
+maxmemory-policy allkeys-lru    # 纯缓存用这个；有持久数据用 volatile-lru
+maxmemory-samples 5             # LRU 采样数，5 够用，10 更准但费CPU
+
+# 内存碎片整理
+activedefrag yes
+active-defrag-ignore-bytes 100mb
+active-defrag-threshold-lower 10
+active-defrag-threshold-upper 100
+active-defrag-cycle-min 1
+active-defrag-cycle-max 25
+
+########################################
+# 3. 持久化（P0）
+########################################
+# --- RDB ---
+save 900 1                      # 15分钟至少1个key变化
+save 300 10                     # 5分钟至少10个
+save 60 10000                   # 1分钟至少10000个
+stop-writes-on-bgsave-error yes  # 持久化失败则拒绝写入（保一致性）
+rdbcompression yes
+rdbchecksum yes
+dbfilename dump.rdb
+dir /data/redis                 # ⚠️ 必须是独立大盘，别放系统盘
+
+# --- AOF（混合持久化，推荐）---
+appendonly yes
+appendfilename "appendonly.aof"
+appendfsync everysec            # 性能与安全的平衡点
+no-appendfsync-on-rewrite no    # ⚠️ 保持no，重写期间也刷盘（安全优先）
+auto-aof-rewrite-percentage 200 # 增长200%触发（默认100太频繁）
+auto-aof-rewrite-min-size 64mb
+aof-load-truncated yes          # AOF末尾损坏时容忍并继续
+aof-use-rdb-preamble yes        # ⚠️ 混合持久化，必开
+
+########################################
+# 4. 主从复制（P0，从库配）
+########################################
+replicaof &lt;master-ip&gt; 6379
+masterauth &lt;密码&gt;
+replica-read-only yes
+replica-serve-stale-data yes
+replica-priority 100            # 越小越优先被选为主，0=永不参选
+
+# 防数据丢失（主库配）
+min-replicas-to-write 1         # 至少1个从库确认
+min-replicas-max-lag 10         # 且延迟不超过10秒
+
+# 复制积压缓冲区（网络抖动容忍度）
+repl-backlog-size 64mb          # ⚠️ 默认1mb太小，网络一抖就全量同步
+repl-backlog-ttl 3600
+
+# 复制参数
+repl-diskless-sync yes          # 无盘复制（磁盘快则开，网络快则开）
+repl-diskless-sync-delay 5
+repl-disable-tcp-nodelay no     # 不合并小包，保证低延迟（同机房推荐no）
+
+########################################
+# 5. 慢查询与延迟（P1）
+########################################
+slowlog-log-slower-than 10000   # 10ms，微秒单位
+slowlog-max-len 512
+
+latency-monitor-threshold 100   # 100ms，超过就记录延迟事件
+
+########################################
+# 6. 客户端缓冲区（P1，防大key打爆）
+########################################
+client-output-buffer-limit normal 0 0 0
+client-output-buffer-limit replica 256mb 64mb 60
+client-output-buffer-limit pubsub 32mb 8mb 60
+
+########################################
+# 7. 数据结构阈值（P1，影响内存和性能）
+########################################
+hash-max-listpack-entries 128
+hash-max-listpack-value 64
+list-max-listpack-size -2       # 8KB，负数有特殊含义
+list-compress-depth 0
+set-max-intset-entries 512
+set-max-listpack-entries 128
+set-max-listpack-value 64
+zset-max-listpack-entries 128
+zset-max-listpack-value 64
+
+########################################
+# 8. 后台任务与性能（P2）
+########################################
+hz 10                           # 事件循环频率，10够用
+dynamic-hz yes
+lazyfree-lazy-eviction no
+lazyfree-lazy-expire no
+lazyfree-lazy-server-del no     # ⚠️ 保守选择，让删除行为可预期
+replica-lazy-flush no
+lazyfree-lazy-user-del no       # 显式用 UNLINK 替代 DEL
+
+# IO 多线程（6.0+，4核以上才开）
+io-threads 4                    # 4核设2-3，8核设6，不要超过8
+io-threads-do-reads no          # ⚠️ 默认no，压测后再决定是否开
+
+########################################
+# 9. 日志（P2）
+########################################
+loglevel notice
+logfile /var/log/redis/redis.log
+syslog-enabled no
+
+########################################
+# 10. Cluster 专属
+########################################
+cluster-enabled yes
+cluster-config-file nodes.conf
+cluster-node-timeout 15000      # 15s，故障判定阈值
+cluster-replica-validity-factor 10
+cluster-migration-barrier 1
+cluster-require-full-coverage yes  # ⚠️ 有槽不可用时是否停止服务
+cluster-allow-reads-when-down no</code></pre>
+
+<h2>三、上线前 Checklist</h2>
+
+<table>
+<thead><tr><th>✔</th><th>检查项</th><th>验证方法</th></tr></thead>
+<tbody>
+<tr><td>☐</td><td><strong>压测过目标 QPS</strong></td><td><code class="inline">redis-benchmark -c 200 -n 1000000 -P 16 -t get,set</code>，留 50% 余量</td></tr>
+<tr><td>☐</td><td>压测过 Pipeline 场景</td><td><code class="inline">-P 16</code> 模拟批量，看 QPS 提升</td></tr>
+<tr><td>☐</td><td>压测过 <strong>BGSAVE 期间</strong>的性能</td><td><code class="inline">BGSAVE</code> 后立即压测，看延迟尖刺</td></tr>
+<tr><td>☐</td><td>压测过<strong>主从切换</strong>的表现</td><td>手动 <code class="inline">SENTINEL failover</code>，看业务是否报错</td></tr>
+<tr><td>☐</td><td>扫描过全量大 key</td><td><code class="inline">redis-cli --bigkeys -i 0.1</code>（从库执行）</td></tr>
+<tr><td>☐</td><td>确认无 <code class="inline">KEYS *</code>、<code class="inline">FLUSHALL</code> 等危险调用</td><td>代码扫描 + <code class="inline">MONITOR</code> 观察</td></tr>
+<tr><td>☐</td><td>所有业务 key 都有 TTL</td><td>写脚本 <code class="inline">SCAN</code> 抽样检查 <code class="inline">TTL</code></td></tr>
+<tr><td>☐</td><td>TTL 有随机抖动</td><td>代码 Review：<code class="inline">base + random(0, N)</code></td></tr>
+<tr><td>☐</td><td>客户端超时配置合理</td><td><code class="inline">timeout=1000ms</code>、<code class="inline">maxWait=500ms</code></td></tr>
+<tr><td>☐</td><td>客户端有降级逻辑</td><td>模拟 Redis 不可用，看是否走 fallback</td></tr>
+<tr><td>☐</td><td>连接池参数合理</td><td><code class="inline">maxTotal</code>、<code class="inline">minIdle</code>、<code class="inline">maxIdle</code> 都配了</td></tr>
+<tr><td>☐</td><td>集群客户端配了槽刷新和重试</td><td>Lettuce <code class="inline">cluster-topology-refresh</code> 相关配置</td></tr>
+<tr><td>☐</td><td>有个「缓存命中率」指标</td><td>客户端埋点：命中/未命中计数</td></tr>
+<tr><td>☐</td><td>有过「缓存全失效」的演练</td><td>预发环境 <code class="inline">FLUSHALL</code>，看 DB 能否扛住</td></tr>
+<tr><td>☐</td><td>有备份且验证过恢复</td><td>真的用备份文件恢复一次，测耗时</td></tr>
+<tr><td>☐</td><td>集群槽分配均衡</td><td><code class="inline">redis-cli --cluster check</code>，偏差 &lt; 10%</td></tr>
+<tr><td>☐</td><td>哨兵/Cluster 的 quorum 配置正确</td><td>3 节点 quorum=2，不要配成 3</td></tr>
+<tr><td>☐</td><td>客户端不是硬编码 master IP</td><td>用 SentinelPool / ClusterClient</td></tr>
+</tbody>
+</table>
+
+<h2>四、监控告警体系</h2>
+
+<div class="box b-tip">
+<div class="box-t">分层告警：不是每个指标都要告警，要分级</div>
+</div>
+
+<h4>P0 告警（立即响应，电话/短信）</h4>
+<table>
+<thead><tr><th>指标</th><th>阈值</th><th>含义</th></tr></thead>
+<tbody>
+<tr><td><code class="inline">cluster_state</code></td><td>!= ok</td><td>集群不可用</td></tr>
+<tr><td><code class="inline">master_link_status</code></td><td>!= up</td><td>主从断开</td></tr>
+<tr><td><code class="inline">used_memory / maxmemory</code></td><td>&gt; 90%</td><td>即将 OOM</td></tr>
+<tr><td><code class="inline">connected_clients</code></td><td>&gt; maxclients × 0.8</td><td>连接数将满</td></tr>
+<tr><td><code class="inline">rejected_connections</code></td><td>&gt; 0 持续 1 分钟</td><td>连接被拒，说明配置或异常</td></tr>
+<tr><td>进程存活</td><td>down</td><td>实例挂了</td></tr>
+<tr><td><code class="inline">rdb_last_bgsave_status</code></td><td>!= ok</td><td>持久化失败</td></tr>
+<tr><td><code class="inline">aof_last_write_status</code></td><td>!= ok</td><td>AOF 写失败</td></tr>
+</tbody>
+</table>
+
+<h4>P1 告警（30 分钟内响应）</h4>
+<table>
+<thead><tr><th>指标</th><th>阈值</th><th>含义</th></tr></thead>
+<tbody>
+<tr><td><code class="inline">used_memory / maxmemory</code></td><td>&gt; 80%</td><td>内存偏高，需关注</td></tr>
+<tr><td><code class="inline">mem_fragmentation_ratio</code></td><td>&gt; 1.5 或 &lt; 1.0</td><td>碎片严重 或 在用 swap</td></tr>
+<tr><td><code class="inline">master_last_io_seconds_ago</code></td><td>&gt; 10</td><td>复制延迟大</td></tr>
+<tr><td><code class="inline">latest_fork_usec</code></td><td>&gt; 100000 (100ms)</td><td>fork 耗时过长</td></tr>
+<tr><td><code class="inline">blocked_clients</code></td><td>&gt; 10</td><td>有客户端阻塞</td></tr>
+<tr><td><code class="inline">instantaneous_ops_per_sec</code></td><td>环比降 50%</td><td>QPS 骤降，可能有问题</td></tr>
+<tr><td>缓存命中率（客户端）</td><td>&lt; 85%</td><td>穿透或数据问题</td></tr>
+<tr><td>慢查询数量</td><td>每分钟 &gt; 10</td><td>有慢命令</td></tr>
+<tr><td><code class="inline">evicted_keys</code></td><td>持续增长</td><td>内存不足在淘汰数据</td></tr>
+</tbody>
+</table>
+
+<h4>P2 告警（日报/周报关注）</h4>
+<table>
+<thead><tr><th>指标</th><th>阈值</th><th>含义</th></tr></thead>
+<tbody>
+<tr><td><code class="inline">used_memory_peak</code></td><td>—</td><td>历史峰值，用于容量规划</td></tr>
+<tr><td><code class="inline">total_net_input_bytes</code></td><td>—</td><td>网络流量趋势</td></tr>
+<tr><td><code class="inline">total_commands_processed</code></td><td>—</td><td>命令量趋势</td></tr>
+<tr><td>命令分布（<code class="inline">commandstats</code>）</td><td>—</td><td>发现异常命令类型</td></tr>
+<tr><td><code class="inline">expired_keys</code></td><td>—</td><td>过期量，异常增长要查</td></tr>
+<tr><td>key 数量趋势</td><td>—</td><td>识别是否有泄漏</td></tr>
+</tbody>
+</table>
+
+<pre><code class="language-bash"># Prometheus + redis_exporter 关键配置
+# docker run -d -p 9121:9121 oliver006/redis_exporter \
+#   --redis.addr=redis://redis:6379 --redis.password=xxx \
+#   --check-keys="*"
+
+# Grafana 推荐大盘：Redis Dashboard for Prometheus (ID: 763)
+# 关键的 PromQL 示例：
+
+# 内存使用率
+redis_memory_used_bytes / redis_memory_max_bytes * 100
+
+# 缓存命中率（需要客户端埋点，Redis 侧的 keyspace_hits/misses）
+rate(redis_keyspace_hits_total[5m]) /
+(rate(redis_keyspace_hits_total[5m]) + rate(redis_keyspace_misses_total[5m])) * 100
+
+# 复制延迟
+redis_master_last_io_seconds_ago
+
+# fork 耗时
+redis_latest_fork_seconds
+
+# 每秒命令数
+rate(redis_commands_processed_total[1m])
+
+# 复制积压缓冲区使用率
+redis_repl_backlog_histlen / redis_repl_backlog_size</code></pre>
+
+<h2>五、故障应急手册</h2>
+
+<div class="box b-x">
+<div class="box-t">五大高频故障的标准处置流程（照着做就行）</div>
+</div>
+
+<h4>故障 1：CPU 100% / 延迟飙升</h4>
+<pre><code class="language-bash"># 1. 快速定性
+INFO cpu
+SLOWLOG GET 20                # 是否有慢命令？
+LATENCY DOCTOR                # 是否有延迟事件？
+INFO stats | grep ops         # QPS 是否异常高
+
+# 2. 定位
+top -H -p $(pgrep redis-server)   # 哪个线程吃CPU
+# 主线程高 → 业务命令问题
+# bio线程高 → 持久化/删除问题
+
+# 3. 常见原因与处置
+# ├─ 大key操作 → 找到key，业务侧改造，临时 UNLINK
+# ├─ 全量扫描（KEYS）→ 找到调用方，立即停止
+# ├─ QPS突增 → 限流/加机器
+# ├─ fork频繁 → 检查主从频繁全量同步
+# └─ THP没关 → 立即关闭
+
+# 4. 应急止血
+# - 如果定位到某个客户端，CLIENT KILL
+# - 如果无法定位，考虑临时扩容或切主</code></pre>
+
+<h4>故障 2：内存满 / OOM / 大量淘汰</h4>
+<pre><code class="language-bash"># 1. 看内存构成
+INFO memory
+MEMORY STATS
+MEMORY DOCTOR                 # 直接给诊断建议
+
+# 2. 找大key（从库执行）
+redis-cli --bigkeys -i 0.1
+redis-cli --memkeys
+
+# 3. 处置
+# ├─ 短期：临时提高 maxmemory（如果有空间）→ 必须重启才生效！
+# ├─ 短期：删除无用大key（UNLINK，低峰期）
+# ├─ 中期：清理无TTL的key，补上TTL
+# ├─ 中期：业务侧检查是否有key泄漏
+# └─ 长期：扩容分片 或 数据冷热分离
+
+# ⚠️ 注意：maxmemory 是启动时读取的？不，它可以 CONFIG SET 动态改
+CONFIG SET maxmemory 14gb
+CONFIG GET maxmemory</code></pre>
+
+<h4>故障 3：主从断开 / 全量同步风暴</h4>
+<pre><code class="language-bash"># 1. 看复制状态
+INFO replication
+# master_link_status: down → 链路断了
+# master_sync_in_progress: 1 → 正在全量同步
+
+# 2. 看日志
+tail -f /var/log/redis/redis.log | grep -i "sync\|replica"
+
+# 3. 常见原因
+# ├─ 网络抖动 → 增大 repl-backlog-size
+# ├─ 主库内存不足，repl_chars不够 → 调大 client-output-buffer-limit
+# ├─ 从库磁盘满 → 清理
+# └─ 从库处理不过来 → 减少从库数量或加资源
+
+# 4. 反复全量同步的排查
+# 查看 backlog 是否足够
+CONFIG GET repl-backlog-size
+# 检查 master_repl_offset 与从库 slave_repl_offset 的差距
+# 差距 > backlog → 必然全量
+
+# 5. 处置
+# - 增大 repl-backlog-size（64mb → 256mb）
+# - 低峰期修复
+# - 必要时重建从库（COPY 全量RDB更可靠）</code></pre>
+
+<h4>故障 4：Cluster 部分槽不可用</h4>
+<pre><code class="language-bash"># 1. 看集群状态
+CLUSTER INFO
+# cluster_state:fail  → 有槽不可用
+# cluster_slots_assigned:16384（要等于16384）
+# cluster_slots_ok / pfail / fail
+
+# 2. 找问题节点
+CLUSTER NODES
+redis-cli --cluster check 127.0.0.1:6379
+
+# 3. 常见原因
+# ├─ 某主库挂了且没有从库 → 该分片不可用
+# ├─ 槽迁移中断，槽处于中间态
+# └─ 节点被误删/网络隔离
+
+# 4. 处置
+# - 如果有从库：等自动切换，或手动 CLUSTER FAILOVER
+# - 如果无从库：把未分配的槽手动分配，或从备份恢复
+# - 极端情况：CLUSTER-ALLOW-READS-WHEN-DOWN yes 临时允许读</code></pre>
+
+<h4>故障 5：缓存雪崩 / 大批 key 同时过期</h4>
+<pre><code class="language-bash"># 1. 现象
+# - 客户端缓存命中率骤降
+# - 数据库 QPS 暴涨，连接池打满
+# - 应用响应时间飙升
+
+# 2. 应急止血（顺序很重要！）
+# Step1: 保护DB —— 立即在DB层限流
+#        如果有限流开关，马上打开
+# Step2: 快速预热 —— 把热点数据重新灌进 Redis
+#        用脚本批量 SET，注意分批 + 限速
+# Step3: 降级 —— 非核心功能返回兜底数据
+#        打开降级开关
+
+# 3. 根因修复
+# ├─ TTL 加随机抖动（避免再次同时过期）
+# └─ 加多级缓存（本地缓存兜底）
+
+# 4. 预热脚本模板
+#!/bin/bash
+for key in $(cat hot_keys.txt); do
+    value=$(mysql -N -e "SELECT ... WHERE id=$key")
+    redis-cli SET "cache:$key" "$value" EX $((1800 + RANDOM % 300))
+    # 限速，避免把 Redis 和 DB 同时打爆
+    sleep 0.001
+done</code></pre>
+
+<h2>六、日常运维 Routine</h2>
+
+<table>
+<thead><tr><th>频率</th><th>动作</th></tr></thead>
+<tbody>
+<tr><td><strong>每天</strong></td><td>看慢查询 TOP 10；看内存增长曲线；看告警记录；看主从延迟</td></tr>
+<tr><td><strong>每周</strong></td><td>跑一次大 key 扫描（从库）；检查无 TTL 的 key 增长；看命令分布变化</td></tr>
+<tr><td><strong>每月</strong></td><td>容量复盘（内存/QPS 增长趋势 vs 预测）；碎片率检查；备份恢复演练</td></tr>
+<tr><td><strong>每季度</strong></td><td>故障演练（kill 主库、断网、Redis 全挂）；版本升级评估；架构 review</td></tr>
+<tr><td><strong>大促前</strong></td><td>全链路压测（含缓存失效场景）；容量扩容；降级开关验证；预案 review</td></tr>
+</tbody>
+</table>
+
+<h2>七、学习进度追踪</h2>
+
+<div class="box b-big">
+<div class="box-t">五天学习成果自检</div>
+<p>下面按 Day 组织，每一项都是「学完应该能做到」的能力。全部勾上，你就达到了大厂 Redis 深入面试的要求。</p>
+</div>
+
+<h3>Day 1 · 基础与部署</h3>
+<div class="track">
+<label><input type="checkbox" data-k="d1-1"><span>能独立完成单机 / 主从 / 哨兵 / Cluster 的部署</span></label>
+<label><input type="checkbox" data-k="d1-2"><span>能说出八种数据结构的底层编码和适用场景</span></label>
+<label><input type="checkbox" data-k="d1-3"><span>能根据业务场景正确选型数据结构</span></label>
+<label><input type="checkbox" data-k="d1-4"><span>能用 Jedis / Lettuce 完成基本读写并配置连接池</span></label>
+<label><input type="checkbox" data-k="d1-5"><span>知道生产环境的机器参数要求（THP、overcommit 等）</span></label>
+</div>
+
+<h3>Day 2 · 原理与持久化</h3>
+<div class="track">
+<label><input type="checkbox" data-k="d2-1"><span>能完整讲清「Redis 为什么快」的六大原因</span></label>
+<label><input type="checkbox" data-k="d2-2"><span>能说清单线程模型、IO 多线程、后台线程的分工</span></label>
+<label><input type="checkbox" data-k="d2-3"><span>能从源码层面讲 SDS / listpack / quicklist / 跳表</span></label>
+<label><input type="checkbox" data-k="d2-4"><span>能讲清渐进式 rehash 的完整流程</span></label>
+<label><input type="checkbox" data-k="d2-5"><span>能说清惰性删除 + 定期删除的机制与缺陷</span></label>
+<label><input type="checkbox" data-k="d2-6"><span>能说清八种内存淘汰策略的差异和选型</span></label>
+<label><input type="checkbox" data-k="d2-7"><span>能讲清 RDB fork + COW 的原理和风险</span></label>
+<label><input type="checkbox" data-k="d2-8"><span>能讲清 AOF 三种刷盘策略的取舍，以及重写流程</span></label>
+<label><input type="checkbox" data-k="d2-9"><span>知道混合持久化和 Multi-Part AOF 的优势</span></label>
+</div>
+
+<h3>Day 3 · 高可用与集群</h3>
+<div class="track">
+<label><input type="checkbox" data-k="d3-1"><span>能讲清 PSYNC 全量/增量同步的完整流程</span></label>
+<label><input type="checkbox" data-k="d3-2"><span>知道 repl-backlog 的作用和计算方式</span></label>
+<label><input type="checkbox" data-k="d3-3"><span>能讲清哨兵的 SDOWN/ODOWN、quorum/majority 区别</span></label>
+<label><input type="checkbox" data-k="d3-4"><span>能讲清 Cluster 的 16384 槽、MOVED/ASK 的区别</span></label>
+<label><input type="checkbox" data-k="d3-5"><span>能讲清 Cluster 的 PFAIL/FAIL 和故障转移选举</span></label>
+<label><input type="checkbox" data-k="d3-6"><span>能独立完成槽迁移和集群扩容</span></label>
+<label><input type="checkbox" data-k="d3-7"><span>知道脑裂风险及 min-replicas-to-write 的作用</span></label>
+</div>
+
+<h3>Day 4 · 生产治理</h3>
+<div class="track">
+<label><input type="checkbox" data-k="d4-1"><span>能讲清穿透/击穿/雪崩的区别和五种解法</span></label>
+<label><input type="checkbox" data-k="d4-2"><span>能讲清缓存一致性四种写策略的取舍</span></label>
+<label><input type="checkbox" data-k="d4-3"><span>能用 Lua 写出分布式锁的加锁/解锁脚本</span></label>
+<label><input type="checkbox" data-k="d4-4"><span>能讲清 Redisson 看门狗机制及「传 leaseTime 失效」的坑</span></label>
+<label><input type="checkbox" data-k="d4-5"><span>能讲清 Redlock 争议，知道什么场景不该用锁</span></label>
+<label><input type="checkbox" data-k="d4-6"><span>能独立排查大 key / 热 key（含四种发现手段）</span></label>
+<label><input type="checkbox" data-k="d4-7"><span>能说出 Redis 8.x 的核心新特性（模块内置化、HOTKEYS、原子槽迁移）</span></label>
+<label><input type="checkbox" data-k="d4-8"><span>了解 Valkey 分叉和许可证变化的历史脉络</span></label>
+</div>
+
+<h3>Day 5 · 工程化与面试</h3>
+<div class="track">
+<label><input type="checkbox" data-k="d5-1"><span>能讲清 Jedis 与 Lettuce 的线程模型差异，知道何时用哪个</span></label>
+<label><input type="checkbox" data-k="d5-2"><span>能配置生产级 RedisTemplate / Redisson（含 Cluster 和超时）</span></label>
+<label><input type="checkbox" data-k="d5-3"><span>能讲清 Pipeline / 事务 / Lua 的区别和选型</span></label>
+<label><input type="checkbox" data-k="d5-4"><span>能用 INFO / SLOWLOG / LATENCY / CLIENT LIST 定位问题</span></label>
+<label><input type="checkbox" data-k="d5-5"><span>能独立处理 12 个典型场景题（秒杀、排行榜、限流、延时队列等）</span></label>
+<label><input type="checkbox" data-k="d5-6"><span>能答出 60 道面试题的 L1-L3 层，L4 层能说出权衡</span></label>
+<label><input type="checkbox" data-k="d5-7"><span>准备好 3 个真实的 Redis 故障复盘故事</span></label>
+<label><input type="checkbox" data-k="d5-8"><span>能用本节的 Checklist 独立完成一次 Redis 上线</span></label>
+</div>
+
+<h2>八、延伸学习资源</h2>
+
+<div class="box b-int">
+<div class="box-t">想继续深入的方向（分三类）</div>
+</div>
+
+<h4>官方与权威</h4>
+<table>
+<thead><tr><th>资源</th><th>地址 / 说明</th></tr></thead>
+<tbody>
+<tr><td>Redis 官方文档</td><td><code class="inline">redis.io/docs</code>，命令参考最权威，每个命令都有复杂度标注</td></tr>
+<tr><td>Redis 源码</td><td><code class="inline">github.com/redis/redis</code>，重点看 <code class="inline">src/t_zset.c</code>、<code class="inline">src/dict.c</code>、<code class="inline">src/aof.c</code></td></tr>
+<tr><td>Redis 官方博客</td><td><code class="inline">redis.io/blog</code>，antirez 的历史文章很有价值</td></tr>
+<tr><td>Redis 8 发布说明</td><td>搜索「Redis 8.0 GA」Release Notes，逐条看新特性</td></tr>
+<tr><td>RESP3 规范</td><td><code class="inline">github.com/redis/redis-specifications</code></td></tr>
+</tbody>
+</table>
+
+<h4>深度文章与书籍（按推荐度排序）</h4>
+<table>
+<thead><tr><th>资源</th><th>价值</th></tr></thead>
+<tbody>
+<tr><td><strong>《Redis 设计与实现》</strong>（黄健宏）</td><td>国内最经典的源码剖析书，配套注释版源码。Day2 的底层原理看这本最透彻</td></tr>
+<tr><td><strong>《Redis 深度历险》</strong>（钱文品）</td><td>偏实战，讲了很多线上问题，适合 3-5 年工程师补实战经验</td></tr>
+<tr><td><strong>《Redis 核心原理与实战》</strong>（极客时间）</td><td>系统性强，有大量图解</td></tr>
+<tr><td><strong>Kleppmann 的 Redlock 批评文章</strong></td><td>搜索「How to do distributed locking」，理解分布式锁的本质缺陷</td></tr>
+<tr><td><strong>antirez 的 Redlock 回应</strong></td><td>搜索「Is Redlock safe?」，两面都读才有判断力</td></tr>
+<tr><td>Redis 官方 latency 文档</td><td><code class="inline">redis.io/topics/latency</code>，排查延迟问题的权威指南</td></tr>
+<tr><td>各厂技术博客（大厂方案）</td><td>京东 JDHotKey、美团 Redis 实践、得物/B站热key方案，搜「XX 热key 治理」</td></tr>
+</tbody>
+</table>
+
+<h4>动手实践建议（比看书重要 10 倍）</h4>
+<ol class="steps">
+<li class="step"><strong>搭一套本地 Cluster</strong>（6 节点），完整做一遍槽迁移、故障转移、扩容。这个过程能让抽象的 Slot 概念变具体。</li>
+<li class="step"><strong>写一个缓存框架</strong>：包含穿透/击穿/雪崩防护 + 本地缓存 + 降级。这是面试项目的绝佳素材。</li>
+<li class="step"><strong>用 redis-benchmark 做完整压测</strong>：分别测单机/主从/Cluster，测 P=1 vs P=16，测开启 BGSAVE 前后。</li>
+<li class="step"><strong>读一次 t_zset.c</strong>：跳表的插入、删除、范围查询，代码不多（几百行），读完对跳表的理解会质变。</li>
+<li class="step"><strong>做一次故障演练</strong>：在测试环境 <code class="inline">kill -9</code> 主库，观察哨兵/Cluster 的切换过程，用日志和 <code class="inline">CLUSTER NODES</code> 追踪整个流程。</li>
+<li class="step"><strong>分析一次真实的 RDB</strong>：用 redis-rdb-tools 分析，看每个 key 的实际内存占用，理解「为什么 100 万个 key 会占那么多内存」。</li>
+</ol>
+
+<div class="box b-tip">
+<div class="box-t">最后一段话</div>
+<p>学完这 19 节，你手里应该有了三样东西：</p>
+<ol class="steps">
+<li class="step"><strong>一套完整的知识体系</strong>——从部署到源码，从单机到集群，从缓存到分布式锁。</li>
+<li class="step"><strong>一套排查问题的方法论</strong>——遇到任何 Redis 问题，你知道从哪开始查、按什么顺序查。</li>
+<li class="step"><strong>一份可以直接用的 Checklist</strong>——上线、监控、应急，都有标准动作，不靠记忆靠流程。</li>
+</ol>
+<p>但真正让你在面试中脱颖而出的，从来不是「你知道多少」，而是<strong>「你踩过什么坑、怎么定位、怎么解决、怎么预防」</strong>。所以最后一件事：<strong>去动手。</strong> 搭一套环境，写一段代码，制造一次故障，读一次源码。</p>
+<p>知识会在实践中变成能力。祝你在面试中拿到满意的 Offer。</p>
+</div>
+
+<div class="track">
+<label><input type="checkbox" data-k="final-1"><span>我已经完成 Day1-Day5 全部自检项</span></label>
+<label><input type="checkbox" data-k="final-2"><span>我准备好在真实环境中实践这些知识</span></label>
+<label><input type="checkbox" data-k="final-3"><span>我已经准备好 3 个可讲的项目/故障经历</span></label>
+</div>
+
+</section>

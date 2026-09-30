@@ -1,0 +1,584 @@
+<section id="c04-thread" class="anchor" data-title="Day2.1 · 为什么 Redis 这么快（线程模型）">
+<div class="ch-meta">
+  <span class="ch-num">Day 2 · 第 1 节</span>
+  <span class="badge bg-blue">预计 75 分钟</span>
+  <span class="badge bg-red">面试必问</span>
+</div>
+<h1>Day2.1 · 线程模型：为什么单线程能扛 10 万 QPS</h1>
+
+<div class="box b-tip">
+  <div class="box-t">一句话结论</div>
+  <p>「Redis 快」不是因为单线程，而是因为<strong>纯内存 + 高效数据结构 + I/O 多路复用 + 避免锁竞争</strong>；单线程是<strong>「在那个前提下」的简化选择</strong>，且它的瓶颈是<strong>CPU 单核和网络</strong>，不是并发数。6.0 之后 I/O 线程化，但<strong>命令执行仍然单线程</strong>——这个区分是面试的核心考点。</p>
+</div>
+
+<h2 id="c04-1">1. 五个「快」的原因（分层回答，不要背名词）</h2>
+<table>
+<thead><tr><th style="width:16%">原因</th><th>机制</th><th>量级/收益</th><th>面试追问点</th></tr></thead>
+<tbody>
+<tr><td><strong>纯内存操作</strong></td><td>数据全在内存，读写是纳秒级，无磁盘 I/O</td><td>内存随机访问 ~100ns vs SSD 随机读 ~100μs，差 1000 倍</td><td>持久化怎么办？（异步 RDB/AOF，不阻塞主流程）</td></tr>
+<tr><td><strong>高效数据结构</strong></td><td>SDS、listpack、quicklist、跳表，都是为场景定制的紧凑结构</td><td>对比通用结构（如 Java HashMap）省大量内存和指针跳转</td><td>为什么不用通用结构？（内存碎片、指针开销、缓存不友好）</td></tr>
+<tr><td><strong>单线程无锁</strong></td><td>命令串行执行，天然原子，无线程切换、无锁竞争、无 CAS 失败重试</td><td>省下锁开销与上下文切换（切换一次约 1-5μs）</td><td>那并发怎么上来？（epoll 处理连接，单线程处理命令）</td></tr>
+<tr><td><strong>I/O 多路复用</strong></td><td>epoll 单线程监听海量连接，事件驱动</td><td>10 万并发连接只需 1 个线程</td><td>select/poll/epoll 区别？（见下）</td></tr>
+<tr><td><strong>RESP 简单协议</strong></td><td>文本协议，解析简单（状态、错误、整数、批量、数组 5 种类型）</td><td>解析开销小，跨语言实现容易</td><td>RESP3 新增了什么？（Map/Set/Double/Push 类型，支持客户端缓存）</td></tr>
+</tbody>
+</table>
+
+<div class="box b-warn">
+  <div class="box-t">⚠️ 一个常见错误答法</div>
+  <p>❌「Redis 是单线程的，所以快。」</p>
+  <p>这个逻辑是错的——单线程本身<strong>不会</strong>带来性能，反而限制吞吐（只能用 1 个核）。正确的表述是：</p>
+  <p>✅「Redis 把主要数据结构和算法做到了极致，然后<strong>选择了单线程来避免并发控制的复杂度</strong>——因为它的瓶颈在网络和内存访问，而不在 CPU 并行度。单线程让代码简单、行为确定性、每个命令天然原子。当网络成为瓶颈后，6.0 引入了多线程 I/O，但命令执行仍然单线程以保持原子性。」</p>
+</div>
+
+<h2 id="c04-2">2. epoll、select、poll 的对比（高频原题）</h2>
+<table>
+<thead><tr><th style="width:11%">机制</th><th>数据结构</th><th>时间复杂度</th><th>最大连接数</th><th>核心缺陷</th></tr></thead>
+<tbody>
+<tr><td><strong>select</strong></td><td>位图（fd_set）</td><td>O(N) 遍历所有 fd 找就绪的</td><td>受限（FD_SETSIZE，通常 1024）</td><td>① fd 数量受限 ② 每次调用都要把 fd 集合从用户态拷贝到内核态 ③ 返回后还要 O(N) 遍历哪些就绪了</td></tr>
+<tr><td><strong>poll</strong></td><td>数组（pollfd[]）</td><td>O(N) 遍历</td><td>无硬限制（受内存限制）</td><td>仍需要拷贝整个数组 + O(N) 遍历；连接多时性能线性下降</td></tr>
+<tr><td><strong>epoll</strong><br><span class="badge bg-green">Redis 使用</span></td><td>红黑树（管理 fd）+ 就绪链表</td><td>O(1) 获取就绪事件</td><td>无硬限制（受内存限制）</td><td>代码更复杂；Linux 专有（BSD 是 kqueue，Windows 是 IOCP）</td></tr>
+</tbody>
+</table>
+
+<div class="box b-big">
+  <div class="box-t">✅ epoll 为什么快？三个关键设计</div>
+  <ol>
+    <li><strong>红黑树管理 fd</strong>：<code class="inline">epoll_ctl</code> 增删改 fd 用红黑树，O(log N)，且<strong>只需注册一次</strong>，不用每次调用都传整个集合。</li>
+    <li><strong>就绪链表（rdllist）避免遍历</strong>：fd 就绪时由内核回调把它挂到就绪链表上，<code class="inline">epoll_wait</code> 直接返回链表内容，<strong>O(1) 拿到就绪集合，不需要 O(N) 扫描全部 fd</strong>。这是相对 select/poll 最本质的改进。</li>
+    <li><strong>mmap 共享内存避免拷贝</strong>：内核与用户空间通过 mmap 共享一块内存存放 epoll 事件，避免 select/poll 那种「每次调用都要把 fd 集合从用户态拷贝到内核态」的开销。</li>
+  </ol>
+  <p><strong>两种触发模式</strong>（面试常追问）：</p>
+  <ul>
+    <li><strong>LT（水平触发，Level Triggered）</strong>：只要缓冲区有数据就<strong>持续通知</strong>，直到读完。是 epoll 默认模式，编程简单、不易漏事件，<strong>Redis 用的是 LT</strong>。</li>
+    <li><strong>ET（边缘触发，Edge Triggered）</strong>：只在状态变化时通知<strong>一次</strong>，必须一次把数据读完（循环 read 到 EAGAIN），否则事件丢失。性能更高但编程复杂，Nginx 用 ET。</li>
+  </ul>
+  <p>注意：ET 通常需要配合<strong>非阻塞 fd</strong>，否则最后一次 read 会阻塞住。</p>
+</div>
+
+<h2 id="c04-3">3. Redis 的线程演进史（版本维度回答）</h2>
+<table>
+<thead><tr><th style="width:12%">版本</th><th>线程模型</th><th>变化要点</th></tr></thead>
+<tbody>
+<tr><td>1.0 – 5.0</td><td>纯单线程</td><td>主线程做全部：socket 读 → 协议解析 → 命令执行 → 回复格式化 → socket 写。另有 3 个后台线程（<code class="inline">bio_close_file</code>、<code class="inline">bio_aof_fsync</code>、<code class="inline">bio_lazy_free</code>）处理关闭文件、AOF 刷盘、异步释放内存。</td></tr>
+<tr><td>6.0</td><td>单线程执行 + 多线程 I/O</td><td>引入 <code class="inline">io-threads</code>，把 <strong>socket 读写和协议解析/回复格式化</strong>多线程化；<strong>命令执行仍在主线程</strong>，保证原子性。默认关闭（<code class="inline">io-threads 1</code>）。</td></tr>
+<tr><td>7.x</td><td>优化 I/O 线程</td><td>改进任务分配与长连接处理，减少线程协作开销。</td></tr>
+<tr><td><strong>8.0</strong></td><td>I/O 线程重构</td><td>I/O 线程采用<strong>「按客户端绑定」</strong>模型：I/O 线程负责特定客户端的完整读/解析周期，主线程批量处理已解析的查询并生成回复，再由 I/O 线程写回。<strong>8 核机器上吞吐最高提升 112%</strong>。同时 30+ 项命令级优化，149 个测试命令中 p50 延迟下降 5.4%~87.4%。</td></tr>
+</tbody>
+</table>
+
+<div class="box b-tip">
+  <div class="box-t">🔬 亲手验证：观察线程与 I/O 线程配置</div>
+  <pre style="margin:10px 0 0"><code class="lang-bash"><span class="cm"># 查看 I/O 线程配置</span>
+CONFIG GET io-threads
+CONFIG GET io-threads-do-reads
+
+<span class="cm"># 开启 I/O 线程（4 线程），用压测对比 QPS 差异</span>
+CONFIG SET io-threads 4
+CONFIG SET io-threads-do-reads yes
+redis-benchmark -h 127.0.0.1 -q -n 200000 -c 100 -P 1 -t get,set
+
+<span class="cm"># 对比：关掉 I/O 线程再压一次</span>
+CONFIG SET io-threads 1
+redis-benchmark -h 127.0.0.1 -q -n 200000 -c 100 -P 1 -t get,set
+
+<span class="cm"># 查看线程信息（8.0+ 有 INFO Threads 段）</span>
+INFO threads
+
+<span class="cm"># 在宿主机上从进程层面看线程数</span>
+ps -eLf | grep redis-server | wc -l</code></pre>
+</div>
+
+<div class="box b-x">
+  <div class="box-t">🚨 I/O 线程的两个坑</div>
+  <ol style="margin-bottom:0">
+    <li><strong>io-threads 不是越大越好</strong>：建议为 <strong>CPU 核数的 1/2 ~ 3/4</strong>，且<strong>至少 4 核以上才有意义</strong>（因为主线程也要占一个核，还要考虑与业务进程争抢 CPU）。设置成 8 或 16 在 4 核机器上反而因为上下文切换变慢。</li>
+    <li><strong>io-threads 只加速网络 I/O，不加速命令本身</strong>。如果你的慢是「大 key 的 HGETALL 花了 50ms」，加 I/O 线程毫无帮助——那是单线程命令执行的瓶颈，唯一的解法是治理大 key。</li>
+  </ol>
+</div>
+
+<h2 id="c04-4">4. 单线程的瓶颈在哪里（面试深挖点）</h2>
+<p>这是区分「背过」和「想过」的分水岭。</p>
+<table>
+<thead><tr><th style="width:22%">瓶颈</th><th>为什么</th><th>怎么缓解</th></tr></thead>
+<tbody>
+<tr><td><strong>单个 O(N) 命令</strong></td><td>单线程执行，一个慢命令（<code class="inline">KEYS</code>、大 key 的 <code class="inline">HGETALL</code>、<code class="inline">SORT</code>、<code class="inline">SMEMBERS</code>）会阻塞所有后续请求</td><td>禁用危险命令；用 SCAN 替代；治理大 key；用 Lua 控制脚本复杂度</td></tr>
+<tr><td><strong>单个 CPU 核</strong></td><td>命令执行只能用 1 核，无法利用多核做命令并行</td><td>部署多个 Redis 实例（分片）；用 I/O 线程分担网络</td></tr>
+<tr><td><strong>fork 阻塞</strong></td><td>RDB/AOF 重写时 fork 主线程，内存越大 fork 越慢（页表复制）</td><td>控制单实例内存（如 &lt;10GB~16GB）；用 <code class="inline">vm.overcommit_memory=1</code>；避免在 fork 时大量写入</td></tr>
+<tr><td><strong>大 key 删除</strong></td><td><code class="inline">DEL</code> 大对象需同步释放，可能阻塞秒级</td><td>用 <code class="inline">UNLINK</code> 异步回收；开 <code class="inline">lazyfree-lazy-*</code> 系列配置</td></tr>
+<tr><td><strong>AOF 刷盘策略</strong></td><td><code class="inline">always</code> 时主线程每次都 fsync，吞吐暴跌</td><td>用 <code class="inline">everysec</code>（后台线程 fsync）</td></tr>
+<tr><td><strong>swap</strong></td><td>内存被换到磁盘，延迟从微秒到毫秒级</td><td>关闭 swap 或 <code class="inline">vm.swappiness=0</code>；监控 <code class="inline">used_memory</code></td></tr>
+<tr><td><strong>网络带宽</strong></td><td>大 key 返回时网络打满，影响所有请求</td><td>控制 value 大小；用 pipeline 减少报文头开销</td></tr>
+</tbody>
+</table>
+
+<div class="box b-big">
+  <div class="box-t">✅ 一个「10 年经验」级别的回答模板</div>
+  <p><strong>问：Redis 单线程的瓶颈是什么？线上遇到过吗？</strong></p>
+  <p>「理论上 Redis 单线程的瓶颈有三个层面：<strong>① 单核 CPU</strong>——命令执行无法并行，所以单实例 QPS 有上限；<strong>② 单条慢命令</strong>——任何 O(N) 命令都会阻塞后面的所有请求，这是线上最常见的抖动原因；<strong>③ fork 与内存</strong>——RDB 快照或 AOF 重写时 fork 主线程，内存越大耗时越长，同时 COW 会导致内存峰值上升。</p>
+  <p>我们线上遇到过一次典型问题：某个商品活动缓存把 800 多个 SKU 的促销信息放在一个 Hash 里，代码用 <code class="inline">HGETALL</code> 全量拉取。大促时这个 key 变成热 key，单次 HGETALL 就要几十毫秒，直接把那个分片的 CPU 打到 99.97%，P99 延迟从 0.8ms 涨到 127ms。</p>
+  <p>解法分三步：<strong>止血</strong>——对该热点加本地缓存（Caffeine，1 分钟过期）；<strong>结构改造</strong>——把大 Hash 按 SKU 拆成独立的 String key，改造查询逻辑只取需要的字段；<strong>机制建设</strong>——接入热 key 探测 + 大 key 扫描巡检，把这类问题提前发现。」</p>
+  <p style="margin-bottom:0">👉 这个回答的价值在于：<strong>有理论分层 + 有真实数据 + 有分阶段解法 + 有长效机制</strong>。这就是 10 年经验该有的密度。</p>
+</div>
+
+<h2 id="c04-5">5. 一次命令的完整生命周期（把知识串起来）</h2>
+<div class="card">
+  <p style="margin-top:0"><strong>客户端发送 <code class="inline">GET user:1001</code> 到收到回复，中间发生了什么：</strong></p>
+  <ol style="margin-bottom:0">
+    <li><strong>建立连接</strong>（首次）：客户端 TCP 连接（可选 TLS），Redis 用 epoll 注册该 fd 到红黑树。</li>
+    <li><strong>数据到达</strong>：内核把数据写入 socket 接收缓冲区，epoll 检测到可读事件，把该 fd 挂到就绪链表。</li>
+    <li><strong>事件分发</strong>：主线程（或 I/O 线程）从 epoll_wait 返回，拿到就绪的 fd 列表。</li>
+    <li><strong>读取与解析</strong>：从 socket 读取字节流，按 RESP 协议解析出命令名 + 参数（6.0+ 这部分可多线程）。</li>
+    <li><strong>查找命令表</strong>：在 <code class="inline">redisCommandTable</code> 里按命令名找到对应的处理函数（这就是为什么 Redis 命令是固定集合，无法动态扩展）。</li>
+    <li><strong>权限校验</strong>：ACL 检查用户是否有权限执行该命令、是否可访问该 key（Redis 6.0+）。</li>
+    <li><strong>命令执行</strong>：调用 <code class="inline">getCommand</code> → 在 <code class="inline">dict</code>（全局哈希表）中查找 key → 检查是否过期（惰性删除）→ 返回 SDS。</li>
+    <li><strong>传播与持久化</strong>：如果是写命令，追加到 AOF 缓冲区 + 复制到从节点缓冲区（repl backlog）。</li>
+    <li><strong>回复格式化</strong>：把结果编码成 RESP（<code class="inline">$5\r\nvalue\r\n</code>）。6.0+ 这部分也可多线程。</li>
+    <li><strong>写回 socket</strong>：把回复写入 socket 发送缓冲区，由 epoll 检测可写事件后发送（6.0+ 可多线程）。</li>
+  </ol>
+</div>
+
+<h2 id="c04-6">面试深度问答</h2>
+
+<details class="qa"><summary>Redis 为什么这么快？是单线程吗？<span class="lvl lv1">基础</span></summary>
+<div class="qa-b">
+<p><strong>四层回答</strong>：</p>
+<ol>
+<li><strong>纯内存</strong>：数据在内存，读写纳秒级，不用磁盘 I/O。内存随机访问约 100ns，SSD 随机读约 100μs，差三个数量级。</li>
+<li><strong>数据结构高效</strong>：SDS、listpack、quicklist、跳表都是为特定场景定制的紧凑结构，避免了通用数据结构的指针开销和内存碎片。</li>
+<li><strong>I/O 多路复用 + 单线程执行</strong>：用 epoll 单线程管理海量连接，事件驱动；命令串行执行，天然原子，<strong>没有锁竞争、没有线程切换、没有 CAS 重试</strong>。</li>
+<li><strong>协议简单</strong>：RESP 文本协议解析开销小。</li>
+</ol>
+<p><strong>关键澄清（一定要主动说）</strong>：</p>
+<ul>
+<li>「单线程」指的是<strong>命令执行</strong>是单线程的，不是整个 Redis 只有一个线程。Redis 还有后台线程处理 AOF fsync、异步释放、关闭文件。</li>
+<li><strong>6.0 起引入多线程 I/O</strong>：socket 读写和协议解析可以多线程，但<strong>命令执行仍单线程</strong>，以保证原子性、避免加锁。默认关闭。</li>
+<li>所以准确表述是：<strong>「Redis 用单线程做命令执行，用多线程做网络 I/O。」</strong></li>
+</ul>
+</div></details>
+
+<details class="qa"><summary>为什么命令执行不改成多线程？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p>六个理由，按重要性排序：</p>
+<ol>
+<li><strong>并发正确性</strong>：一旦命令并行执行，就必须为每种数据结构引入细粒度锁。而 Redis 的复杂度优势（代码简单、bug 少）会立刻消失。<code class="inline">INCR</code>、<code class="inline">LPUSH</code> 这类操作在多线程下需要 CAS 或锁，性能反而可能下降。</li>
+<li><strong>数据结构不支持并发</strong>：跳表、dict、listpack 都没有线程安全设计。给它们加锁的成本远高于收益。</li>
+<li><strong>瓶颈不在 CPU</strong>：Redis 的瓶颈是网络 I/O 和内存带宽，不是 CPU 计算。10 万 QPS 时 CPU 使用率往往只有 30%-50%（大 key 场景除外）。既然瓶颈不在 CPU，加并行度没意义。</li>
+<li><strong>原子性带来的附加值</strong>：单线程让 <code class="inline">INCR</code>、<code class="inline">SETNX</code>、<code class="inline">MULTI/EXEC</code> 天然原子，用户不需要考虑并发问题。这是 Redis 的核心卖点之一。</li>
+<li><strong>多线程会引入延迟不确定性</strong>：线程调度、锁争抢会带来延迟毛刺。Redis 追求 P99 稳定。</li>
+<li><strong>有更好的横向方案</strong>：需要多核并行时，用集群分片（多个 Redis 实例）比单实例多线程更简单、隔离性更好（一个实例出问题不影响其他）。</li>
+</ol>
+<p><strong>专家补充</strong>：Redis 官方在 8.0 重构 I/O 线程时，仍然守住了「<strong>只有内存修改是串行的</strong>」这条底线——8.0 的做法是让 I/O 线程负责某个客户端的完整读取/解析周期，主线程批量取走已解析的查询并串行执行。这个架构既能利用多核做 I/O，又保住了原子性。<strong>这是「如何在现代化架构的同时保住核心不变量」的教科书级案例。</strong></p>
+</div></details>
+
+<details class="qa"><summary>IO 多路复用中，epoll 和 select 的区别？<span class="lvl lv2">进阶</span></summary>
+<div class="qa-b">
+<p>从「数据结构 / 复杂度 / 限制 / 拷贝开销」四个维度对比，见上表。核心三点：</p>
+<ol>
+<li><strong>select 用位图，fd 数量受限（1024）</strong>，且每次调用都要传整个集合、内核要 O(N) 扫描、返回后用户态还要 O(N) 扫描。</li>
+<li><strong>epoll 用红黑树管理 fd + 就绪链表</strong>：注册一次，之后 <code class="inline">epoll_wait</code> 直接返回就绪链表，<strong>O(1) 拿到就绪事件，不需要遍历全部连接</strong>。这是最本质的改进。</li>
+<li><strong>epoll 用 mmap 共享内存</strong>避免用户态/内核态的 fd 集合拷贝，select/poll 每次调用都要拷贝。</li>
+</ol>
+<p><strong>追问：epoll 一定比 select 快吗？</strong><br>
+不一定。<strong>连接数少且都很活跃时</strong>，select/poll 的 O(N) 遍历中 N 很小，开销可以忽略，epoll 的红黑树维护和回调注册反而有额外开销。epoll 的优势在<strong>「连接数多但活跃连接少」</strong>的场景（这正是互联网长连接服务的特征：10 万连接同时只有几百个在发数据）。<strong>能说出这个 trade-off，是通过面试的关键。</strong></p>
+</div></details>
+
+<details class="qa"><summary>Redis 6.0 的多线程，和 Memcached 的多线程有什么不同？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p>这是「架构取舍」的经典对比题：</p>
+<table>
+<thead><tr><th style="width:16%">维度</th><th>Redis 6.0+</th><th>Memcached</th></tr></thead>
+<tbody>
+<tr><td>多线程范围</td><td>只有网络 I/O 和协议解析/回复格式化</td><td><strong>命令执行也是多线程</strong>（多 worker 线程并行处理请求）</td></tr>
+<tr><td>并发控制</td><td>无需加锁（命令串行）</td><td>需要对 item 加锁（分段锁/引用计数），存在锁竞争</td></tr>
+<tr><td>数据结构</td><td>丰富（10+ 种），支持原子复合操作</td><td>只有 KV（value 是不透明字节串）</td></tr>
+<tr><td>CPU 利用</td><td>命令执行只用 1 核，扩展靠分片</td><td>能吃满多核</td></tr>
+<tr><td>性能特征</td><td>简单 KV 场景下单线程已够；复杂数据结构无锁优势明显</td><td>大并发简单 KV 场景吞吐更高</td></tr>
+</tbody>
+</table>
+<p><strong>核心洞察</strong>：Memcached 选多线程是因为它的价值就是「极致简单的 KV 缓存」，用分段锁把锁竞争控制在可接受范围。而 Redis 有多样的数据结构和原子复合操作（<code class="inline">ZINCRBY</code>、<code class="inline">LPUSH+LTRIM</code> 组合、Lua 脚本），<strong>这些操作的原子性价值远高于多核并行带来的吞吐提升</strong>。所以 Redis 宁可牺牲单机吞吐，也要保住原子性——需要吞吐就横向分片。</p>
+<p><strong>延伸</strong>：这也是为什么 <strong>KeyDB / Dragonfly / Valkey</strong> 这些「多线程 Redis」的实现，都在原子性语义上做了明确的取舍声明（比如某些复合命令不再保证原子，或需要显式开启）。</p>
+</div></details>
+
+<details class="qa"><summary>Redis 的请求处理流程是怎样的？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p>按本节第 5 部分的 10 步回答即可。重点突出三个「能体现深度」的环节：</p>
+<ol>
+<li><strong>命令查找走「命令表」</strong>：<code class="inline">redisCommandTable</code> 是一个静态数组，按命令名哈希查找。这解释了「为什么 Redis 不能像 MongoDB 那样随意扩展命令」——扩展靠 module 或 Function。</li>
+<li><strong>ACL 校验在命令执行前</strong>：包括命令权限 + key 模式匹配，这是性能开销的一部分（8.6 专门优化了 ACL 权限校验）。</li>
+<li><strong>写命令的传播路径</strong>：AOF 缓冲区 + 复制缓冲区是<strong>两个独立的追加</strong>，这也是为什么 AOF 重写期间需要用「重写缓冲区」来记录期间的写命令（7.0 后被 MP-AOF 的增量文件替代）。这个细节能串起 Day2.4 的持久化内容。</li>
+</ol>
+<p><strong>加分点</strong>：提到 <code class="inline">INFO commandstats</code> 能看到每个命令的执行次数、总耗时、平均耗时——这是定位「哪个命令慢」的第一手数据，比只看慢日志更全面（慢日志只记录超过阈值的）。</p>
+</div></details>
+
+<h2 id="c04-7">本节自测</h2>
+<div class="track">
+  <label><input type="checkbox" data-k="d2-1"><span>我能说出 Redis 快的 5 个原因，并纠正「单线程所以快」的错误说法</span></label>
+  <label><input type="checkbox" data-k="d2-2"><span>我能对比 select / poll / epoll，并说清 epoll 快的三个关键设计</span></label>
+  <label><input type="checkbox" data-k="d2-3"><span>我能解释 LT 与 ET 的区别，以及 Redis 为什么用 LT</span></label>
+  <label><input type="checkbox" data-k="d2-4"><span>我能说出 6.0 / 8.0 的 I/O 线程改进，以及为什么命令执行仍单线程</span></label>
+  <label><input type="checkbox" data-k="d2-5"><span>我能列出单线程的 7 个瓶颈及对应缓解手段</span></label>
+  <label><input type="checkbox" data-k="d2-6"><span>我能完整描述一次命令的生命周期（10 个步骤）</span></label>
+  <label><input type="checkbox" data-k="d2-7"><span>我能对比 Redis 与 Memcached 的线程模型取舍</span></label>
+  <label><input type="checkbox" data-k="d2-8"><span>我能说明 io-threads 的合理取值与它的能力边界</span></label>
+</div>
+</section>
+
+<section id="c05-struct" class="anchor" data-title="Day2.2 · 底层数据结构源码级剖析">
+<div class="ch-meta">
+  <span class="ch-num">Day 2 · 第 2 节</span>
+  <span class="badge bg-blue">预计 90 分钟</span>
+  <span class="badge bg-purple">资深分水岭</span>
+</div>
+<h1>Day2.2 · 底层数据结构：看懂 Redis 的「内存艺术」</h1>
+
+<div class="box b-tip">
+  <div class="box-t">一句话结论</div>
+  <p>Redis 的性能优势有一半来自<strong>「为每种场景选择最省内存的编码，并在数据量变大时自动转换」</strong>。你要掌握的不是背结构名，而是理解三组关键开关：<strong>listpack ↔ hashtable</strong>、<strong>intset ↔ listpack ↔ hashtable</strong>、<strong>listpack ↔ quicklist ↔ skiplist</strong>——以及它们背后的<strong>阈值参数怎么调、调错会怎样</strong>。</p>
+</div>
+
+<h2 id="c05-1">1. 全局视角：redisObject 与编码转换</h2>
+<p>每个 Redis 的 value 都是一个 <code class="inline">redisObject</code>：</p>
+<pre><code class="lang-c"><span class="kw">typedef struct</span> redisObject {
+    <span class="kw">unsigned</span> type:<span class="nu">4</span>;      <span class="cm">// 逻辑类型：OBJ_STRING / OBJ_LIST / OBJ_SET / OBJ_ZSET / OBJ_HASH / OBJ_STREAM</span>
+    <span class="kw">unsigned</span> encoding:<span class="nu">4</span>;  <span class="cm">// 物理编码：int / embstr / raw / listpack / quicklist / intset / skiplist / hashtable</span>
+    <span class="kw">unsigned</span> lru:<span class="nu">24</span>;       <span class="cm">// LRU 时间戳 或 LFU（16位时间 + 8位计数器）</span>
+    <span class="kw">int</span> refcount;            <span class="cm">// 引用计数（共享整数对象 0~9999 会复用）</span>
+    <span class="kw">void</span> *ptr;               <span class="cm">// 指向具体数据结构</span>
+} robj;
+<span class="cm">// 共 16 字节（在 64 位系统上）= 4bit + 4bit + 24bit + 4字节 + 8字节</span></code></pre>
+<p><strong>用 <code class="inline">OBJECT ENCODING key</code> 可以直接观察编码：</strong></p>
+<pre><code class="lang-bash"><span class="cm">########## 亲手验证编码转换 ##########</span>
+
+<span class="cm"># ---- String 三态 ----</span>
+SET s1 12345
+OBJECT ENCODING s1          <span class="cm"># → "int"（纯数字且 ≤ 20 位）</span>
+SET s2 <span class="st">"hello world"</span>
+OBJECT ENCODING s2          <span class="cm"># → "embstr"（≤ 44 字节）</span>
+SET s3 <span class="st">"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"</span>   <span class="cm"># 50 个字符</span>
+OBJECT ENCODING s3          <span class="cm"># → "raw"（&gt; 44 字节）</span>
+APPEND s2 <span class="st">"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"</span>
+OBJECT ENCODING s2          <span class="cm"># → "raw"（APPEND 后超过 44 字节，embstr 会转 raw，且不可逆）</span>
+
+<span class="cm"># ---- Hash ----</span>
+HSET h1 f1 v1 f2 v2
+OBJECT ENCODING h1          <span class="cm"># → "listpack"</span>
+<span class="cm"># 让字段数超过 128</span>
+<span class="cm"># for i in $(seq 1 200); do redis-cli hset h2 f$i v$i > /dev/null; done</span>
+OBJECT ENCODING h2          <span class="cm"># → "hashtable"</span>
+<span class="cm"># 或让某个 value 超过 64 字节</span>
+HSET h3 ff <span class="st">"$(printf 'a%.0s' {1..70})"</span>
+OBJECT ENCODING h3          <span class="cm"># → "hashtable"</span>
+
+<span class="cm"># ---- List ----</span>
+RPUSH l1 a b c
+OBJECT ENCODING l1          <span class="cm"># → "listpack"（元素少且小）</span>
+<span class="cm"># 超过 list-max-listpack-size 后转 quicklist</span>
+OBJECT ENCODING l2          <span class="cm"># → "quicklist"</span>
+
+<span class="cm"># ---- Set ----</span>
+SADD set1 1 2 3
+OBJECT ENCODING set1        <span class="cm"># → "intset"（全整数且元素少）</span>
+SADD set2 a b c
+OBJECT ENCODING set2        <span class="cm"># → "listpack"（7.2+ 引入；6.x 是 hashtable）</span>
+<span class="cm"># 让元素数超过 set-max-intset-entries / set-max-listpack-entries</span>
+OBJECT ENCODING set3        <span class="cm"># → "hashtable"</span>
+
+<span class="cm"># ---- ZSet ----</span>
+ZADD z1 1 a
+OBJECT ENCODING z1          <span class="cm"># → "listpack"</span>
+<span class="cm"># 超过 zset-max-listpack-entries 或 value 超过 zset-max-listpack-value</span>
+OBJECT ENCODING z2          <span class="cm"># → "skiplist"</span>
+
+<span class="cm">########## 关键阈值参数 ##########</span>
+CONFIG GET hash-max-listpack-entries       <span class="cm"># 默认 128（7.0 前叫 hash-max-ziplist-entries）</span>
+CONFIG GET hash-max-listpack-value         <span class="cm"># 默认 64</span>
+CONFIG GET set-max-intset-entries          <span class="cm"># 默认 512</span>
+CONFIG GET set-max-listpack-entries        <span class="cm"># 默认 128（7.2+）</span>
+CONFIG GET set-max-listpack-value          <span class="cm"># 默认 64</span>
+CONFIG GET zset-max-listpack-entries       <span class="cm"># 默认 128</span>
+CONFIG GET zset-max-listpack-value         <span class="cm"># 默认 64</span>
+CONFIG GET list-max-listpack-size          <span class="cm"># 默认 128（负数表示按大小限制：-2 表示 8KB）</span></code></pre>
+
+<h2 id="c05-2">2. listpack：Redis 的「紧凑内存之王」</h2>
+<p>listpack 是 Redis 7.0 引入的、用来替代 ziplist 的结构。理解它，就理解了 Redis 为什么能用很少内存存很多小对象。</p>
+<table>
+<thead><tr><th style="width:20%">特性</th><th>ziplist（已废弃）</th><th>listpack（7.0+）</th></tr></thead>
+<tbody>
+<tr><td>结构</td><td>连续内存块，每个 entry 记录<strong>前一个 entry 的长度</strong></td><td>连续内存块，每个 entry 只记录<strong>自己的长度</strong></td></tr>
+<tr><td>致命问题</td><td><strong>连锁更新（cascade update）</strong>：修改一个 entry 可能引发后续所有 entry 的长度字段更新，最坏 O(N²)</td><td>✅ 每项只存自己的长度，插入/删除<strong>只影响前后两个 entry</strong>，无连锁更新</td></tr>
+<tr><td>反向遍历</td><td>靠 prevlen 往左走</td><td>每个 entry 尾部有 <code class="inline">entrylen</code>，向左读它就能回退</td></tr>
+<tr><td>内存效率</td><td>高</td><td>高（基本相当）</td></tr>
+</tbody>
+</table>
+
+<div class="box b-big">
+  <div class="box-t">✅ 连锁更新（cascade update）为什么是 ziplist 的致命伤</div>
+  <p>ziplist 的每个 entry 头部有个 <code class="inline">prevlen</code> 字段记录前一个 entry 的长度，它<strong>只有 1 字节或 5 字节两种编码</strong>：前一个 entry 长度 &lt; 254 用 1 字节，否则用 5 字节。</p>
+  <p>现在假设有一串 entry 长度都恰好是 253 字节。此时所有 prevlen 都是 1 字节。现在我在头部插入一个 254 字节的新 entry，那么第二个 entry 的 prevlen 要从 1 字节扩到 5 字节，它自身的长度就变成了 257 字节……于是第三个 entry 的 prevlen 也要从 1 字节扩到 5 字节……<strong>这条链会一直传递下去，最坏情况 O(N²)。</strong></p>
+  <p>而且这个操作是<strong>在主线程上同步执行的</strong>，一旦触发，就会出现明显的延迟毛刺。Redis 7.0 用 listpack 彻底解决了这个问题——<strong>每个 entry 只记录自己的长度，插入删除的代价是确定的 O(1)（就改前后两项）。</strong></p>
+  <p><strong>面试怎么答</strong>：「ziplist 的问题是每个 entry 存前一个 entry 的长度，这个长度字段有 1 字节和 5 字节两种编码；当插入一个大元素导致长度跨越编码边界时，会引发连锁更新，最坏 O(N²)，且在单线程主线程上执行会造成延迟抖动。listpack 改为只记录自身的 entrylen，从根源上消除了这个问题。」</p>
+</div>
+
+<h2 id="c05-3">3. quicklist：List 的底层（双向链表 + listpack）</h2>
+<pre><code class="lang-c"><span class="cm">// quicklist 是一个双向链表，每个节点是一个 quicklistNode，内含一个 listpack</span>
+<span class="kw">typedef struct</span> quicklistNode {
+    <span class="kw">struct</span> quicklistNode *prev;
+    <span class="kw">struct</span> quicklistNode *next;
+    <span class="kw">unsigned char</span> *entry;      <span class="cm">// 指向 listpack（压缩时为压缩后的数据）</span>
+    <span class="kw">size_t</span> sz;                  <span class="cm">// listpack 的字节数</span>
+    <span class="kw">unsigned int</span> count : <span class="nu">16</span>;    <span class="cm">// 该节点内元素个数</span>
+    <span class="kw">unsigned int</span> encoding : <span class="nu">2</span>;  <span class="cm">// RAW=1 或 LZF=2（压缩）</span>
+    <span class="kw">unsigned int</span> container : <span class="nu">2</span>; <span class="cm">// PLAIN=1 或 PACKED=2</span>
+} quicklistNode;</code></pre>
+<p><strong>设计哲学</strong>：链表保证头尾 O(1) 操作，listpack 保证内存紧凑。对比「纯链表」（每个元素一个节点，指针开销 16 字节/元素）和「纯数组」（插入删除 O(N)），quicklist 是折中。</p>
+<p><strong>压缩</strong>：<code class="inline">list-compress-depth</code> 控制链表中首尾各多少个节点不压缩（中间节点用 LZF 压缩以省内存）。</p>
+<pre><code class="lang-bash"><span class="cm"># 观察 quicklist 结构</span>
+RPUSH mylist a b c d e
+OBJECT ENCODING mylist          <span class="cm"># listpack（元素少时）</span>
+<span class="cm"># DEBUG OBJECT 可以看更详细的信息（生产慎用）</span>
+DEBUG OBJECT mylist
+<span class="cm"># 输出含 ql_nodes（quicklist 节点数）、ql_avg_node 等</span>
+
+<span class="cm"># list-max-listpack-size 的含义：
+#   正数 N：每个 listpack 最多存 N 个元素
+#   负数 -N：每个 listpack 最多 2^N KB（-2 表示 8KB，默认）</span>
+CONFIG GET list-max-listpack-size
+
+<span class="cm"># 压缩配置：0 表示不压缩（默认）；N 表示首尾各 N 个节点不压缩</span>
+CONFIG GET list-compress-depth</code></pre>
+
+<h2 id="c05-4">4. 跳表（skiplist）：ZSet 的核心</h2>
+<pre><code class="lang-c"><span class="cm">// Redis 的跳表节点</span>
+<span class="kw">typedef struct</span> zskiplistNode {
+    sds ele;                              <span class="cm">// 成员（member）</span>
+    <span class="kw">double</span> score;                         <span class="cm">// 分值</span>
+    <span class="kw">struct</span> zskiplistNode *backward;        <span class="cm">// 后退指针（支持反向遍历，只有一层）</span>
+    <span class="kw">struct</span> zskiplistLevel {
+        <span class="kw">struct</span> zskiplistNode *forward;     <span class="cm">// 前进指针</span>
+        <span class="kw">unsigned long</span> span;               <span class="cm">// ⭐ 跨度：到下一个节点跨越了多少个节点</span>
+    } level[];                            <span class="cm">// 柔性数组，层数随机（1~32）</span>
+} zskiplistNode;
+
+<span class="kw">typedef struct</span> zskiplist {
+    <span class="kw">struct</span> zskiplistNode *header, *tail;
+    <span class="kw">unsigned long</span> length;                <span class="cm">// 节点总数（O(1) 获取）</span>
+    <span class="kw">int</span> level;                            <span class="cm">// 当前最大层数</span>
+} zskiplist;</code></pre>
+
+<div class="box b-big">
+  <div class="box-t">✅ 跳表的核心机制</div>
+  <p><strong>1) 层数随机生成</strong>（Redis 用 <code class="inline">ZSKIPLIST_P = 0.25</code>）：</p>
+  <pre style="margin:8px 0"><code class="lang-c"><span class="kw">int</span> zslRandomLevel(<span class="kw">void</span>) {
+    <span class="kw">static const int</span> ZSKIPLIST_MAXLEVEL = <span class="nu">32</span>;
+    <span class="kw">static const int</span> ZSKIPLIST_P = <span class="nu">0.25</span>;
+    <span class="kw">int</span> level = <span class="nu">1</span>;
+    <span class="kw">while</span> ((random() &amp; <span class="nu">0xFFFF</span>) &lt; (ZSKIPLIST_P * <span class="nu">0xFFFF</span>))
+        level += <span class="nu">1</span>;
+    <span class="kw">return</span> (level &lt; ZSKIPLIST_MAXLEVEL) ? level : ZSKIPLIST_MAXLEVEL;
+}</code></pre>
+  <p>即：<strong>25% 概率升一层</strong>。平均每个节点的指针数是 1/(1-0.25) ≈ 1.33，非常省内存。</p>
+  <p><strong>2) span（跨度）实现 O(log N) 排名</strong>：</p>
+  <p>查找时，每经过一个节点的 span 就累加，最终得到的就是排名。例如要从表头走到目标节点，沿途 span 之和 = 该节点的排名。<strong>这就是 ZRANK 能达到 O(log N) 的关键——不需要遍历，只累加跨度。</strong></p>
+  <p><strong>3) 最大层数 32 的由来</strong>：<br>
+  32 层 + p=0.25，理论可容纳元素数约为 <strong>4^32 ≈ 1.8 × 10^19</strong>，远超任何实际场景。<strong>这个推导能说出来，说明你真读懂了源码。</strong></p>
+  <p><strong>4) 为什么层数随机 + 不用再平衡</strong>：<br>
+  插入时只需要「找到位置 + 改指针」，不需要任何旋转或再平衡操作。这是跳表实现简单的根本原因，也是它比红黑树更容易写对的原因。</p>
+</div>
+
+<h2 id="c05-5">5. 字典（dict）与渐进式 rehash</h2>
+<p>Hash 类型在超过阈值后用 <code class="inline">dict</code>（哈希表）存储，Set 也是。dict 的核心设计是<strong>渐进式 rehash</strong>。</p>
+<pre><code class="lang-c"><span class="kw">typedef struct</span> dict {
+    dictType *type;
+    dictht ht[<span class="nu">2</span>];        <span class="cm">// ⭐ 两个哈希表！</span>
+    <span class="kw">long</span> rehashidx;      <span class="cm">// rehash 进度：-1 表示未在进行</span>
+    <span class="kw">unsigned long</span> iterators;
+} dict;</code></pre>
+
+<div class="box b-big">
+  <div class="box-t">✅ 渐进式 rehash：为什么需要两个哈希表</div>
+  <p><strong>问题</strong>：哈希表扩容要重新计算所有 key 的位置并搬移。如果一次性搬移，10 万 key 可能阻塞主线程几十毫秒——单线程模型下不可接受。</p>
+  <p><strong>解法（渐进式）</strong>：</p>
+  <ol>
+    <li>扩容时，<code class="inline">ht[1]</code> 分配为新尺寸，<code class="inline">rehashidx = 0</code>。</li>
+    <li><strong>此后每次对 dict 的增删改查，都顺带把 <code class="inline">ht[0]</code> 的 rehashidx 位置上的桶迁移到 <code class="inline">ht[1]</code>，然后 rehashidx++</strong>。把 O(N) 的搬移成本<strong>分摊到每次操作</strong>。</li>
+    <li>同时 Redis 有<strong>定时任务</strong>（serverCron）在空闲时以 100 个桶/毫秒的速率帮忙迁移（<code class="inline">dictRehashMilliseconds</code>，每次最多 1ms）。</li>
+    <li><strong>查找</strong>：两个表都查（先查 ht[0] 再查 ht[1]）。</li>
+    <li><strong>新增</strong>：只往 ht[1] 写——这保证 <strong>ht[0] 的元素只减不增</strong>，rehash 必然收敛。</li>
+    <li>迁移完成后，<code class="inline">ht[0]</code> 与 <code class="inline">ht[1]</code> 互换，rehashidx = -1。</li>
+  </ol>
+  <p><strong>触发条件</strong>：</p>
+  <ul>
+    <li><strong>扩容</strong>：负载因子（used/size）≥ 1（无 BGSAVE/BGREWRITEAOF 时），或 ≥ 5（有子进程时——因为 COW 期间要尽量减少内存写入）。</li>
+    <li><strong>缩容</strong>：负载因子 &lt; 0.1，且无子进程（缩容不是必须的，所以用 0.1 这么低的阈值避免频繁抖动）。</li>
+    <li>扩容大小：≥ 2 × used（向上取到 2 的幂）；缩容大小：≥ used 的最小 2 的幂。</li>
+  </ul>
+  <p><strong>面试追问：rehash 期间如果客户端执行 SCAN 会怎样？</strong><br>
+  SCAN 采用<strong>反向二进制迭代法</strong>（reverse binary iteration）保证 rehash 前后遍历不重复、不遗漏，这是 SCAN 能做到「只保证不遗漏但可能重复」的原因。而 <code class="inline">iterators</code> 字段就是为安全的迭代器准备的——如果有安全迭代器存在，rehash 会暂停，避免遍历时数据搬移。</p>
+</div>
+
+<h2 id="c05-6">6. intset：整数集合（Set 的省内存编码）</h2>
+<pre><code class="lang-c"><span class="kw">typedef struct</span> intset {
+    uint32_t encoding;   <span class="cm">// INTSET_ENC_INT16 / INT32 / INT64</span>
+    uint32_t length;     <span class="cm">// 元素个数</span>
+    int8_t contents[];   <span class="cm">// 柔性数组，元素有序排列</span>
+} intset;</code></pre>
+<p><strong>特点</strong>：</p>
+<ul>
+<li><strong>有序存储</strong>：元素按升序排列，所以查找用<strong>二分查找 O(log N)</strong>。</li>
+<li><strong>动态升级</strong>：初始用最小的 <code class="inline">int16</code> 编码。插入一个超过 int16 范围的值时，<strong>整体升级到 int32</strong>（重新分配数组并转换所有元素）。<strong>升级不可逆</strong>——如果删掉了大值，不会降级。</li>
+<li><strong>为什么升级不可逆</strong>：避免在删除操作上增加复杂度，且概率上「降级后很快又要升级」的场景很常见。</li>
+<li><strong>内存收益</strong>：存 1000 个小的整数，intset 用 2 字节/元素；如果用 hashtable，每个 entry 要几十字节。<strong>差距 10 倍以上。</strong></li>
+</ul>
+<pre><code class="lang-bash"><span class="cm"># 验证 intset 与升级</span>
+SADD nums 1 2 3
+OBJECT ENCODING nums        <span class="cm"># → intset</span>
+<span class="cm"># 插入一个超过 int32 的大数，触发升级到 int64</span>
+SADD nums 9999999999999999
+OBJECT ENCODING nums        <span class="cm"># 仍是 intset（升级的是编码，不是类型）</span>
+<span class="cm"># 但插入非整数会立刻转为 listpack/hashtable</span>
+SADD nums abc
+OBJECT ENCODING nums        <span class="cm"># → listpack（7.2+）或 hashtable</span>
+<span class="cm"># 注意：一旦转为 hashtable，永远不会变回 intset！</span></code></pre>
+
+<div class="box b-x">
+  <div class="box-t">🚨 「编码不可逆」是重要的面试点</div>
+  <p><strong>所有编码转换都是单向的</strong>：listpack → hashtable、intset → hashtable、listpack → skiplist，以及 embstr → raw，<strong>都不会因为数据变少而回退</strong>。</p>
+  <p><strong>生产影响</strong>：这意味着如果某个 key 曾经「涨大过」，即使后来数据被删减，它仍然占用 hashtable/skiplist 的开销。所以：</p>
+  <ul>
+    <li>如果业务是「临时涨大」型（比如活动期间数据量激增），必须<strong>删掉 key 重新建</strong>，才能回到紧凑编码。</li>
+    <li>典型场景：一个 Hash 在某次活动期间字段数超过 128 变成 hashtable，活动结束后即使字段降到 10 个，内存也不会降下来。运维会定期「重建」这类 key（用 <code class="inline">RENAME</code> 或 <code class="inline">MIGRATE</code> 做原子替换）。</li>
+  </ul>
+</div>
+
+<h2 id="c05-7">7. 内存优化实战：一个小实验</h2>
+<pre><code class="lang-bash"><span class="cm">########## 实验：对比不同编码的内存占用 ##########</span>
+
+<span class="cm"># 1) 10000 个小的 Hash（listpack 编码）</span>
+<span class="cm"># for i in $(seq 1 10000); do redis-cli hset h:$i f v > /dev/null; done</span>
+MEMORY USAGE h:1
+<span class="cm"># 输出约为 60-80 字节（含 key 本身的 dictEntry 开销）</span>
+
+<span class="cm"># 2) 单个大 Hash 存 10000 个字段</span>
+<span class="cm"># for i in $(seq 1 10000); do redis-cli hset big f$i v$i > /dev/null; done</span>
+MEMORY USAGE big
+OBJECT ENCODING big         <span class="cm"># → hashtable</span>
+<span class="cm"># 输出会有几百 KB</span>
+
+<span class="cm"># 3) 关键观察：单 key 存同一个 key 下会省「key 本身的重复开销」，
+#    但会失去 listpack 的内存优势，并可能变成大 key</span>
+
+<span class="cm">########## 调优建议：什么时候调整阈值 ##########</span>
+
+<span class="cm"># 场景 A：大量小对象（用户配置、商品属性），想让更多 key 保持 listpack</span>
+CONFIG SET hash-max-listpack-entries 256
+CONFIG SET hash-max-listpack-value 128
+<span class="cm"># 代价：listpack 是 O(N) 查找，N 太大时单次操作变慢。
+#      256 以内查找 ~ 几十纳秒，可接受</span>
+
+<span class="cm"># 场景 B：发现某个前缀下的 key 内存暴涨，先看编码分布</span>
+redis-cli --memkeys
+<span class="cm"># 或用 Lua 脚本统计各编码的 key 数量</span>
+redis-cli --eval codes.lua
+
+<span class="cm"># 场景 C：临时涨大的 key 需要「压缩回紧凑编码」</span>
+<span class="cm"># 做法：创建新 key 后 RENAME 原子替换（注意 RENAME 前要保证数据已复制完）</span>
+<span class="cm"># 或用 DUMP + RESTORE 重建（RESTORE 时编码会重新根据数据量决定）</span></code></pre>
+
+<div class="box b-tip">
+  <div class="box-t">💡 一个真实的内存优化案例（可以直接当项目经验讲）</div>
+  <p><strong>问题</strong>：某业务用 Hash 存用户配置，每个用户一个 Hash，平均 5 个字段。上线半年后内存从 2GB 涨到 9GB。</p>
+  <p><strong>排查</strong>：用 <code class="inline">MEMORY USAGE</code> 采样发现单个 Hash 只占约 70 字节，但 key 数量有 4000 万。<strong>根因不是数据变大，而是 key 的 dictEntry 开销</strong>——每个 key 在 Redis 的全局 dict 里都有一个 dictEntry（约 24 字节）+ key 的 SDS（约 40 字节）+ robj（16 字节），再加上 value 的 robj，<strong>空壳开销就有 90+ 字节</strong>。</p>
+  <p><strong>优化方案</strong>：把「一个用户一个 Hash」改成「<strong>按用户 ID 取模分桶，每个桶一个 Hash 存 1000 个用户的配置</strong>」。这样 key 数量从 4000 万降到 4 万，<strong>省掉了 4000 万个 key 的固定开销，内存降到 3GB 左右</strong>。代价是读取时需要先算桶 + 取 field，但没有额外网络开销。</p>
+  <p style="margin-bottom:0"><strong>这就是「内存对齐到 Redis 的实现细节」的优化——面试官最想听到的就是这种从原理推导出方案的回答。</strong></p>
+</div>
+
+<h2 id="c05-8">面试深度问答</h2>
+
+<details class="qa"><summary>Redis 的 SDS 和 C 字符串的区别？<span class="lvl lv2">进阶</span></summary>
+<div class="qa-b">
+<p>见 Day1.2 的解析。核心是五条：<strong>O(1) 长度、二进制安全、防缓冲区溢出、空间预分配与惰性释放、兼容 C 函数</strong>。</p>
+<p>补充两个容易被追问的细节：</p>
+<ul>
+<li><strong>为什么 embstr 阈值是 44 字节</strong>：jemalloc 64 字节内存块 - redisObject 16 字节 - SDS 头 3 字节 - 结尾 \0 1 字节 = 44。</li>
+<li><strong>embstr 为什么只读</strong>：embstr 的 redisObject 和 SDS 是一块连续内存。一旦需要修改，就得重新分配（因为原来分配的空间可能不够），所以 Redis 直接把 embstr 转成 raw。<strong>所以对 embstr 执行 APPEND 会导致编码升级。</strong></li>
+</ul>
+</div></details>
+
+<details class="qa"><summary>ziplist 和 listpack 有什么区别？为什么 7.0 要换掉 ziplist？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p>核心差异是<strong>连锁更新（cascade update）</strong>：见本节的深度框。回答要点：</p>
+<ol>
+<li><strong>ziplist 每个 entry 存 prevlen</strong>，且 prevlen 有 1 字节/5 字节两种编码。</li>
+<li>插入或修改导致长度跨越 254 边界时，<strong>后续 entry 的 prevlen 编码要逐个更新，可能形成连锁反应，最坏 O(N²)</strong>。</li>
+<li>这个操作在主线程同步执行，会造成明显延迟抖动——而且它是<strong>不可预测的</strong>（取决于数据长度分布），这比「慢」更糟，因为难以复现和定位。</li>
+<li><strong>listpack 每个 entry 只记录自身长度</strong>，插入删除只改相邻两项，代价确定。反向遍历靠 entry 尾部的 entrylen。</li>
+</ol>
+<p><strong>加分</strong>：还可以提一句「Redis 的 listpack 还有一个好处是<strong>更利于 SSD/内存的连续访问</strong>，因为结构更规整」。另外从 7.0 起，Hash/Set/ZSet 的小对象编码都统一换成了 listpack，命名也从 <code class="inline">hash-max-ziplist-entries</code> 改成了 <code class="inline">hash-max-listpack-entries</code>——<strong>升级时配置项名字变了，是容易踩的坑。</strong></p>
+</div></details>
+
+<details class="qa"><summary>渐进式 rehash 是什么？为什么需要它？<span class="lvl lv2">进阶</span></summary>
+<div class="qa-b">
+<p>见本节第 5 部分。回答框架：</p>
+<ol>
+<li><strong>问题</strong>：哈希表扩容需要搬移全部元素。Redis 是单线程，一次搬移 10 万 key 会阻塞几十毫秒，所有请求都卡住。</li>
+<li><strong>方案</strong>：维护 <code class="inline">ht[0]</code>（旧）和 <code class="inline">ht[1]</code>（新）两张表，用 <code class="inline">rehashidx</code> 记录进度。</li>
+<li><strong>分摊</strong>：每次增删改查顺带迁移一个桶；同时定时任务（serverCron 里的 <code class="inline">dictRehashMilliseconds</code>，每次最多 1ms）帮忙迁移。</li>
+<li><strong>关键约束</strong>：rehash 期间<strong>查找查两张表，新增只写 ht[1]</strong>——这保证 ht[0] 只减不增，rehash 必然完成。</li>
+<li><strong>触发</strong>：负载因子 ≥1 扩容（有子进程时 ≥5，因为要减少 COW 内存复制）；负载因子 &lt;0.1 缩容。</li>
+</ol>
+<p><strong>深挖追问 1：为什么有子进程时扩容阈值提高到 5？</strong><br>
+因为 RDB/AOF 重写期间 fork 了子进程，依赖 COW。如果此时扩容，会大量写内存页，<strong>触发大量页复制，内存峰值暴增</strong>。所以推迟扩容。</p>
+<p><strong>深挖追问 2：rehash 期间 SCAN 怎么保证不遗漏？</strong><br>
+SCAN 用<strong>反向二进制迭代法</strong>：每次返回的游标是「高位加一、低位归零」的掩码，使得即使在 rehash 导致桶数量变化时，遍历也能覆盖所有元素（可能重复但不会遗漏）。这也是 SCAN 的「保证」比 <code class="inline">KEYS</code> 弱但更实用的原因。</p>
+</div></details>
+
+<details class="qa"><summary>为什么 Redis 6.x 的 Set 有 intset 和 hashtable，7.2 又加了 listpack？<span class="lvl lv4">专家</span></summary>
+<div class="qa-b">
+<p>这是「编码演进」的深度题，考察你是否关注版本细节。</p>
+<table>
+<thead><tr><th style="width:16%">编码</th><th>适用</th><th>查找复杂度</th><th>内存</th></tr></thead>
+<tbody>
+<tr><td><code class="inline">intset</code></td><td>全整数且数量 ≤ 512</td><td>O(log N) 二分</td><td>极省（2/4/8 字节每元素）</td></tr>
+<tr><td><code class="inline">listpack</code>（7.2+）</td><td>数量 ≤ 128 且元素 ≤ 64 字节</td><td>O(N) 线性（N 小）</td><td>省（连续内存，无指针）</td></tr>
+<tr><td><code class="inline">hashtable</code></td><td>超出以上阈值</td><td>O(1)</td><td>每个 entry 几十字节</td></tr>
+</tbody>
+</table>
+<p><strong>7.2 加 listpack 的原因</strong>：在 6.x 时代，只要 Set 里有一个非整数，就立刻退化成 hashtable。而现实中大量场景是「<strong>元素少（几十个）、但包含字符串</strong>」的集合——比如一篇文章的标签。这些小集合用 hashtable 存储，<strong>每个元素要承担 dictEntry + robj + SDS 的开销，内存浪费极大</strong>。</p>
+<p>7.2 引入 listpack 编码后，这类小集合能用连续内存存储，<strong>内存降低一个数量级</strong>。这是 Redis「持续优化内存」的一条主线：<strong>把紧凑编码的适用范围从纯整数扩展到小字符串集合</strong>。</p>
+<p><strong>专家级洞察</strong>：这个演进也解释了为什么 <strong>Redis 的配置参数名会随版本变化</strong>（<code class="inline">*-ziplist-*</code> → <code class="inline">*-listpack-*</code>），以及为什么<strong>升级大版本时一定要复核配置兼容性</strong>——旧配置项在新版本可能被忽略或改变行为。这是「升级 Redis 版本」时的真实风险点。</p>
+</div></details>
+
+<details class="qa"><summary>如何估算一个 key 占用多少内存？<span class="lvl lv4">专家</span></summary>
+<div class="qa-b">
+<p><strong>方法一：<code class="inline">MEMORY USAGE key [SAMPLES n]</code></strong>（推荐，最准）<br>
+会返回该 key 及其 value 占用的总字节数（含 key 的 SDS、dictEntry、robj）。<code class="inline">SAMPLES</code> 用于嵌套结构的抽样（默认 5）。</p>
+<p><strong>方法二：手动估算（面试时考察你懂不懂开销构成）</strong></p>
+<table>
+<thead><tr><th>组成部分</th><th>大小（64 位）</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>全局 dict 的 dictEntry</td><td><strong>24 字节</strong></td><td>key 指针 + value 指针 + next 指针</td></tr>
+<tr><td>key 的 SDS</td><td>SDS 头 3 + 长度 + 1</td><td>如 <code class="inline">"user:1001"</code> = 3+9+1 = 13 → 对齐到 16</td></tr>
+<tr><td>value 的 robj</td><td><strong>16 字节</strong></td><td>所有类型的 value 都有一个 robj</td></tr>
+<tr><td>value 实际数据</td><td>取决于编码</td><td>listpack 紧凑；hashtable 每个 field 一个 dictEntry(24) + SDS</td></tr>
+<tr><td>过期时间 dict（如设了 TTL）</td><td><strong>额外 24+ 字节</strong></td><td>expires dict 里也有一份 dictEntry</td></tr>
+<tr><td>jemalloc 内存块对齐</td><td>向上取整到最近的 size class</td><td>可能浪费 10%-30%，这是碎片率 <code class="inline">mem_fragmentation_ratio</code> 的来源</td></tr>
+</tbody>
+</table>
+<p><strong>经验公式</strong>：一个「小 key + 小 value」约占 <strong>100~150 字节</strong>。所以 <strong>1000 万个这样的 key 就要 1GB 以上</strong>——这就是为什么「key 数量爆炸」是内存问题的主要来源，而不是「value 太大」。</p>
+<p><strong>方法三：离线分析 RDB</strong><br>
+用 <code class="inline">redis-rdb-tools</code> 或 <code class="inline">rdr</code> 把 RDB 文件解析成 CSV，能精确统计每个 key 的内存占用、类型、TTL，并生成报告。适合做容量规划和「大 key 月度盘点」。<strong>大厂通常把这一步做成定期任务。</strong></p>
+<p style="margin-bottom:0"><strong>回答价值</strong>：能说出「key 的固定开销约 100 字节，所以 key 数量比 value 大小更影响总内存」这一点，说明你真正做过内存规划，而不是只会看 <code class="inline">used_memory</code>。</p>
+</div></details>
+
+<h2 id="c05-9">本节自测</h2>
+<div class="track">
+  <label><input type="checkbox" data-k="d2-9"><span>我能说出 5 种编码的切换条件与对应阈值参数名</span></label>
+  <label><input type="checkbox" data-k="d2-10"><span>我能解释 ziplist 的连锁更新问题，以及 listpack 如何解决</span></label>
+  <label><input type="checkbox" data-k="d2-11"><span>我能说明跳表的 span 字段如何实现 O(log N) 排名，以及为什么最大层数是 32</span></label>
+  <label><input type="checkbox" data-k="d2-12"><span>我能完整描述渐进式 rehash 的机制、触发条件和它对 SCAN 的影响</span></label>
+  <label><input type="checkbox" data-k="d2-13"><span>我能说清「编码不可逆」的生产影响与应对方案</span></label>
+  <label><input type="checkbox" data-k="d2-14"><span>我能估算一个小 key 的内存占用（~100 字节），并说清开销构成</span></label>
+  <label><input type="checkbox" data-k="d2-15"><span>我能说出 quicklist 的设计哲学（链表 + listpack 的折中）</span></label>
+  <label><input type="checkbox" data-k="d2-16"><span>我能讲一个「从编码原理出发的内存优化」案例</span></label>
+</div>
+</section>

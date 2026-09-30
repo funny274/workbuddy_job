@@ -1,0 +1,1017 @@
+<section id="c16-scenario" class="anchor" data-title="Day5.3 · 大厂场景题实战手册">
+<div class="ch-meta">
+  <span class="ch-num">Day 5 · 第 3 节</span>
+  <span class="badge bg-blue">预计 120 分钟</span>
+  <span class="badge bg-red">面试决胜环节</span>
+</div>
+<h1>Day5.3 · 大厂场景题实战手册（12 个高频真题）</h1>
+
+<div class="box b-tip">
+  <div class="box-t">一句话结论</div>
+  <p>八股文决定你能不能进面试，<strong>场景题决定你能拿什么级别</strong>。10 年+ 岗位的场景题考察的不是「你会不会用某个命令」，而是<strong>「你能不能把业务需求翻译成合理的数据模型，并说清这样设计的代价和边界」</strong>。</p>
+  <p>本节给出 12 个高频场景，每个都按<strong>「需求分析 → 数据结构选型 → 核心实现 → 边界与代价 → 面试追问」</strong>五步展开。建议你<strong>先自己想想再往下看</strong>——这种「先想再对答案」的方式记忆最深。</p>
+</div>
+
+<div class="box b-big">
+  <div class="box-t">✅ 场景题的通用答题框架（先建立方法论）</div>
+  <p>不管遇到什么场景题，都按这五步走：</p>
+  <div class="steps">
+  <div class="step"><div class="st-t">第一步：澄清需求与约束（别急着答）</div>
+  <p>主动问清楚：<strong>数据规模</strong>（多少用户/多少 QPS/数据量多大）？<strong>一致性要求</strong>（能容忍多少延迟/不一致）？<strong>是否有持久化要求</strong>？<strong>读写比例</strong>？<br>
+  <strong>这一步本身就是加分项</strong>——展示你不会盲目设计方案，而是先理解问题边界。</p>
+  </div>
+  <div class="step"><div class="st-t">第二步：选数据结构 + 说清为什么</div>
+  <p>不是「我用 ZSet」，而是<strong>「用 ZSet，因为需要按分数排序 + 范围查询，这两个需求 ZSet 的跳表实现都是 O(logN)」</strong>。<strong>关键是「需求 → 结构特性」的对应关系。</strong></p>
+  </div>
+  <div class="step"><div class="st-t">第三步：给出核心实现（命令级或代码级）</div>
+  <p>写出关键的 Redis 命令或代码片段，证明你确实能落地。</p>
+  </div>
+  <div class="step"><div class="st-t">第四步：主动说清边界与代价（关键）</div>
+  <p><strong>这一步是区分「会用」和「能架构」的分水岭。</strong>主动说出：这个方案在什么规模下会出问题？有哪些一致性问题？故障了怎么办？<strong>面试官最想听的就是这个。</strong></p>
+  </div>
+  <div class="step"><div class="st-t">第五步：准备被追问的点</div>
+  <p>每个方案都有「深挖点」，提前准备好。比如做排行榜，面试官一定会追问「数据量到 1 亿怎么办」「分页怎么优化」「ZSet 底层是什么」。</p>
+  </div>
+  </div>
+</div>
+
+<h2 id="c16-1">场景 1：缓存与数据库一致（⭐ 最高频）</h2>
+<div class="box b-big">
+  <div class="box-t">题目</div>
+  <p>「你们系统怎么保证缓存和数据库的一致性？如果并发更新出现脏数据怎么办？」</p>
+</div>
+<p><strong>完整答法见 Day4.1</strong>，这里给出「面试速答版」：</p>
+<ol>
+  <li><strong>先分级</strong>：「我会先区分一致性要求——<strong>强一致</strong>（用 DB 行锁，不用缓存）、<strong>最终一致</strong>（99% 场景，用 Cache Aside）、<strong>弱一致</strong>（定时刷新）。」</li>
+  <li><strong>主流方案</strong>：「<strong>Cache Aside：先更新 DB，再删缓存</strong>。加『删除失败进 MQ 重试』兜底。」</li>
+  <li><strong>为什么这样最优</strong>：「产生脏数据需要『读 DB 在 UPDATE 前 + 写缓存在 DEL 后』，即『读的整链路比写还慢』。<strong>而写 DB（加锁落盘）通常远慢于读 DB，所以概率极低。</strong>」</li>
+  <li><strong>更强方案</strong>：「并发写更高的场景用<strong>延时双删 + 版本号比对</strong>；大型系统用 <strong>Canal 订阅 binlog</strong>（业务零侵入、binlog 不丢）。」</li>
+  <li><strong>兜底三件套</strong>：「① 所有缓存设 TTL（最终自愈）；② 命中率监控；③ 关键业务对账任务。」</li>
+</ol>
+<div class="box b-tip">
+  <div class="box-t">💡 追问准备</div>
+  <p>为什么删缓存而不是更新缓存？（三个理由：避免并发覆盖、避免无用功、避免复杂计算）／延时双删延迟多久？（200ms-1s，没有精确答案，更好的方案是版本号）／Canal 的延迟和代价？（几十到几百毫秒，需要 Canal + MQ）</p>
+</div>
+
+<h2 id="c16-2">场景 2：秒杀扣库存（⭐ 高频）</h2>
+<div class="box b-big">
+  <div class="box-t">题目</div>
+  <p>「双 11 秒杀，1 万件商品，瞬间 100 万用户抢。怎么设计？怎么防超卖？」</p>
+</div>
+<p><strong>第一步：澄清</strong>——「QPS 峰值多少？能不能接受少量超卖？库存的准确性要求到什么程度？」（通常：极高并发、绝对不允许超卖）</p>
+
+<p><strong>第二步：核心思路（分层削峰）</strong></p>
+<div class="steps">
+<div class="step"><div class="st-t">① 前端层：限流 + 防重复提交</div>
+<p>按钮置灰、验证码、令牌桶限流（把 100 万请求砍到 10 万）。<strong>这是最有效的——把流量挡在最外层。</strong></p>
+</div>
+<div class="step"><div class="st-t">② Redis 层：预扣减（Lua 保证原子性）</div>
+<pre style="margin:8px 0"><code class="lang-lua"><span class="cm">-- 库存预扣减脚本（原子）</span>
+<span class="cm">-- KEYS[1] = stock:sku1001, ARGV[1] = 购买数量</span>
+<span class="kw">local</span> stock = tonumber(redis.call(<span class="st">'GET'</span>, KEYS[<span class="nu">1</span>]) <span class="kw">or</span> <span class="st">'-1'</span>)
+<span class="kw">local</span> need = tonumber(ARGV[<span class="nu">1</span>])
+<span class="kw">if</span> stock &lt; need <span class="kw">then</span>
+    <span class="kw">return</span> -<span class="nu">1</span>          <span class="cm">-- 库存不足</span>
+<span class="kw">end</span>
+redis.call(<span class="st">'DECRBY'</span>, KEYS[<span class="nu">1</span>], need)
+<span class="kw">return</span> stock - need</code></pre>
+<p>扣减成功 → 生成订单号 → <strong>异步落库</strong>（发 MQ，由消费者写 DB）。</p>
+</div>
+<div class="step"><div class="st-t">③ 热点库存分桶（解决热 key）</div>
+<p>如果 1 万件都在一个 key，单分片会被打爆。<strong>拆成 100 个桶</strong>：<code class="inline">stock:sku1001:0</code> ~ <code class="inline">stock:sku1001:99</code>，每桶 100 件，请求随机落到一个桶扣减。</p>
+<pre style="margin:8px 0"><code class="lang-java"><span class="kw">int</span> bucket = ThreadLocalRandom.current().nextInt(100);
+String key = <span class="st">"stock:sku1001:"</span> + bucket;
+Long remain = eval(deductScript, key, num);
+<span class="kw">if</span> (remain &lt; <span class="nu">0</span>) {
+    <span class="cm">// 本桶不足，可以尝试其他桶（提高成功率），或直接返回失败</span>
+}</code></pre>
+<p><strong>代价</strong>：某个桶卖完了但其他桶还有 → 会「提前售罄」。<strong>缓解</strong>：桶数量多一些（如 100-1000），或者失败时轮询其他桶。</p>
+</div>
+<div class="step"><div class="st-t">④ DB 层：兜底防超卖</div>
+<pre style="margin:8px 0"><code class="lang-sql"><span class="cm">-- 最终的防线：DB 层的条件更新（即使 Redis 出问题，也不会真的超卖）</span>
+<span class="kw">UPDATE</span> stock <span class="kw">SET</span> num = num - #{n} <span class="kw">WHERE</span> sku_id = #{id} <span class="kw">AND</span> num &gt;= #{n};
+<span class="cm">-- 影响行数为 0 → 回滚，取消订单，并把库存还回 Redis</span></code></pre>
+</div>
+</div>
+
+<p><strong>第四步：边界与代价（关键）</strong></p>
+<ul>
+  <li><strong>Redis 挂了怎么办</strong>：库存预扣减依赖 Redis。<strong>降级方案</strong>：① 直接走 DB 的 `UPDATE ... WHERE num >= n`（DB 有行锁，能保证不超卖，但 QPS 低）；② 限量放行（只放 DB 能承受的流量）。</li>
+  <li><strong>Redis 扣减成功但订单创建失败</strong>：需要<strong>库存回补</strong>机制（订单超时未支付 → 定时任务把库存还回 Redis + DB）。<strong>要处理「重复回补」问题（幂等）。</strong></li>
+  <li><strong>异步落库失败</strong>：MQ 要有重试 + 死信队列 + 人工兜底；同时 DB 层是最终防线（超卖可以被发现并纠正）。</li>
+  <li><strong>分桶带来的「提前售罄」</strong>：用户体验受损（明明还有货却说没货）。要权衡「桶的粒度」和「准确性」。</li>
+  <li><strong>库存的最终一致性</strong>：Redis 和 DB 可能不一致，需要<strong>对账任务</strong>定期校正。</li>
+</ul>
+
+<div class="box b-tip">
+  <div class="box-t">💡 追问准备</div>
+  <p>为什么不用 Redis 事务／为什么用 Lua？（Lua 支持条件逻辑且原子）／为什么不用分布式锁？（100 万并发抢同一把锁，锁本身就是瓶颈）／库存放在 Redis 里，Redis 挂了会少卖吗？（会，所以要有降级和回补）／「1 万件 100 万人抢」真正有效的解法是什么？（<strong>大头是「限流 + 异步」，真正到 Redis 的请求应该是可控的</strong>，比如用「预约/抽签」把 100 万人先筛一遍）</p>
+</div>
+
+<h2 id="c16-3">场景 3：排行榜（⭐ 高频）</h2>
+<div class="box b-big">
+  <div class="box-t">题目</div>
+  <p>「做一个直播平台的礼物排行榜（主播排行、日榜/周榜/月榜），怎么设计？」</p>
+</div>
+
+<p><strong>第二步：数据结构 —— ZSet</strong>（按分数排序 + 范围查询，跳表实现都是 O(logN)）</p>
+<pre><code class="lang-bash"><span class="cm">########## 基础实现 ##########</span>
+<span class="cm"># 用户送礼物 → 给主播加分</span>
+ZINCRBY rank:gift:daily:20260930 100 anchor:1001
+
+<span class="cm"># 取 Top 10（降序）</span>
+ZREVRANGE rank:gift:daily:20260930 0 9 WITHSCORES
+
+<span class="cm"># 查某个主播的排名（从高到低）</span>
+ZREVRANK rank:gift:daily:20260930 anchor:1001   <span class="cm"># 返回 0-based 排名</span>
+
+<span class="cm"># 查某个主播的分数</span>
+ZSCORE rank:gift:daily:20260930 anchor:1001
+
+<span class="cm">########## 周榜/月榜的实现方式 ##########</span>
+<span class="cm"># 方式一：每个周期一个独立 key（推荐）</span>
+ZINCRBY rank:gift:week:2026W40 100 anchor:1001
+ZINCRBY rank:gift:month:202609 100 anchor:1001
+
+<span class="cm"># 方式二：查询时用 ZUNIONSTORE 合并日榜（灵活但开销大）</span>
+ZUNIONSTORE rank:week:tmp 7 \
+  rank:gift:daily:20260924 rank:gift:daily:20260925 \
+  rank:gift:daily:20260926 rank:gift:daily:20260927 \
+  rank:gift:daily:20260928 rank:gift:daily:20260929 \
+  rank:gift:daily:20260930 \
+  AGGREGATE SUM
+<span class="cm"># ⚠️ 复杂度是 O(N)，且临时 key 占内存，仅适合小规模或离线计算</span>
+<span class="cm"># 生产推荐用「离线任务（如 Flink/Spark）算好周榜，写入 Redis」</span></code></pre>
+
+<p><strong>第四步：边界与代价（这是重点）</strong></p>
+<table>
+<thead><tr><th style="width:24%">问题</th><th>解法</th><th>代价</th></tr></thead>
+<tbody>
+<tr>
+  <td><strong>数据量太大</strong>（如 1 亿主播）</td>
+  <td>① <strong>只保留 Top N</strong>：用 <code class="inline">ZREMRANGEBYRANK</code> 定期裁掉尾部<br>② 分片：按主播 ID 区间拆成多个 ZSet</td>
+  <td>① 排行榜之外的排名不准确<br>② 跨分片的全局排序需要额外聚合</td>
+</tr>
+<tr>
+  <td><strong>深分页</strong>（查第 10000 名）</td>
+  <td><strong>ZSet 的 <code class="inline">ZREVRANGE start stop</code> 是 O(logN + M)</strong>（M 是返回数量），<strong>不是 O(N)</strong>，所以深分页其实是可接受的</td>
+  <td>⚠️ 但<strong>「查某人的排名」<code class="inline">ZREVRANK</code> 是 O(logN)</strong>，没问题；如果是 MySQL 的 <code class="inline">LIMIT 10000, 10</code> 才是大问题</td>
+</tr>
+<tr>
+  <td><strong>分数相同怎么排</strong></td>
+  <td>ZSet 按「分数相同则按 member 字典序」排。<br>要自定义次序（如「同分先到先得」）→ <strong>把时间戳编进分数</strong></td>
+  <td>分数变成复合结构，可读性下降</td>
+</tr>
+<tr>
+  <td><strong>「同分先到先得」的分数设计</strong></td>
+  <td><code class="lang-bash" style="display:inline">score = 礼物值 * 10^10 + (10^10 - 时间戳秒)</code><br>这样礼物值相同时，时间越早分数越高</td>
+  <td>分数超出 double 精度会有问题（ZSet 分数是 double，53 位有效位）</td>
+</tr>
+<tr>
+  <td><strong>历史榜单要保留多久</strong></td>
+  <td>日榜设 7 天 TTL、周榜 30 天、月榜 90 天（按需）</td>
+  <td>—</td>
+</tr>
+<tr>
+  <td><strong>大主播的榜单调不动</strong></td>
+  <td>—</td>
+  <td>ZSet 的 <code class="inline">ZINCRBY</code> 是 O(logN)，1 亿 member 也就是 27 次比较，<strong>不是问题</strong></td>
+</tr>
+</tbody>
+</table>
+
+<div class="box b-warn">
+  <div class="box-t">⚠️ 一个真实的排行榜优化：不要「只保留 Top N 就完事」</div>
+  <p>「我们做过一个主播排行榜，一开始为了控制内存，用 <code class="inline">ZREMRANGEBYRANK</code> 只保留 Top 1000。结果产品要求『显示我自己的排名』——一个排在 5 万名的主播打开页面，发现显示不出自己的排名。</p>
+  <p><strong>改进方案</strong>：① Redis 里保留完整的榜（按容量评估，100 万 member 的 ZSet 大约占 100-200MB，可以接受）；② 如果确实要控制内存，<strong>对「非 Top 用户」用单独的轻量结构记录分数</strong>（如 Hash），只在需要时计算排名。</p>
+  <p><strong>教训</strong>：<strong>做数据模型设计时，一定要把「产品的完整需求」问清楚，而不是只按「技术最省资源」的方式做。</strong>」</p>
+</div>
+
+<h2 id="c16-4">场景 4：延时队列（⭐ 高频）</h2>
+<div class="box b-big">
+  <div class="box-t">题目</div>
+  <p>「订单 30 分钟未支付要自动取消，怎么实现？（不能用定时任务扫全表那种低效方案）」</p>
+</div>
+
+<table>
+<thead><tr><th style="width:16%">方案</th><th>实现</th><th>优点</th><th>缺点</th></tr></thead>
+<tbody>
+<tr>
+  <td><strong>方案一：ZSet + 轮询</strong><br><span class="badge bg-green">推荐</span></td>
+  <td>把「执行时间戳」作为 score，订单号作为 member。定时任务每 N 秒查 <code class="inline">ZRANGEBYSCORE key 0 now LIMIT 100</code>，取出到期任务执行并删除</td>
+  <td>实现简单、可靠、支持任意延迟时间、可用 ZSet 天然排序</td>
+  <td>轮询有延迟（精度取决于轮询间隔）；<strong>需要处理「多实例并发轮询」</strong>（用分布式锁或 Lua 的原子取+删）</td>
+</tr>
+<tr>
+  <td><strong>方案二：Stream + 消费者组</strong>（7.0+）</td>
+  <td>用 <code class="inline">XADD</code> 写入消息，用 <code class="inline">XREADGROUP</code> 消费、<code class="inline">XACK</code> 确认</td>
+  <td>原生 MQ 语义（消费者组、ACK、重试）；7.0 支持 <code class="inline">XADD ... IDMP</code> 幂等</td>
+  <td><strong>Stream 本身不支持延时</strong>，需要消费端自己 sleep 或者用「延时 + 定时搬运」的组合</td>
+</tr>
+<tr>
+  <td><strong>方案三：MQ 的延时消息</strong>（RocketMQ / RabbitMQ）</td>
+  <td>用 MQ 原生的延时能力（RocketMQ 支持 18 个延时级别）</td>
+  <td>最省事，可靠性最好</td>
+  <td>精度受限于 MQ 支持的延时级别（如 RocketMQ 只有固定几档）</td>
+</tr>
+<tr>
+  <td><strong>方案四：时间轮（Netty / Kafka 内部）</strong></td>
+  <td>内存中的时间轮结构</td>
+  <td>延迟精度高</td>
+  <td>❌ <strong>单机内存实现，重启丢失</strong>，不适合分布式可靠场景</td>
+</tr>
+</tbody>
+</table>
+
+<p><strong>方案一的完整实现（含关键的「原子取出」问题）</strong></p>
+<pre><code class="lang-lua"><span class="cm">-- ⭐ 原子取出到期任务（解决多实例并发轮询的重复消费问题）</span>
+<span class="cm">-- KEYS[1] = delay queue zset, ARGV[1] = 当前时间戳, ARGV[2] = 批量大小</span>
+<span class="kw">local</span> tasks = redis.call(<span class="st">'ZRANGEBYSCORE'</span>, KEYS[<span class="nu">1</span>], <span class="nu">0</span>, ARGV[<span class="nu">1</span>],
+                          <span class="st">'LIMIT'</span>, <span class="nu">0</span>, tonumber(ARGV[<span class="nu">2</span>]))
+<span class="kw">if</span> #tasks &gt; <span class="nu">0</span> <span class="kw">then</span>
+    <span class="cm">-- ⭐ 同一个脚本里"取出 + 删除"是原子的，多个实例不会拿到同一批任务</span>
+    redis.call(<span class="st">'ZREM'</span>, KEYS[<span class="nu">1</span>], unpack(tasks))
+<span class="kw">end</span>
+<span class="kw">return</span> tasks</code></pre>
+
+<pre><code class="lang-java"><span class="cm">// 轮询调度（每 1 秒执行一次）</span>
+<span class="kw">@Scheduled</span>(fixedDelay = <span class="nu">1000</span>)
+<span class="kw">public void</span> <span class="fn">pollDelayQueue</span>() {
+    <span class="kw">long</span> now = System.currentTimeMillis();
+    <span class="cm">// 原子取出最多 100 个到期任务</span>
+    List&lt;String> tasks = (List&lt;String&gt;) redisTemplate.execute(
+        <span class="kw">new</span> DefaultRedisScript&lt;&gt;(POLL_SCRIPT, List.class),
+        Collections.singletonList(<span class="st">"delay:queue:order"</span>),
+        String.valueOf(now), <span class="st">"100"</span>);
+
+    <span class="kw">if</span> (tasks == <span class="kw">null</span> || tasks.isEmpty()) <span class="kw">return</span>;
+
+    <span class="kw">for</span> (String orderNo : tasks) {
+        <span class="kw">try</span> {
+            orderService.cancelIfUnpaid(orderNo);   <span class="cm">// ⚠️ 必须幂等（查状态再取消）</span>
+        } <span class="kw">catch</span> (Exception e) {
+            <span class="cm">// 失败 → 重新投递（但要加最大重试次数，防止死循环）</span>
+            retryOrDeadLetter(orderNo, e);
+        }
+    }
+}
+
+<span class="cm">// 投递（下单时）</span>
+<span class="kw">public void</span> <span class="fn">submitDelayTask</span>(String orderNo, <span class="kw">long</span> delayMs) {
+    <span class="kw">long</span> executeAt = System.currentTimeMillis() + delayMs;
+    redisTemplate.opsForZSet().add(<span class="st">"delay:queue:order"</span>, orderNo, executeAt);
+}</code></pre>
+
+<p><strong>第四步：边界与代价</strong></p>
+<ul>
+  <li><strong>多实例重复消费</strong>：用 Lua 的「原子取+删」解决。<strong>但如果任务执行失败，任务已经从 ZSet 删了，怎么重试？</strong> → 需要「重试队列」或「把失败任务放回 ZSet（加下一次执行时间）」。</li>
+  <li><strong>任务丢失风险</strong>：ZSet 是内存结构，如果不做持久化，Redis 重启后延时任务全丢。<strong>解法</strong>：① 开 AOF；② <strong>更好的做法是「DB 存任务状态 + Redis 只做调度」</strong>——即使 Redis 丢了，可以用定时任务扫 DB（兜底）重建。</li>
+  <li><strong>轮询间隔的权衡</strong>：1 秒轮询 → 延迟最多 1 秒，但 QPS 也上去了（每秒一次查询）。<strong>如果是海量延时任务，要评估轮询的成本。</strong></li>
+  <li><strong>精度要求高</strong>（如 100ms 精度）→ Redis 轮询不合适，要用时间轮或专门的调度系统。</li>
+  <li><strong>任务量极大</strong>（千万级）→ ZSet 内存占用高（每个 member 几十字节 + 跳表开销）。考虑分片（按时间分多个 ZSet）或用专门的延时消息 MQ。</li>
+</ul>
+
+<div class="box b-tip">
+  <div class="box-t">💡 追问准备</div>
+  <p>为什么不用 <code class="inline">keyspace notification</code>（key 过期通知）？（<strong>不可靠</strong>：过期事件是「被动触发」的——只有在 key 被访问或定期删除时才触发，可能延迟很久甚至不触发；而且 Redis 不保证送达）／ZSet 的 score 用时间戳会有精度问题吗？（<strong>没有</strong>，毫秒时间戳约 10^12，double 有 53 位有效位能精确表示到 10^15）／怎么保证「取消订单」的幂等？（查订单状态，只有「待支付」才取消）</p>
+</div>
+
+<h2 id="c16-5">场景 5：分布式限流（⭐ 高频）</h2>
+<div class="box b-big">
+  <div class="box-t">题目</div>
+  <p>「API 网关要对每个用户限流到 100 QPS，怎么实现？」</p>
+</div>
+
+<table>
+<thead><tr><th style="width:20%">算法</th><th>原理</th><th>优点</th><th>缺点</th></tr></thead>
+<tbody>
+<tr>
+  <td><strong>固定窗口计数器</strong></td>
+  <td><code class="inline">INCR + EXPIRE</code>，每 1 秒一个 key</td>
+  <td><strong>最简单、内存最省</strong></td>
+  <td>❌ <strong>临界问题</strong>：0.9 秒的 100 次 + 1.1 秒的 100 次 = 0.2 秒内 200 次</td>
+</tr>
+<tr>
+  <td><strong>滑动窗口（ZSet）</strong></td>
+  <td>ZSet 存请求时间戳，用 <code class="inline">ZREMRANGEBYSCORE</code> 清理窗口外的</td>
+  <td>✅ <strong>精确</strong></td>
+  <td>❌ 每个请求都要存一个 member，<strong>内存开销大</strong></td>
+</tr>
+<tr>
+  <td><strong>滑动窗口（Redis 8 / RedisCell）</strong></td>
+  <td>用近似算法（结合计数器和滑动）</td>
+  <td>✅ 内存开销小、精度可接受</td>
+  <td>需要 8.x 或额外模块</td>
+</tr>
+<tr>
+  <td><strong>令牌桶 / 漏桶</strong></td>
+  <td>&lt;strong&gt;允许一定程度的突发&lt;/strong&gt;，用 Lua 实现「补充令牌 + 消费」</td>
+  <td>✅ 符合真实流量特征（允许突发）</td>
+  <td>实现稍复杂</td>
+</tr>
+</tbody>
+</table>
+
+<pre><code class="lang-lua"><span class="cm">-- ⭐ 固定窗口计数器（简单版，大多数场景够用）</span>
+<span class="cm">-- KEYS[1] = 限流 key, ARGV[1] = 窗口秒数, ARGV[2] = 阈值</span>
+<span class="kw">local</span> current = redis.call(<span class="st">'INCR'</span>, KEYS[<span class="nu">1</span>])
+<span class="kw">if</span> current == <span class="nu">1</span> <span class="kw">then</span>
+    <span class="cm">-- ⭐ 只有第一次才设过期，避免每次刷新 TTL 导致窗口永不过期</span>
+    redis.call(<span class="st">'EXPIRE'</span>, KEYS[<span class="nu">1</span>], ARGV[<span class="nu">1</span>])
+<span class="kw">end</span>
+<span class="kw">if</span> current &gt; tonumber(ARGV[<span class="nu">2</span>]) <span class="kw">then</span>
+    <span class="kw">return</span> <span class="nu">0</span>
+<span class="kw">end</span>
+<span class="kw">return</span> <span class="nu">1</span></code></pre>
+
+<pre><code class="lang-lua"><span class="cm">-- ⭐ 令牌桶（允许突发，更符合真实业务）</span>
+<span class="cm">-- KEYS[1] = bucket key</span>
+<span class="cm">-- ARGV[1] = 桶容量, ARGV[2] = 每秒补充速率, ARGV[3] = 当前时间(秒), ARGV[4] = 请求令牌数</span>
+<span class="kw">local</span> capacity   = tonumber(ARGV[<span class="nu">1</span>])
+<span class="kw">local</span> rate       = tonumber(ARGV[<span class="nu">2</span>])
+<span class="kw">local</span> now        = tonumber(ARGV[<span class="nu">3</span>])
+<span class="kw">local</span> requested  = tonumber(ARGV[<span class="nu">4</span>])
+
+<span class="cm">-- 获取当前桶状态：tokens（令牌数）, lastTime（上次补充时间）</span>
+<span class="kw">local</span> bucket = redis.call(<span class="st">'HMGET'</span>, KEYS[<span class="nu">1</span>], <span class="st">'tokens'</span>, <span class="st">'lastTime'</span>)
+<span class="kw">local</span> tokens   = tonumber(bucket[<span class="nu">1</span>]) <span class="kw">or</span> capacity
+<span class="kw">local</span> lastTime = tonumber(bucket[<span class="nu">2</span>]) <span class="kw">or</span> now
+
+<span class="cm">-- 按时间差补充令牌（不能超过容量）</span>
+<span class="kw">local</span> delta = math.max(<span class="nu">0</span>, now - lastTime)
+tokens = math.min(capacity, tokens + delta * rate)
+
+<span class="cm">-- 判断是否够用</span>
+<span class="kw">if</span> tokens &lt; requested <span class="kw">then</span>
+    <span class="cm">-- 令牌不足 → 写回状态，拒绝</span>
+    redis.call(<span class="st">'HMSET'</span>, KEYS[<span class="nu">1</span>], <span class="st">'tokens'</span>, tokens, <span class="st">'lastTime'</span>, now)
+    redis.call(<span class="st">'EXPIRE'</span>, KEYS[<span class="nu">1</span>], math.ceil(capacity / rate) * <span class="nu">2</span>)
+    <span class="kw">return</span> <span class="nu">0</span>
+<span class="kw">end</span>
+
+<span class="cm">-- 扣减令牌并写回</span>
+tokens = tokens - requested
+redis.call(<span class="st">'HMSET'</span>, KEYS[<span class="nu">1</span>], <span class="st">'tokens'</span>, tokens, <span class="st">'lastTime'</span>, now)
+redis.call(<span class="st">'EXPIRE'</span>, KEYS[<span class="nu">1</span>], math.ceil(capacity / rate) * <span class="nu">2</span>)
+<span class="kw">return</span> <span class="nu">1</span></code></pre>
+
+<div class="box b-warn">
+  <div class="box-t">⚠️ 关于「滑动窗口 ZSet 版」</div>
+  <pre style="margin:8px 0"><code class="lang-lua"><span class="cm">-- 滑动窗口（精确版，但内存开销大）</span>
+<span class="kw">local</span> now = tonumber(ARGV[<span class="nu">1</span>])
+<span class="kw">local</span> window = tonumber(ARGV[<span class="nu">2</span>])       <span class="cm">-- 窗口大小（毫秒）</span>
+<span class="kw">local</span> limit = tonumber(ARGV[<span class="nu">3</span>])
+<span class="cm">-- 清理窗口外的记录</span>
+redis.call(<span class="st">'ZREMRANGEBYSCORE'</span>, KEYS[<span class="nu">1</span>], <span class="nu">0</span>, now - window)
+<span class="cm">-- 统计当前窗口内的请求数</span>
+<span class="kw">local</span> count = redis.call(<span class="st">'ZCARD'</span>, KEYS[<span class="nu">1</span>])
+<span class="kw">if</span> count &lt; limit <span class="kw">then</span>
+    redis.call(<span class="st">'ZADD'</span>, KEYS[<span class="nu">1</span>], now, now .. <span class="st">'-'</span> .. math.random())
+    redis.call(<span class="st">'PEXPIRE'</span>, KEYS[<span class="nu">1</span>], window)
+    <span class="kw">return</span> <span class="nu">1</span>
+<span class="kw">end</span>
+<span class="kw">return</span> <span class="nu">0</span></code></pre>
+  <p><strong>为什么生产上慎用</strong>：假设限流 100 QPS，最坏情况下 ZSet 里有 100 个 member，每个 member 约 50-100 字节 → 单个用户约 10KB。<strong>如果有 10 万活跃用户同时被限流，就是 1GB 内存。</strong>而且每个请求都要 <code class="inline">ZREMRANGEBYSCORE + ZCARD + ZADD</code> 三条命令（用 Lua 合并成一条）。</p>
+  <p><strong>实践建议</strong>：① 大多数场景用<strong>固定窗口 + 令牌桶</strong>就够了；② 需要精确滑动窗口时用 <strong>Redis 8 的原生支持或 RedisCell 模块</strong>（用近似算法，内存开销小得多）；③ 限流维度不要太多（<code class="inline">用户 + IP + 接口</code>三个维度，key 数量就是三倍）。</p>
+</div>
+
+<h2 id="c16-6">场景 6：UV / 日活统计（⭐ 高频）</h2>
+<div class="box b-big">
+  <div class="box-t">题目</div>
+  <p>「统计每天的 UV（独立访客数），1 亿用户量级，怎么实现？」</p>
+</div>
+
+<p><strong>方案演进（体现你的思考深度）</strong></p>
+<table>
+<thead><tr><th style="width:18%">方案</th><th>实现</th><th>内存（1 亿用户）</th><th>精度</th></tr></thead>
+<tbody>
+<tr>
+  <td><strong>Set</strong></td>
+  <td><code class="inline">SADD uv:20260930 userId</code>，<code class="inline">SCARD</code> 统计</td>
+  <td>❌ <strong>1 亿 × 约 50 字节 ≈ 5GB</strong>（不可接受）</td>
+  <td>✅ 精确</td>
+</tr>
+<tr>
+  <td><strong>Bitmap</strong></td>
+  <td><code class="inline">SETBIT uv:20260930 userId 1</code>，<code class="inline">BITCOUNT</code> 统计</td>
+  <td>✅ <strong>1 亿位 = 12.5MB</strong></td>
+  <td>✅ 精确</td>
+</tr>
+<tr>
+  <td><strong>HyperLogLog</strong></td>
+  <td><code class="inline">PFADD uv:20260930 userId</code>，<code class="inline">PFCOUNT</code> 统计</td>
+  <td>✅ <strong>固定 12KB</strong>（极其省内存！）</td>
+  <td>⚠️ <strong>约 0.81% 误差</strong></td>
+</tr>
+</tbody>
+</table>
+
+<pre><code class="lang-bash"><span class="cm">########## Bitmap 方案（精确，要求 ID 是连续整数）##########</span>
+<span class="cm"># userId 作为 bit 的偏移量（所以要求 userId 是数字且范围可控）</span>
+SETBIT uv:20260930 10086 1
+SETBIT uv:20260930 20345 1
+
+<span class="cm"># 统计当天 UV</span>
+BITCOUNT uv:20260930
+<span class="cm"># 返回：2</span>
+
+<span class="cm"># ⭐ 判断某用户今天是否访问过</span>
+GETBIT uv:20260930 10086     <span class="cm"># 1 = 访问过</span>
+
+<span class="cm"># ⭐⭐ Bitmap 的真正威力：位运算做留存/交集分析</span>
+<span class="cm"># 1 号、2 号都访问过的用户（连续活跃）</span>
+BITOP AND retained uv:20260901 uv:20260902
+BITCOUNT retained          <span class="cm"># 2 号留存用户数</span>
+
+<span class="cm"># 一段时间内至少访问过一次的累计 UV</span>
+BITOP OR total uv:20260901 uv:20260902 uv:20260903
+BITCOUNT total
+
+<span class="cm"># ⭐ 合并多个 Bitmap 做漏斗分析（如"浏览 → 加购 → 下单"）</span>
+BITOP AND funnel uv:browse uv:cart uv:order
+BITCOUNT funnel
+
+<span class="cm">########## HyperLogLog 方案（省内存，有误差）##########</span>
+PFADD uv:hll:20260930 user1 user2 user3 user4 user5
+PFCOUNT uv:hll:20260930
+<span class="cm"># 返回：5（约 0.81% 误差，即实际 100000 个用户可能报 99190 或 100810）</span>
+
+<span class="cm"># ⭐ HLL 支持合并（用于统计多个集合的并集 UV）</span>
+PFMERGE uv:hll:week uv:hll:20260924 uv:hll:20260925 ... uv:hll:20260930
+PFCOUNT uv:hll:week
+<span class="cm"># 统计这 7 天的累计去重 UV（不用一个一个 Set 去合并！）</span></code></pre>
+
+<div class="box b-big">
+  <div class="box-t">✅ Bitmap vs HyperLogLog 的选型（面试必须说清楚）</div>
+  <table style="margin:8px 0">
+  <thead><tr><th style="width:20%">维度</th><th>Bitmap</th><th>HyperLogLog</th></tr></thead>
+  <tbody>
+  <tr><td>内存</td><td>与「最大 ID」成正比（1 亿位 = 12.5MB）</td><td><strong>固定 12KB</strong></td></tr>
+  <tr><td>精度</td><td><strong>精确</strong></td><td>约 0.81% 标准误差</td></tr>
+  <tr><td>前置要求</td><td><strong>ID 必须是连续整数</strong>（或有可控范围）</td><td>任意元素（字符串也行）</td></tr>
+  <tr><td>能否判断「某个用户是否存在」</td><td>✅ 能（<code class="inline">GETBIT</code>）</td><td>❌ 不能（只能估算总数）</td></tr>
+  <tr><td>能否做交集/留存分析</td><td>✅ <strong>能（BITOP AND/OR）</strong></td><td>⚠️ 只能合并（PFMERGE）求并集，<strong>不能求交集</strong></td></tr>
+  <tr><td>适用</td><td>ID 是数字、需要精确、需要做留存/漏斗分析</td><td><strong>只要一个总数</strong>（UV、PV 去重）</td></tr>
+  </tbody>
+  </table>
+  <p><strong>关键决策逻辑</strong>：</p>
+  <ol style="margin-bottom:0">
+  <li><strong>只需要「总数」且元素可能是字符串</strong> → HyperLogLog。</li>
+  <li><strong>需要「精确」或「判断个体是否存在」或「做交集分析」</strong> → Bitmap（前提是 ID 是可控范围内的整数）。</li>
+  <li><strong>ID 是超大的稀疏数字（如 64 位 UUID 转数字）</strong> → Bitmap 会浪费大量空间。<strong>解法</strong>：① 用 HLL；② 或者维护一个「用户 ID → 连续序号」的映射（用 Redis 的 Hash 或 DB），把稀疏 ID 压缩成连续序号再用 Bitmap。</li>
+  </ol>
+</div>
+
+<div class="box b-warn">
+  <div class="box-t">⚠️ Bitmap 的三个坑</div>
+  <ol style="margin-bottom:0">
+  <li><strong>偏移量必须是「能算出来的整数」</strong>：如果 userId 是 UUID（32 位十六进制），<strong>没法直接做 bit 偏移</strong>。需要先映射成序号。</li>
+  <li><strong>位数组会「按最大偏移量分配」</strong>：如果只有 1 个用户但 ID 是 10 亿，那 Bitmap 就要占 125MB。<strong>所以要求 ID 密集或者能被映射压缩。</strong>（Redis 内部用 SDS 存储 bit 数组，如果高偏移位设置了，前面的低偏移位会全部补 0，用真实内存占位。）</li>
+  <li><strong>时间维度的 key 数量</strong>：每天一个 key，一年 365 个。每个 12.5MB（如果是 1 亿用户）→ 一年约 4.5GB。<strong>要设置合理的 TTL（如 90 天），并评估总量。</strong></li>
+  </ol>
+</div>
+
+<h2 id="c16-7">场景 7：签到 / 打卡（⭐ 中频）</h2>
+<div class="box b-big">
+  <div class="box-t">题目</div>
+  <p>「用户签到功能，要支持『本月签到记录』『连续签到天数』，怎么设计？」</p>
+</div>
+<pre><code class="lang-bash"><span class="cm">########## 用 Bitmap 存一个月（每月一个 key）##########</span>
+<span class="cm"># key 设计：sign:uid:1001:202609</span>
+<span class="cm"># bit 偏移量 = 日期（1-31）</span>
+
+<span class="cm"># 用户在 9 月 30 日签到（第 30 天）</span>
+SETBIT sign:uid:1001:202609 30 1
+
+<span class="cm"># 查看本月签到次数</span>
+BITCOUNT sign:uid:1001:202609
+<span class="cm"># 返回：签到天数</span>
+
+<span class="cm"># 查某天是否签到</span>
+GETBIT sign:uid:1001:202609 30
+
+<span class="cm"># ⭐ 一次拿到整个月的签到明细（前端渲染日历）</span>
+<span class="cm"># 在应用层把返回的 Bitmap（字节串）按位解析成日期数组</span>
+<span class="cm"># 也可以 GET 拿到原始字节，然后 Java 里用 BitSet 解析</span>
+
+<span class="cm">########## 统计「连续签到天数」的两种方案 ##########</span>
+
+<span class="cm"># 方案 A：简单粗暴 —— 应用层解析 Bitmap 后从今天往前数</span>
+<span class="cm"># （数据量小，一次 GET 拿一个月的数据，在内存里数，完全没问题）</span>
+
+<span class="cm"># 方案 B：用 BITFIELD 做位段操作（更高级）</span>
+<span class="cm"># 但连续天数本质上需要"扫描"，Bitmap 没提供"最长连续 1"的命令</span>
+<span class="cm"># → 所以还是在应用层解析更实际</span></code></pre>
+
+<pre><code class="lang-java"><span class="cm">/**
+ * 在应用层解析 Bitmap，计算连续签到天数
+ */</span>
+<span class="kw">public int</span> <span class="fn">getContinuousSignDays</span>(Long userId) {
+    String key = <span class="st">"sign:uid:"</span> + userId + <span class="st">":"</span> + <span class="fn">month</span>();
+    <span class="cm">// 拿到整个 Bitmap 的字节数组</span>
+    <span class="kw">byte</span>[] bytes = redisTemplate.getConnectionFactory().getConnection()
+        .stringCommands().get(key.getBytes());
+
+    <span class="cm">// 用 Java 的 BitSet 解析（注意 bit 顺序）</span>
+    BitSet bitSet = BitSet.valueOf(bytes);
+    <span class="kw">int</span> today = LocalDate.now().getDayOfMonth();
+    <span class="kw">int</span> continuous = <span class="nu">0</span>;
+    <span class="kw">for</span> (<span class="kw">int</span> day = today; day &gt;= <span class="nu">1</span>; day--) {
+        <span class="cm">// ⚠️ SETBIT 的 offset 是从 0 开始的，日期从 1 开始，所以要 -1</span>
+        <span class="kw">if</span> (bitSet.get(day - <span class="nu">1</span>)) {
+            continuous++;
+        } <span class="kw">else</span> {
+            <span class="kw">break</span>;
+        }
+    }
+    <span class="cm">// 如果跨月连续（如 8 月最后几天 + 9 月初），需要再查上个月的 key</span>
+    <span class="kw">return</span> continuous;
+}</code></pre>
+
+<p><strong>第四步：边界与代价</strong></p>
+<ul>
+  <li><strong>跨月连续性</strong>：连续签到可能跨月（8/30、8/31、9/1）。<strong>要处理「本月全勤则继续查上月」的情况。</strong></li>
+  <li><strong>内存</strong>：每个用户每月一个 key，最大 31 位（4 字节）。<strong>1 亿用户 × 4 字节 = 400MB</strong>（但 Redis 有对象开销，实际每 key 约 100-200 字节 → 1 亿用户约 10-20GB，需要用 Cluster 分片）。</li>
+  <li><strong>补签功能</strong>：<code class="inline">SETBIT</code> 允许把过去的某位置为 1，<strong>天然支持补签</strong>。但要记录「补签卡使用次数」等业务逻辑。</li>
+  <li><strong>更省的方案</strong>：如果只需要「连续天数」而不需要「日历明细」，可以用一个整数存连续天数（<code class="inline">INCR</code>），但要处理「断签」和「跨天」逻辑——<strong>复杂度反而更高，不如用 Bitmap。</strong></li>
+</ul>
+
+<h2 id="c16-8">场景 8：社交关系（共同好友、关注列表）</h2>
+<div class="box b-big">
+  <div class="box-t">题目</div>
+  <p>「实现『A 和 B 的共同好友』『A 可能认识的人』，怎么设计？」</p>
+</div>
+<pre><code class="lang-bash"><span class="cm">########## 用 Set 存关注/好友列表 ##########</span>
+SADD follow:1001 2001 2002 2003 2004     <span class="cm"># 1001 关注的人</span>
+SADD follow:1002 2002 2003 2005 2006
+
+<span class="cm"># ⭐ 共同关注（交集）—— Set 的核心价值</span>
+SINTER follow:1001 follow:1002
+<span class="cm"># 返回：2002, 2003</span>
+
+<span class="cm"># 我关注的人也关注他（可能认识的人）</span>
+<span class="cm"># 1) 我关注的人（follow:1001）</span>
+<span class="cm"># 2) 这些人分别关注了谁（需要多次查询或用一个反向索引）</span>
+<span class="cm"># 3) 汇总统计出现频率，排除已关注的 → 推荐</span>
+
+<span class="cm">########## ⭐ 大规模场景：Set 求交集的性能问题 ##########</span>
+<span class="cm"># SINTER 的复杂度是 O(N×M)（N 是最小集合大小，M 是集合数量）</span>
+<span class="cm"># 如果两个千万粉丝的大 V 求共同粉丝……会阻塞 Redis！</span>
+
+<span class="cm"># ✅ 解法一：把计算放到从节点 / 用 SINTERSTORE 异步算</span>
+SINTERSTORE tmp:common follow:1001 follow:1002
+<span class="cm"># → 但 SINTERSTORE 仍然在主线程执行，只是把结果存下来了</span>
+
+<span class="cm"># ✅ 解法二：离线计算（推荐，生产做法）</span>
+<span class="cm"># 用 Spark/Flink 离线算好「共同好友」「可能认识的人」</span>
+<span class="cm"># 结果写入 Redis 供快速查询，或存入专门的推荐系统</span>
+
+<span class="cm"># ✅ 解法三：限制集合大小</span>
+<span class="cm"># 只对"小集合"求交集：先比较 SCARD，取最小的两个求交</span>
+<span class="cm"># 但语义上要注意——求交集时结果受最小集合限制，所以可以先取最小的</span>
+
+<span class="cm">########## 双向关注 vs 单向关注 ##########</span>
+<span class="cm"># 单向关注（微博）：一个 Set 存"我关注的人"</span>
+SADD following:1001 2001 2002
+SADD followers:2001 1001            <span class="cm"># 同时维护"粉丝"集合（反向索引）</span>
+<span class="cm"># 查询"我的粉丝"：SMEMBERS followers:1001</span>
+<span class="cm"># 查询"互相关注"：SINTER following:1001 followers:1001</span>
+
+<span class="cm"># 双向好友（微信）：用两个 Set 或者一个 Set（双向添加）</span>
+SADD friends:1001 2002
+SADD friends:2002 1001              <span class="cm"># 两边都加，保持对称</span>
+<span class="cm"># ⚠️ 需要保证两边操作在一个事务/Lua 里，否则可能不一致</span></code></pre>
+
+<p><strong>第四步：边界与代价</strong></p>
+<ul>
+  <li><strong>SINTER 的阻塞风险</strong>：大集合求交集会阻塞主线程。<strong>生产上大 V 的关系计算必须走离线。</strong></li>
+  <li><strong>数据一致性</strong>：<code class="inline">following</code> 和 <code class="inline">followers</code> 两个索引必须同步维护。用 Lua 脚本或事务保证原子性；<strong>更可靠的方案是「以 DB 为准，Redis 做缓存」+ 定期对账</strong>。</li>
+  <li><strong>存储成本</strong>：每个关注关系在两个 Set 里各存一份（双向索引），存储成本翻倍。<strong>但查询效率值得这个成本。</strong></li>
+  <li><strong>超大粉丝列表</strong>：一个 1 亿粉丝的账号，其 <code class="inline">followers</code> Set 就是 1 亿 member（几 GB）。<strong>解法</strong>：① 分片；② 或者不用 Redis 存粉丝列表（用 DB + 分页），Redis 只存「最近的粉丝」等热点数据。</li>
+  <li><strong>「可能认识的人」是推荐算法问题</strong>：Redis 只能做「基于共同好友的简单推荐」，真正的推荐需要 ML 模型 + 离线计算。</li>
+</ul>
+
+<h2 id="c16-9">场景 9：附近的人（GEO）</h2>
+<div class="box b-big">
+  <div class="box-t">题目</div>
+  <p>「实现『查找附近的商家』，5 公里内按距离排序，怎么设计？」</p>
+</div>
+<pre><code class="lang-bash"><span class="cm">########## GEO 基本操作（底层是 ZSet，score 是 GeoHash 编码）##########</span>
+
+<span class="cm"># 添加位置（经度、纬度、名称）</span>
+GEOADD shops 116.404 39.915 <span class="st">"天安门"</span>
+GEOADD shops 116.397 39.908 <span class="st">"王府井"</span>
+GEOADD shops 116.410 39.920 <span class="st">"东单"</span>
+
+<span class="cm"># ⭐ 查找附近（核心命令）</span>
+<span class="cm"># GEOSEARCH：推荐的命令（GEORADIUS 已废弃）</span>
+GEOSEARCH shops FROMLONLAT 116.400 39.910 BYRADIUS 5 km ASC COUNT 10 WITHDIST WITHCOORD
+<span class="cm"># FROMLONLAT  以某坐标为圆心</span>
+<span class="cm"># BYRADIUS   按半径（也支持 BYBOX 按矩形）</span>
+<span class="cm"># ASC        按距离升序（DESC 降序）</span>
+<span class="cm"># COUNT 10   只取前 10 个</span>
+<span class="cm"># WITHDIST   返回距离</span>
+<span class="cm"># WITHCOORD  返回坐标</span>
+
+<span class="cm"># 以「已存在的成员」为圆心查找</span>
+GEOSEARCH shops FROMMEMBER <span class="st">"天安门"</span> BYRADIUS 3 km ASC WITHDIST
+
+<span class="cm"># 查两个位置的距离</span>
+GEODIST shops <span class="st">"天安门"</span> <span class="st">"王府井"</span> km
+<span class="cm"># 返回：约 0.85 km</span>
+
+<span class="cm"># 获取成员的 GeoHash 编码</span>
+GEOHASH shops <span class="st">"天安门"</span>
+
+<span class="cm"># 获取成员的经纬度</span>
+GEOPOS shops <span class="st">"天安门"</span></code></pre>
+
+<div class="box b-big">
+  <div class="box-t">✅ GEO 的底层原理：GeoHash + ZSet</div>
+  <p><strong>GeoHash 编码过程</strong>：</p>
+  <ol>
+  <li>把经纬度范围（经度 -180~180，纬度 -90~90）不断二分，每分一次产生一位（经度位 / 纬度位交错）。</li>
+  <li>二分 N 次后得到一个 N 位的二进制串。</li>
+  <li>把这个二进制串做 base32 编码，得到 GeoHash 字符串。</li>
+  </ol>
+  <p><strong>关键特性</strong>：<strong>GeoHash 前缀相同的点，在地理上相邻</strong>（把二维的邻近性编码成了一维的前缀相似性）。</p>
+  <p><strong>Redis 的实现</strong>：把 GeoHash 得到一个 <strong>52 位整数</strong>作为 ZSet 的 score，member 是元素名。<strong>所以 GEO 的所有操作都基于 ZSet</strong>——这正是为什么 Redis 能用 ZSet 实现 GEO 的原因。</p>
+  <p><strong>范围查询的实现</strong>：Redis 计算出「覆盖目标区域所需的 GeoHash 前缀区间」，然后用 <code class="inline">ZRANGEBYSCORE</code> 在 ZSet 里按 score 范围取候选，最后<strong>精确计算每个候选到中心的距离</strong>并过滤排序。</p>
+  <p><strong>为什么需要「最后精确计算」</strong>：GeoHash 是「把二维映射到一维」，<strong>存在边界问题</strong>——两个地理上很近的点，可能因为跨了 GeoHash 格子而前缀不同。所以 Redis 会取「相邻格子」的候选，再用真实的经纬度计算距离来精确过滤。</p>
+</div>
+
+<p><strong>第四步：边界与代价</strong></p>
+<ul>
+  <li><strong>数据量限制</strong>：一个 GEO key 就是一个 ZSet。<strong>如果一个 key 里存了全世界的商家（几千万），会变成大 key</strong>，且 <code class="inline">GEOSEARCH</code> 会在这个大 ZSet 上做范围查询。<br>
+  <strong>解法</strong>：<strong>按区域分片</strong>（<code class="inline">shops:beijing</code>、<code class="inline">shops:shanghai</code>），或者按「城市 + 业务类型」拆分。<strong>这是 GEO 在生产上最重要的优化。</strong></li>
+  <li><strong>精度</strong>：GEO 的定位用的是「球面距离近似」（把地球当球体），实际误差在 0.5% 以内，对「附近的人」这种场景完全够用。</li>
+  <li><strong>动态更新位置</strong>：<code class="inline">GEOADD</code> 对已存在的 member 是<strong>更新位置</strong>（覆盖旧的）。对「骑手实时位置」这类场景，频繁 <code class="inline">GEOADD</code> 是可以的，但要注意<strong>写入量</strong>。</li>
+  <li><strong>替代方案</strong>：如果是超大规模的地理检索（如全世界的 POI），专业的空间索引方案（PostGIS / Elasticsearch 的 geo 查询 / 专门的 LBS 服务）可能更合适。<strong>Redis GEO 适合「中小规模 + 需要低延迟」的场景。</strong></li>
+</ul>
+
+<h2 id="c16-10">场景 10：分布式 ID / 发号器</h2>
+<div class="box b-big">
+  <div class="box-t">题目</div>
+  <p>「需要生成全局唯一的订单号，趋势递增，怎么实现？」</p>
+</div>
+
+<table>
+<thead><tr><th style="width:18%">方案</th><th>实现</th><th>优点</th><th>缺点</th></tr></thead>
+<tbody>
+<tr><td>数据库自增</td><td>DB 的 AUTO_INCREMENT</td><td>简单、绝对唯一</td><td>❌ 并发能力受限；扩展性差</td></tr>
+<tr><td>UUID</td><td><code class="inline">UUID.randomUUID()</code></td><td>无中心、性能高</td><td>❌ 无序（影响 DB 索引性能）、太长</td></tr>
+<tr><td><strong>雪花算法（Snowflake）</strong></td><td>时间戳 + 机器 ID + 序列号，64 位整数</td><td><strong>趋势递增、高性能、无中心</strong></td><td>⚠️ <strong>依赖系统时钟</strong>（时钟回拨会重复）</td></tr>
+<tr><td><strong>Redis INCR</strong></td><td>原子自增</td><td><strong>绝对唯一、原子</strong>、实现简单</td><td>⚠️ 依赖 Redis 可用性；纯递增会暴露业务量（可用时间戳+随机前缀混淆）</td></tr>
+<tr><td><strong>Redis + 号段模式</strong></td><td>每次取一批（如 1000 个）号段缓存在应用内存，用完再取</td><td><strong>性能极高、减少 Redis 压力</strong></td><td>应用重启会浪费一段 ID（可接受）</td></tr>
+</tbody>
+</table>
+
+<pre><code class="lang-bash"><span class="cm">########## 简单版：Redis INCR ##########</span>
+SET seq:order 0
+INCR seq:order          <span class="cm"># 返回 1, 2, 3, ...</span>
+
+<span class="cm"># 组合成业务 ID（日期 + 序号）</span>
+<span class="cm"># INCR 得到 123，再拼成 order-20260930-000123</span>
+<span class="cm"># ⚠️ 每天 0 点重置：用带日期的 key</span>
+INCR seq:order:20260930
+
+<span class="cm">########## 号段模式（推荐，性能最好）##########</span>
+<span class="cm"># 每次 INCRBY 1000，拿到 1000 个可用 ID 的区间</span>
+INCRBY seq:order 1000
+<span class="cm"># 返回 1000 → 表示 [1, 1000] 这个区间归我</span>
+<span class="cm"># 应用在内存里分配 1, 2, 3... 用完后再 INCRBY 1000</span></code></pre>
+
+<pre><code class="lang-java"><span class="cm">/**
+ * 号段模式实现（美团 Leaf 的思路）
+ */</span>
+<span class="kw">public class</span> <span class="fn">SegmentIdGenerator</span> {
+    <span class="kw">private final</span> StringRedisTemplate redis;
+    <span class="kw">private final</span> String key;
+    <span class="kw">private final long</span> step;              <span class="cm">// 每次取的号段大小</span>
+
+    <span class="kw">private</span> AtomicLong current;            <span class="cm">// 当前分配的 ID</span>
+    <span class="kw">private volatile long</span> max;            <span class="cm">// 当前号段的上限</span>
+    <span class="kw">private final</span> Object lock = <span class="kw">new</span> Object();
+
+    <span class="kw">public</span> <span class="fn">SegmentIdGenerator</span>(StringRedisTemplate redis, String key, <span class="kw">long</span> step) {
+        <span class="kw">this</span>.redis = redis;
+        <span class="kw">this</span>.key = key;
+        <span class="kw">this</span>.step = step;
+        <span class="kw">this</span>.current = <span class="kw">new</span> AtomicLong(<span class="nu">0</span>);
+        <span class="kw">this</span>.max = <span class="nu">0</span>;
+    }
+
+    <span class="kw">public long</span> <span class="fn">nextId</span>() {
+        <span class="kw">long</span> id = current.incrementAndGet();
+        <span class="kw">if</span> (id &lt;= max) {
+            <span class="kw">return</span> id;
+        }
+        <span class="cm">// 当前号段用完 → 取新号段</span>
+        <span class="kw">synchronized</span> (lock) {
+            <span class="kw">if</span> (current.get() &lt;= max) {     <span class="cm">// 双重检查（可能别的线程已经取过了）</span>
+                <span class="kw">return</span> current.incrementAndGet();
+            }
+            <span class="kw">long</span> newMax = redis.opsForValue().increment(key, step);
+            current.set(newMax - step + <span class="nu">1</span>);
+            max = newMax;
+            <span class="kw">return</span> current.get();
+        }
+    }
+}</code></pre>
+
+<div class="box b-warn">
+  <div class="box-t">⚠️ 号段模式的「双 Buffer」优化（美团 Leaf 的进阶）</div>
+  <p><strong>问题</strong>：号段用完的那一刻，要同步去 Redis 取新号段——<strong>这个请求的延迟会叠加在业务上</strong>（虽然只有几毫秒，但在高并发下会形成「毛刺」）。</p>
+  <p><strong>解法（双 Buffer）</strong>：<strong>提前异步加载下一个号段</strong>。当当前号段用到 10% 时，就异步去 Redis 取下一个号段放进内存。<strong>这样业务永远不会等待取号段。</strong></p>
+  <pre style="margin:8px 0"><code class="lang-java"><span class="cm">// 简化逻辑</span>
+<span class="kw">if</span> (current.get() &gt; max - step * <span class="nu">0.1</span>) {    <span class="cm">// 剩余不足 10% → 异步预取下一段</span>
+    <span class="kw">if</span> (nextSegmentReady.compareAndSet(<span class="kw">false</span>, <span class="kw">true</span>)) {
+        asyncExecutor.submit(() -&gt; {
+            <span class="kw">long</span> newMax = redis.opsForValue().increment(key, step);
+            nextSegment.set(<span class="kw">new</span> Segment(newMax - step + <span class="nu">1</span>, newMax));
+            nextSegmentReady.set(<span class="kw">true</span>);
+        });
+    }
+}</code></pre>
+  <p><strong>代价</strong>：应用重启时会浪费「当前号段 + 预取号段」的 ID（可接受，ID 只要唯一递增就够了，不要求连续）。</p>
+</div>
+
+<p><strong>第四步：边界与代价</strong></p>
+<ul>
+  <li><strong>Redis 挂了怎么办</strong>：号段模式在内存里有缓存，<strong>短期内（一个号段内）可以用</strong>。号段用完后无法取新号段 → 需要降级方案（如切换到雪花算法，或用 DB 兜底）。</li>
+  <li><strong>ID 可读性 / 安全性</strong>：纯递增的 ID 会暴露业务量（竞争对手能通过 ID 推算出你的日订单量）。<strong>解法</strong>：① 前面加随机前缀；② 或者用「日期 + 随机数 + 序号」的组合。</li>
+  <li><strong>推荐方案</strong>：<strong>雪花算法（无中心、高性能）为主 + Redis 号段作为备选</strong>。雪花算法要处理时钟回拨（如果检测到时钟回拨，可以等待、或者用备用机器 ID 段）。</li>
+</ul>
+
+<h2 id="c16-11">场景 11：消息队列 / Stream</h2>
+<div class="box b-big">
+  <div class="box-t">题目</div>
+  <p>「用 Redis 做消息队列可以吗？怎么做？有什么限制？」</p>
+</div>
+
+<table>
+<thead><tr><th style="width:16%">方案</th><th>实现</th><th>优点</th><th>缺点</th></tr></thead>
+<tbody>
+<tr><td><strong>List</strong></td><td><code class="inline">LPUSH</code> 生产，<code class="inline">BRPOP</code> 消费</td><td>简单、实现容易</td><td>❌ <strong>消息一旦被弹出就无法恢复</strong>（消费者崩溃丢消息）；不支持多消费者组</td></tr>
+<tr><td><strong>Pub/Sub</strong></td><td><code class="inline">PUBLISH</code> / <code class="inline">SUBSCRIBE</code></td><td>实时性好</td><td>❌ <strong>不持久化、无 ACK、消费者离线消息就丢</strong> → 只能做实时通知，不能做可靠 MQ</td></tr>
+<tr><td><strong>Stream</strong><br><span class="badge bg-green">推荐</span></td><td><code class="inline">XADD</code> / <code class="inline">XREADGROUP</code> / <code class="inline">XACK</code></td><td>✅ <strong>持久化、消费者组、ACK 重投、消息回溯</strong></td><td>⚠️ 需要手动 <code class="inline">XTRIM</code> 裁剪；功能不如专业 MQ（无延时、无事务消息）</td></tr>
+</tbody>
+</table>
+
+<pre><code class="lang-bash"><span class="cm">########## Stream 完整用法 ##########</span>
+
+<span class="cm"># 1. 生产消息（* = 自动生成 ID）</span>
+XADD orders * orderNo OR123 amount 99.9
+<span class="cm"># 返回消息 ID：1759161600000-0（毫秒时间戳-序号）</span>
+
+<span class="cm"># ⭐ 限制队列长度（防止无限增长！）</span>
+XADD orders MAXLEN ~ 10000 * orderNo OR124 amount 199.9
+<span class="cm"># MAXLEN ~ 10000 表示"大约保留 10000 条"（~ 表示允许不完全精确，性能更好）</span>
+
+<span class="cm"># 2. 创建消费者组（从最新消息开始消费）</span>
+XGROUP CREATE orders group1 $ MKSTREAM
+<span class="cm"># $ = 只消费新消息；0 = 从头开始消费所有历史消息</span>
+
+<span class="cm"># 3. 消费（> 表示"还没投递给这个消费者的新消息"）</span>
+XREADGROUP GROUP group1 consumer1 COUNT 10 STREAMS orders &gt;
+<span class="cm"># 返回消息：ID + 字段</span>
+
+<span class="cm"># 4. 处理成功后 ACK</span>
+XACK orders group1 1759161600000-0
+
+<span class="cm"># ⭐ 5. 处理 pending（未 ACK）的消息（消费者崩溃后恢复）</span>
+XPENDING orders group1 - + 10
+<span class="cm"># 输出：消息 ID、消费者、空闲时间、投递次数</span>
+
+<span class="cm"># 重新认领消息给其他消费者（处理"消费者崩溃留下的消息"）</span>
+XCLAIM orders group1 consumer2 60000 1759161600000-0
+<span class="cm"># 60000 = 最小空闲时间（ms），只认领空闲超过 60 秒的消息</span>
+
+<span class="cm"># 或者用 XAUTOCLAIM（7.0+，更简洁）</span>
+XAUTOCLAIM orders group1 consumer2 60000 0 COUNT 10
+
+<span class="cm"># 6. 查看 Stream 信息</span>
+XINFO STREAM orders
+XINFO GROUPS orders
+XINFO CONSUMERS orders group1
+
+<span class="cm"># 7. 裁剪（定期清理旧消息）</span>
+XTRIM orders MAXLEN 10000</code></pre>
+
+<div class="box b-warn">
+  <div class="box-t">⚠️ 用 Redis 做 MQ 的关键限制（面试要说清）</div>
+  <ol style="margin-bottom:0">
+  <li><strong>必须手动裁剪（<code class="inline">XTRIM</code> / <code class="inline">MAXLEN</code>）</strong>：否则 Stream 会无限增长变成大 key。<strong>这是最常见的事故原因。</strong></li>
+  <li><strong>没有「延时消息」</strong>：Stream 不支持延时投递，需要自己用「ZSet + 延时搬运」实现。</li>
+  <li><strong>没有事务消息 / 顺序消息的高级语义</strong>：相比 RocketMQ / Kafka，Stream 的功能较基础。</li>
+  <li><strong>持久化依赖 RDB/AOF</strong>：如果持久化没配好，Redis 重启可能丢消息。<strong>而且主从切换也可能丢（异步复制）。</strong></li>
+  <li><strong>消费能力受限于单分片</strong>：Stream 是一个 key，<strong>所有消费者读的是同一个分片</strong>。虽然消费者组可以并行消费（不同消息分给不同消费者），但 Stream 本身的「生产」是单点的。<br>
+  <strong>解法</strong>：用多个 Stream（按业务分片，如 <code class="inline">orders:shard0</code> ~ <code class="inline">orders:shard9</code>）。</li>
+  <li><strong>不适合超大吞吐</strong>：Kafka 能做到百万 TPS，Redis Stream 更适合「中等吞吐 + 低延迟 + 已有 Redis 基础设施」的场景。</li>
+  </ol>
+</div>
+
+<div class="box b-tip">
+  <div class="box-t">💡 选型话术（很实用）</div>
+  <p>「我的判断是：</p>
+  <ul style="margin-bottom:0">
+  <li><strong>已经重度用 Redis，且 QPS 不高</strong>（如几千）→ 用 <strong>Stream</strong>。好处是不引入新组件，且能用 Redis 的生态（持久化、集群、监控）。</li>
+  <li><strong>需要高吞吐、严格顺序、延时消息、事务消息</strong> → 用 <strong>RocketMQ / Kafka</strong>。这是专业工具做的事，Redis 替代不了。</li>
+  <li><strong>只是做实时通知/广播</strong> → 用 Pub/Sub 或 Stream（Pub/Sub 不持久化，Stream 可以）。</li>
+  </ul>
+  <p>我不建议用 List 或 Pub/Sub 做「可靠消息」——<strong>List 丢消息、Pub/Sub 不持久化，这两个坑我是踩过的</strong>。」</p>
+</div>
+
+<h2 id="c16-12">场景 12：分布式 Session / 验证码 / 防刷</h2>
+<div class="box b-big">
+  <div class="box-t">题目组（这类「小场景」也要准备）</div>
+  <table style="margin:8px 0">
+  <thead><tr><th style="width:22%">需求</th><th>实现</th><th>关键点</th></tr></thead>
+  <tbody>
+  <tr>
+    <td><strong>分布式 Session</strong></td>
+    <td><code class="inline">SET session:{sid}</code> + Hash 存字段，TTL 30 分钟</td>
+    <td>① TTL 要配合「滑动续期」（每次访问刷新过期）；② Spring Session 有现成集成；③ 用 Hash 存字段便于局部更新</td>
+  </tr>
+  <tr>
+    <td><strong>短信验证码</strong></td>
+    <td><code class="inline">SET code:{phone} 123456 EX 300</code></td>
+    <td>① 必须有 TTL；② <strong>验证成功后立即删除</strong>（防重放）；③ 加发送频率限制（<code class="inline">SET NX</code> 防重复发送）；④ 校验次数限制（防暴力破解）</td>
+  </tr>
+  <tr>
+    <td><strong>登录 Token</strong></td>
+    <td><code class="inline">SET token:{token} userId EX 7200</code></td>
+    <td>① 支持「主动踢下线」（删除 token）；② 与 JWT 的区别：<strong>JWT 无状态但无法主动失效，Redis Token 有状态但可主动失效</strong></td>
+  </tr>
+  <tr>
+    <td><strong>接口防刷</strong></td>
+    <td><code class="inline">INCR limit:{ip}:{api}</code> + <code class="inline">EXPIRE</code></td>
+    <td>① 用 Lua 保证 INCR + EXPIRE 的原子性；② 多维度限流（IP + 用户 + 接口）；③ 阈值要按接口的重要性区分</td>
+  </tr>
+  <tr>
+    <td><strong>幂等防重复提交</strong></td>
+    <td><code class="inline">SETNX submit:{userId}:{bizId} 1 EX 600</code></td>
+    <td>① <strong>用 SETNX 而不是 SET</strong>（存在就说明已提交）；② 也要有 DB 唯一索引兜底；③ TTL 要覆盖「业务认为的重复窗口」</td>
+  </tr>
+  <tr>
+    <td><strong>购物车</strong></td>
+    <td><code class="inline">HSET cart:{userId} {skuId} {count}</code></td>
+    <td>① 用 Hash 存「商品ID → 数量」；② <code class="inline">HINCRBY</code> 支持数量增减；③ 商品数量多时注意大 key（可以按品类分 key）</td>
+  </tr>
+  <tr>
+    <td><strong>用户画像标签</strong></td>
+    <td><code class="inline">SADD tag:{userId} vip 高活跃 ...</code></td>
+    <td>① Set 便于做「标签交集」（如「VIP 且 高活跃」）；② 或用 Bitmap 存标签位（更省内存，但标签数有限制）</td>
+  </tr>
+  <tr>
+    <td><strong>点赞 / 收藏</strong></td>
+    <td><code class="inline">SADD like:{postId} {userId}</code> + <code class="inline">SCARD</code> 计数</td>
+    <td>① 用 Set 天然去重；② 同时维护「用户维度」的 Set（<code class="inline">SADD user:like:{userId} postId</code>）便于查「我点赞过的」；③ 爆款帖子的点赞 Set 会很大 → 分片</td>
+  </tr>
+  <tr>
+    <td><strong>短链生成</strong></td>
+    <td>自增 ID + Base62 编码；<code class="inline">SET short:{code} {url}</code></td>
+    <td>① 用 Redis INCR 得到唯一 ID，转成 62 进制；② 短链映射关系应该<strong>持久化到 DB</strong>（Redis 只做缓存）；③ 用 <code class="inline">SETNX</code> 处理 code 冲突</td>
+  </tr>
+  </tbody>
+  </table>
+</div>
+
+<pre><code class="lang-java"><span class="cm">/**
+ * ⭐ 验证码的完整实现（含防刷、防重放、防爆破）
+ */</span>
+<span class="kw">@Service</span>
+<span class="kw">public class</span> <span class="fn">SmsCodeService</span> {
+
+    <span class="kw">private static final</span> String SEND_LIMIT = <span class="st">"sms:send:limit:"</span>;    <span class="cm">// 发送频率限制</span>
+    <span class="kw">private static final</span> String CODE = <span class="st">"sms:code:"</span>;          <span class="cm">// 验证码本身</span>
+    <span class="kw">private static final</span> String FAIL_COUNT = <span class="st">"sms:fail:"</span>;     <span class="cm">// 验证失败次数</span>
+
+    <span class="kw">private final</span> StringRedisTemplate redis;
+    <span class="cm">// ⭐ 校验与删除必须原子，用 Lua</span>
+    <span class="kw">private static final</span> String VERIFY_SCRIPT =
+        <span class="st">"local code = redis.call('GET', KEYS[1]) "</span> +
+        <span class="st">"if code == false then return -1 end "</span> +          <span class="cm">-- 不存在或已过期</span>
+        <span class="st">"if code ~= ARGV[1] then return 0 end "</span> +            <span class="cm">-- 验证码错误</span>
+        <span class="st">"redis.call('DEL', KEYS[1]) "</span> +                      <span class="cm">-- ⭐ 成功即删除（防重放）</span>
+        <span class="st">"return 1"</span>;
+
+    <span class="cm">/** 发送验证码 */</span>
+    <span class="kw">public void</span> <span class="fn">send</span>(String phone) {
+        <span class="cm">// ① 频率限制：60 秒内只能发一次</span>
+        Boolean allowed = redis.opsForValue()
+            .setIfAbsent(SEND_LIMIT + phone, <span class="st">"1"</span>, Duration.ofSeconds(<span class="nu">60</span>));
+        <span class="kw">if</span> (!Boolean.TRUE.equals(allowed)) {
+            <span class="kw">throw new</span> BizException(<span class="st">"发送过于频繁，请 60 秒后再试"</span>);
+        }
+
+        <span class="cm">// ② 每日发送上限（可选，更强限制）</span>
+        Long dailyCount = redis.opsForValue().increment(<span class="st">"sms:day:"</span> + phone, <span class="nu">1</span>);
+        <span class="kw">if</span> (dailyCount != <span class="kw">null</span> &amp;&amp; dailyCount == <span class="nu">1</span>) {
+            redis.expire(<span class="st">"sms:day:"</span> + phone, Duration.ofDays(<span class="nu">1</span>));
+        }
+        <span class="kw">if</span> (dailyCount != <span class="kw">null</span> &amp;&amp; dailyCount &gt; <span class="nu">10</span>) {
+            <span class="kw">throw new</span> BizException(<span class="st">"今日发送次数已达上限"</span>);
+        }
+
+        <span class="cm">// ③ 生成并存储验证码（5 分钟有效）</span>
+        String code = String.format(<span class="st">"%06d"</span>, ThreadLocalRandom.current().nextInt(<span class="nu">1000000</span>));
+        redis.opsForValue().set(CODE + phone, code, Duration.ofMinutes(<span class="nu">5</span>));
+
+        <span class="cm">// ④ 调用短信网关</span>
+        smsGateway.send(phone, code);
+    }
+
+    <span class="cm">/** 校验验证码 */</span>
+    <span class="kw">public boolean</span> <span class="fn">verify</span>(String phone, String inputCode) {
+        <span class="cm">// ① 失败次数限制（防暴力破解）</span>
+        String failKey = FAIL_COUNT + phone;
+        String failCount = redis.opsForValue().get(failKey);
+        <span class="kw">if</span> (failCount != <span class="kw">null</span> &amp;&amp; Integer.parseInt(failCount) &gt;= <span class="nu">5</span>) {
+            <span class="kw">throw new</span> BizException(<span class="st">"验证失败次数过多，请重新获取验证码"</span>);
+        }
+
+        <span class="cm">// ② 原子校验 + 删除</span>
+        Long result = redis.execute(
+            <span class="kw">new</span> DefaultRedisScript&lt;&gt;(VERIFY_SCRIPT, Long.class),
+            Collections.singletonList(CODE + phone),
+            inputCode);
+
+        <span class="kw">if</span> (result != <span class="kw">null</span> &amp;&amp; result == <span class="nu">1</span>) {
+            redis.delete(failKey);      <span class="cm">// 成功则清空失败计数</span>
+            <span class="kw">return true</span>;
+        }
+
+        <span class="cm">// ③ 记录失败次数（10 分钟内累计）</span>
+        Long fails = redis.opsForValue().increment(failKey);
+        <span class="kw">if</span> (fails != <span class="kw">null</span> &amp;&amp; fails == <span class="nu">1</span>) {
+            redis.expire(failKey, Duration.ofMinutes(<span class="nu">10</span>));
+        }
+        <span class="kw">return false</span>;
+    }
+}</code></pre>
+
+<div class="box b-tip">
+  <div class="box-t">💡 这类「小场景」的回答要点</div>
+  <p>不要因为是「小功能」就只答一句「用 SET 存」。<strong>要展示你考虑了边界</strong>：</p>
+  <ul style="margin-bottom:0">
+  <li><strong>TTL 一定要设</strong>（否则内存泄漏）——这是 Redis 使用最常见的坑。</li>
+  <li><strong>原子性</strong>（校验+删除用 Lua）。</li>
+  <li><strong>防刷/防爆破</strong>（频率限制、失败次数限制）。</li>
+  <li><strong>持久化要求</strong>（Session/Token 丢了用户要重新登录，能不能接受？）</li>
+  <li><strong>DB 兜底</strong>（重要数据不能只存 Redis）。</li>
+  </ul>
+</div>
+
+<h2 id="c16-13">场景题速查表（面试前扫一眼）</h2>
+<table>
+<thead><tr><th style="width:20%">场景</th><th style="width:20%">首选结构</th><th>一句话要点</th></tr></thead>
+<tbody>
+<tr><td>缓存一致性</td><td>—</td><td>先更新 DB 再删缓存 + MQ 重试；Canal 做零侵入</td></tr>
+<tr><td>秒杀扣库存</td><td>String + Lua</td><td>Lua 原子扣减 + 库存分桶 + DB 条件更新兜底</td></tr>
+<tr><td>排行榜</td><td>ZSet</td><td>ZINCRBY 计分 + ZREVRANGE 取榜；注意「查自己排名」的需求</td></tr>
+<tr><td>延时队列</td><td>ZSet（score=时间戳）</td><td>Lua 原子「取出+删除」防重复消费；DB 兜底防丢</td></tr>
+<tr><td>限流</td><td>String（固定窗口）/ Lua（令牌桶）</td><td>固定窗口简单够用；令牌桶允许突发；滑动窗口 ZSet 内存开销大</td></tr>
+<tr><td>UV 统计</td><td><strong>Bitmap / HyperLogLog</strong></td><td>Bitmap 精确但要求 ID 是连续整数；HLL 固定 12KB 但有 0.81% 误差</td></tr>
+<tr><td>签到</td><td>Bitmap</td><td>bit 偏移 = 日期；每月一个 key；跨月要处理</td></tr>
+<tr><td>共同好友</td><td>Set</td><td>SINTER 求交集；<strong>大集合求交必须走离线</strong></td></tr>
+<tr><td>附近的人</td><td>GEO（底层 ZSet）</td><td>GEOSEARCH；<strong>按区域分片避免大 key</strong></td></tr>
+<tr><td>分布式 ID</td><td>String（INCR）</td><td>号段模式 + 双 Buffer；或雪花算法</td></tr>
+<tr><td>消息队列</td><td><strong>Stream</strong></td><td>XADD/XREADGROUP/XACK；<strong>必须 XTRIM 防大 key</strong></td></tr>
+<tr><td>Session/验证码</td><td>String / Hash</td><td><strong>必设 TTL</strong>；校验+删除要原子；加频率限制</td></tr>
+</tbody>
+</table>
+
+<div class="box b-x">
+  <div class="box-t">🚨 场景题回答的四大禁忌</div>
+  <ol style="margin-bottom:0">
+  <li><strong>不问需求就设计</strong>：不知道数据规模、一致性要求就开始画架构。<strong>面试官会觉得你缺乏工程判断力。</strong></li>
+  <li><strong>只答「用什么」，不说「为什么」</strong>：只报数据结构名字，不说「因为需要 XX 特性所以选它」。<strong>显得像背答案。</strong></li>
+  <li><strong>不主动说代价</strong>：任何方案都有代价，主动说出来才显得成熟。<strong>尤其要说「这个方案在什么规模下会崩」。</strong></li>
+  <li><strong>不知道边界就硬答</strong>：被问到不熟悉的领域，<strong>可以说「这块我没深入实践过，我的理解是……，可能有偏差」</strong>。诚实比编造好得多。</li>
+  </ol>
+</div>
+
+<h2 id="c16-14">本节自测</h2>
+<div class="track">
+  <label><input type="checkbox" data-k="d5-35"><span>我能背出场景题的五步答题框架（澄清→选型→实现→代价→追问准备）</span></label>
+  <label><input type="checkbox" data-k="d5-36"><span>我能完整讲清「秒杀扣库存」的分层方案（限流→Lua 扣减→分桶→DB 兜底）</span></label>
+  <label><input type="checkbox" data-k="d5-37"><span>我知道库存分桶会造成「提前售罄」，能说出缓解办法</span></label>
+  <label><input type="checkbox" data-k="d5-38"><span>我能设计日/周/月排行榜，并说清「同分排序」的分数编码技巧</span></label>
+  <label><input type="checkbox" data-k="d5-39"><span>我知道排行榜「只保留 Top N」会导致「查不到自己排名」的产品问题</span></label>
+  <label><input type="checkbox" data-k="d5-40"><span>我能用 ZSet + Lua 实现延时队列，并说清防重复消费的原子取出</span></label>
+  <label><input type="checkbox" data-k="d5-41"><span>我知道 Redis key 过期通知不可靠，不能用于延时任务</span></label>
+  <label><input type="checkbox" data-k="d5-42"><span>我能对比固定窗口/滑动窗口/令牌桶三种限流算法及各自代价</span></label>
+  <label><input type="checkbox" data-k="d5-43"><span>我能写出令牌桶的 Lua 实现</span></label>
+  <label><input type="checkbox" data-k="d5-44"><span>我能说清 Bitmap 与 HyperLogLog 的选型依据（精度/ID 连续性/交集分析）</span></label>
+  <label><input type="checkbox" data-k="d5-45"><span>我知道 Bitmap 要求 ID 是可控范围的整数，UUID 不行</span></label>
+  <label><input type="checkbox" data-k="d5-46"><span>我能用 Bitmap 实现签到，并说清跨月连续性的处理</span></label>
+  <label><input type="checkbox" data-k="d5-47"><span>我知道大集合 SINTER 会阻塞主线程，大规模求交必须离线计算</span></label>
+  <label><input type="checkbox" data-k="d5-48"><span>我能说清 GEO 的底层是 ZSet（GeoHash 编码成 score）</span></label>
+  <label><input type="checkbox" data-k="d5-49"><span>我知道 GEO 必须按区域分片，否则会变成大 key</span></label>
+  <label><input type="checkbox" data-k="d5-50"><span>我能实现号段模式的分布式 ID，并说清双 Buffer 预取优化</span></label>
+  <label><input type="checkbox" data-k="d5-51"><span>我能对比 List / Pub-Sub / Stream 做 MQ 的差异，并知道 Stream 必须 XTRIM</span></label>
+  <label><input type="checkbox" data-k="d5-52"><span>我能设计验证码服务，覆盖 TTL、防重放、防爆破、频率限制</span></label>
+  <label><input type="checkbox" data-k="d5-53"><span>我能说出场景题回答的四大禁忌</span></label>
+</div>
+</section>

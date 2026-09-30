@@ -1,0 +1,635 @@
+<section id="c03-command" class="anchor" data-title="Day1.3 · 命令行与 Java 客户端实战">
+<div class="ch-meta">
+  <span class="ch-num">Day 1 · 第 3 节</span>
+  <span class="badge bg-blue">预计 90 分钟</span>
+  <span class="badge bg-red">Java 工程师重点</span>
+</div>
+<h1>Day1.3 · 命令行与 Java 客户端实战</h1>
+
+<div class="box b-tip">
+  <div class="box-t">一句话结论</div>
+  <p>命令行决定你<strong>排查问题的效率</strong>，客户端决定你<strong>代码的稳定性</strong>。这一节的核心是两个「反常识」结论：<strong>① Pipeline 的收益在局域网下远没有想象的大，且不是原子操作；② 连接池参数配错，比 Redis 本身慢十倍。</strong></p>
+</div>
+
+<h2 id="c03-1">1. redis-cli 高效用法（排查问题的主力工具）</h2>
+
+<pre><code class="lang-bash"><span class="cm">########## 1) 连接与认证（生产规范：不要用 -a 明文传密码）##########</span>
+redis-cli -h 10.0.0.5 -p 6379
+redis-cli -h 10.0.0.5 -p 6379 --user order-svc --pass <span class="st">'Order@2026#Secret'</span>
+
+<span class="cm"># ✅ 推荐：用环境变量传密码，避免出现在 ps 输出和 shell history 里</span>
+export REDISCLI_AUTH=<span class="st">'你的强密码'</span>
+redis-cli -h 10.0.0.5 ping
+
+<span class="cm"># 交互式模式下的便捷命令</span>
+<span class="cm">#   HELP &lt;command&gt;   查看命令帮助</span>
+<span class="cm">#   CLEAR            清屏</span>
+<span class="cm">#   在交互中直接输 `?` 也会给提示</span>
+
+<span class="cm">########## 2) 批量执行命令（生产上批量初始化 / 批量查询）##########</span>
+<span class="cm"># 方式一：从 stdin 管道传入（注意：这不是 pipeline，是逐条执行）</span>
+cat commands.txt | redis-cli -h 10.0.0.5
+<span class="cm"># commands.txt 内容示例：
+#   set k1 v1
+#   set k2 v2
+#   get k1</span>
+
+<span class="cm"># 方式二：用 -x 读取 stdin 作为最后一个参数（适合大 value）</span>
+cat big_value.json | redis-cli -h 10.0.0.5 -x SET config:json
+
+<span class="cm"># 方式三：--pipe 真正的批量导入（利用 pipeline 协议，速度最快）</span>
+<span class="cm"># 注意：--pipe 要求输入为 RESP 协议格式，一般配合 redis-cli 生成</span>
+
+<span class="cm">########## 3) 性能与延迟诊断（生产排查四件套）##########</span>
+
+<span class="cm"># ① 实时延迟监控（p50/p99/p99.9）：能看出是否有周期性的毛刺</span>
+redis-cli -h 10.0.0.5 --latency
+redis-cli -h 10.0.0.5 --latency-history -i 5
+redis-cli -h 10.0.0.5 --latency-dist        <span class="cm"># 彩色延迟直方图</span>
+
+<span class="cm"># ② 慢查询日志</span>
+SLOWLOG LEN
+SLOWLOG GET 10
+<span class="cm"># 输出：[序号, 时间戳, 耗时(微秒), 命令参数, 客户端IP:端口, 客户端名]
+# 生产建议：slowlog-log-slower-than 10000（10ms）</span>
+SLOWLOG RESET
+
+<span class="cm"># ③ 基准压测（redis-benchmark 是内建工具）</span>
+redis-benchmark -h 10.0.0.5 -q -n 100000 -c 50
+<span class="cm">#  参数：-n 总请求数  -c 并发客户端数  -q 精简输出  -P pipeline数  -t 只测指定命令</span>
+redis-benchmark -h 10.0.0.5 -q -n 100000 -c 50 -P 16 -t get,set
+redis-benchmark -h 10.0.0.5 -q -n 20000 -c 50 -r 100000 -t get    <span class="cm"># -r 随机key范围</span>
+
+<span class="cm"># ④ 大 key / 热 key 扫描</span>
+redis-cli -h 10.0.0.5 --bigkeys              <span class="cm"># 按类型找「元素最多」的 key（低峰期执行！）</span>
+redis-cli -h 10.0.0.5 --memkeys              <span class="cm"># 7.0+ 按真实内存占用找大 key（比 --bigkeys 准）</span>
+redis-cli -h 10.0.0.5 --hotkeys              <span class="cm"># 需 maxmemory-policy 为 *-lfu 才可用</span>
+redis-cli -h 10.0.0.5 --scan --pattern <span class="st">"user:*"</span> | head -20
+
+<span class="cm">########## 4) 在线监控与诊断 ##########</span>
+redis-cli -h 10.0.0.5 monitor        <span class="cm"># ⚠️ 生产慎用！吞吐下降 50%+，只用于短暂排查</span>
+redis-cli -h 10.0.0.5 --stat         <span class="cm"># 每秒统计：keys/内存/连接数/命中率</span>
+redis-cli -h 10.0.0.5 info all
+redis-cli -h 10.0.0.5 client list    <span class="cm"># 查看所有连接（排查连接泄漏 / idle 连接）</span>
+redis-cli -h 10.0.0.5 client list | awk <span class="st">'{print $1,$2,$12,$14,$16}'</span>
+
+<span class="cm">########## 5) 8.6 新增：HOTKEYS 热键检测（新工具，面试加分）##########</span>
+<span class="cm"># 开始采集：COUNT=100 采集 top100，DURATION=60000 采 60 秒，SAMPLE=100 采样比</span>
+HOTKEYS START COUNT 100 DURATION 60000 SAMPLE 100
+HOTKEYS GET                 <span class="cm"># 查看采集结果（按 CPU 和 NET 两个维度给 top-k key）</span>
+HOTKEYS STOP                <span class="cm"># 提前结束采集</span>
+<span class="cm"># 可只采集指定槽：HOTKEYS START COUNT 50 SLOTS 100 101 102</span>
+
+<span class="cm">########## 6) 集群相关 ##########</span>
+redis-cli -c -h 10.0.0.5 -p 7001    <span class="cm"># -c 开启重定向跟随（客户端自动跟随 MOVED/ASK）</span>
+CLUSTER INFO
+CLUSTER NODES
+CLUSTER SLOTS
+CLUSTER SLOT-STATS ORDERBY CPU      <span class="cm"># 8.2+ 按槽位统计 CPU/网络/keys 数（找热槽）</span>
+CLUSTER SHARDS                      <span class="cm"># 7.0+ 更清晰的集群结构视图</span></code></pre>
+
+<div class="box b-warn">
+  <div class="box-t">⚠️ --bigkeys 的统计口径陷阱（面试细节题）</div>
+  <p><code class="inline">--bigkeys</code> 统计的是<strong>元素个数</strong>（String 是字节长度），<strong>不是内存占用</strong>。所以：</p>
+  <ul>
+    <li>一个含 10 万个超长字符串的 List，元素个数不多但内存可能巨大——<code class="inline">--bigkeys</code> 可能漏掉它。</li>
+    <li>要按真实内存占用排查，用 <code class="inline">--memkeys</code>（7.0+）或 <code class="inline">MEMORY USAGE key</code>，或用 RDB 离线分析工具（<code class="inline">redis-rdb-tools</code> / <code class="inline">rdr</code>）。</li>
+    <li>两条命令都基于 <code class="inline">SCAN</code> 遍历，<strong>不阻塞主线程但会占用 CPU 和网络</strong>，且集群模式下<strong>需要逐节点执行</strong>（一次连接只统计当前节点）。</li>
+  </ul>
+</div>
+
+<h3>实用小工具：把常用诊断合成一条命令</h3>
+<pre><code class="lang-bash"><span class="cm"># ===== rediag.sh · 一键盘点（放到 /usr/local/bin 直接用）=====</span>
+#!/bin/bash
+<span class="cm"># 用法：rediag.sh &lt;host&gt; &lt;port&gt; [password]</span>
+H=${<span class="nu">1</span>:-127.0.0.1}; P=${<span class="nu">2</span>:-6379}; export REDISCLI_AUTH=$3
+R=<span class="st">"redis-cli -h $H -p $P"</span>
+
+echo <span class="st">"================ Redis 健康盘点 $(date '+%F %T') ================"</span>
+echo <span class="st">"--- 基础信息 ---"</span>
+$R info server | grep -E <span class="st">'redis_version|redis_mode|uptime_in_days|hz'</span>
+echo <span class="st">"--- 内存 ---"</span>
+$R info memory | grep -E <span class="st">'used_memory_human|used_memory_peak_human|maxmemory_human|mem_fragmentation_ratio|maxmemory_policy'</span>
+echo <span class="st">"--- 客户端 ---"</span>
+$R info clients | grep -E <span class="st">'connected_clients|blocked_clients|maxclients'</span>
+echo <span class="st">"--- 命中率 ---"</span>
+$R info stats | grep -E <span class="st">'keyspace_hits|keyspace_misses|expired_keys|evicted_keys|total_commands_processed|instantaneous_ops_per_sec'</span>
+echo <span class="st">"--- 持久化 ---"</span>
+$R info persistence | grep -E <span class="st">'rdb_last_bgsave_status|aof_enabled|aof_last_bgrewrite_status|rdb_last_save_time'</span>
+echo <span class="st">"--- 复制 ---"</span>
+$R info replication | grep -E <span class="st">'role|connected_slaves|master_link_status|master_last_io_seconds_ago|slave_repl_offset|master_repl_offset'</span>
+echo <span class="st">"--- 慢查询 Top5 ---"</span>
+$R slowlog get 5
+echo <span class="st">"--- 复制延迟(秒) ---"</span>
+MASTER_OFF=$($R info replication | grep -m1 master_repl_offset | cut -d: -f2 | tr -d <span class="st">'\r'</span>)
+echo <span class="st">"master_offset=$MASTER_OFF"</span>
+echo <span class="st">"=================================================================="</span></code></pre>
+
+<h2 id="c03-2">2. Java 客户端选型：Jedis vs Lettuce vs Redisson</h2>
+<p>这是 Java 工程师面试的必问题，因为选型直接决定<strong>连接模型、并发能力和功能边界</strong>。</p>
+
+<table>
+<thead><tr><th style="width:11%">客户端</th><th style="width:13%">连接模型</th><th style="width:24%">核心特点</th><th>适用场景</th></tr></thead>
+<tbody>
+<tr><td><strong>Jedis</strong></td><td>同步阻塞<br>连接池（非线程安全）</td><td>最贴近 Redis 命令原语，API 简单直接；每个线程需独占连接，靠 <code class="inline">JedisPool</code> 管理</td><td>传统 Spring 项目、命令级精细控制、并发量中等</td></tr>
+<tr><td><strong>Lettuce</strong></td><td>Netty 异步<br>（线程安全，单连接可多线程共享）</td><td>基于 Netty，支持异步/响应式（Reactive）、共享连接、自动重连；<strong>Spring Boot 2.x+ 默认</strong></td><td>高并发、响应式（WebFlux）、云原生环境</td></tr>
+<tr><td><strong>Redisson</strong></td><td>Netty（在 Lettuce/NIO 之上封装）</td><td>提供<strong>分布式对象</strong>（RLock/RSemaphore/RMap/RBucket/RDelayedQueue）和看门狗续期</td><td>需要分布式锁、分布式集合、延时队列等高级能力</td></tr>
+<tr><td><strong>Spring Data Redis</strong></td><td>封装层</td><td>统一 API（RedisTemplate），底层可切 Jedis/Lettuce；提供序列化策略配置</td><td>Spring 生态项目（绝大多数业务系统）</td></tr>
+</tbody>
+</table>
+
+<div class="box b-tip">
+  <div class="box-t">💡 选型口诀（面试直接说）</div>
+  <p><strong>「基础命令用 Lettuce（Spring Boot 默认，异步高并发），需要分布式锁等高级能力用 Redisson，老项目或需要完全掌控连接用 Jedis。」</strong><br>
+  更进一步：「生产上通常<strong>两者混用</strong>——业务读写走 RedisTemplate(Lettuce)，分布式锁和限流走 Redisson，各取所长。」</p>
+</div>
+
+<h2 id="c03-3">3. 依赖配置（Spring Boot + Maven）</h2>
+<pre><code class="lang-xml"><span class="cm">&lt;!-- Spring Boot 3.x + Redis --&gt;</span>
+<span class="kw">&lt;dependency&gt;</span>
+  <span class="kw">&lt;groupId&gt;</span>org.springframework.boot<span class="kw">&lt;/groupId&gt;</span>
+  <span class="kw">&lt;artifactId&gt;</span>spring-boot-starter-data-redis<span class="kw">&lt;/artifactId&gt;</span>
+<span class="kw">&lt;/dependency&gt;</span>
+
+<span class="cm">&lt;!-- 连接池（Lettuce 默认，需要 commons-pool2 才启用池化）--&gt;</span>
+<span class="kw">&lt;dependency&gt;</span>
+  <span class="kw">&lt;groupId&gt;</span>org.apache.commons<span class="kw">&lt;/groupId&gt;</span>
+  <span class="kw">&lt;artifactId&gt;</span>commons-pool2<span class="kw">&lt;/artifactId&gt;</span>
+<span class="kw">&lt;/dependency&gt;</span>
+
+<span class="cm">&lt;!-- Redisson（分布式锁/集合）--&gt;</span>
+<span class="kw">&lt;dependency&gt;</span>
+  <span class="kw">&lt;groupId&gt;</span>org.redisson<span class="kw">&lt;/groupId&gt;</span>
+  <span class="kw">&lt;artifactId&gt;</span>redisson-spring-boot-starter<span class="kw">&lt;/artifactId&gt;</span>
+  <span class="kw">&lt;version&gt;</span>3.40.0<span class="kw">&lt;/version&gt;</span>   <span class="cm">&lt;!-- 实际用最新稳定版 --&gt;</span>
+<span class="kw">&lt;/dependency&gt;</span>
+
+<span class="cm">&lt;!-- 原生 Jedis（可选）--&gt;</span>
+<span class="kw">&lt;dependency&gt;</span>
+  <span class="kw">&lt;groupId&gt;</span>redis.clients<span class="kw">&lt;/groupId&gt;</span>
+  <span class="kw">&lt;artifactId&gt;</span>jedis<span class="kw">&lt;/artifactId&gt;</span>
+  <span class="kw">&lt;version&gt;</span>5.2.0<span class="kw">&lt;/version&gt;</span>
+<span class="kw">&lt;/dependency&gt;</span></code></pre>
+
+<pre><code class="lang-yaml"><span class="cm"># ===== application.yml · 生产级配置（含哨兵与集群两种）=====</span>
+spring:
+  <span class="cm"># ---------- 单机 / 哨兵 ----------</span>
+  data:
+    redis:
+      <span class="cm"># 单机</span>
+      host: 10.0.0.5
+      port: 6379
+      password: ${REDIS_PASSWORD}     <span class="cm"># 从环境变量读取，禁止硬编码</span>
+      database: 0
+      timeout: 3000ms                  <span class="cm"># 命令超时（含连接建立）</span>
+      connect-timeout: 2000ms
+      client-type: lettuce              <span class="cm"># lettuce | jedis</span>
+      lettuce:
+        pool:
+          max-active: 64               <span class="cm"># 最大连接数（按并发估算，非越大越好）</span>
+          max-idle: 16
+          min-idle: 8                  <span class="cm"># 保持一定空闲连接，避免突发时建连抖动</span>
+          max-wait: 1000ms             <span class="cm"># 池耗尽时的等待时间，超时快速失败</span>
+          time-between-eviction-runs: 30s
+        shutdown-timeout: 200ms
+      <span class="cm"># 哨兵模式（把上面 host/port 换成 sentinel 配置）</span>
+      <span class="cm"># sentinel:</span>
+      <span class="cm">#   master: mymaster</span>
+      <span class="cm">#   nodes: 10.0.0.5:26379,10.0.0.6:26379,10.0.0.7:26379</span>
+      <span class="cm">#   password: ${REDIS_SENTINEL_PASSWORD}</span>
+
+<span class="cm"># ---------- Cluster 模式（推荐用 Redisson 或 Lettuce 显式配置）----------</span>
+<span class="cm"># spring.data.redis.cluster:</span>
+<span class="cm">#   nodes: 10.0.0.11:7001,10.0.0.12:7001,10.0.0.13:7001</span>
+<span class="cm">#   max-redirects: 3        # MOVED 重定向最大次数</span>
+<span class="cm">#   password: ${REDIS_PASSWORD}</span>
+<span class="cm">#   lettuce.pool: ...       # 集群下每个节点都会建池，注意总连接数 = 池大小 × 节点数</span>
+
+<span class="cm"># ---------- Redisson（独立配置，功能更强）----------</span>
+<span class="cm"># 推荐用 Java Config 而非 yml，见下方代码</span></code></pre>
+
+<h2 id="c03-4">4. 完整 Java 代码：Spring Data Redis 生产级封装</h2>
+
+<pre><code class="lang-java"><span class="cm">/**
+ * RedisTemplate 生产级配置
+ *
+ * 关键决策点：
+ * 1. Key 用 String 序列化（可读，便于排查和 ACL 授权）
+ * 2. Value 用 JSON 序列化（跨语言兼容，但注意体积）
+ * 3. 单机用 GenericJackson2JsonRedisSerializer，集群用 Jackson2JsonRedisSerializer 更省
+ */</span>
+<span class="kw">@Configuration</span>
+<span class="kw">public class</span> <span class="fn">RedisConfig</span> {
+
+    <span class="kw">@Bean</span>
+    <span class="kw">public</span> RedisTemplate&lt;String, Object&gt; <span class="fn">redisTemplate</span>(RedisConnectionFactory factory) {
+        RedisTemplate&lt;String, Object&gt; template = <span class="kw">new</span> RedisTemplate&lt;&gt;();
+        template.setConnectionFactory(factory);
+
+        <span class="cm">// ---- Key 序列化：字符串，保证 redis-cli 里能直接看懂 ----</span>
+        StringRedisSerializer keySerializer = <span class="kw">new</span> StringRedisSerializer();
+        template.setKeySerializer(keySerializer);
+        template.setHashKeySerializer(keySerializer);
+
+        <span class="cm">// ---- Value 序列化：JSON ----</span>
+        ObjectMapper om = <span class="kw">new</span> ObjectMapper();
+        om.registerModule(<span class="kw">new</span> JavaTimeModule());                          <span class="cm">// 支持 LocalDateTime</span>
+        om.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+        om.setVisibility(PropertyAccessor.ALL, JsonAutoDetect.Visibility.ANY);
+        om.activateDefaultTyping(LaissezFaireSubTypeValidator.instance,       <span class="cm">// ⚠️ 生产建议用白名单版本</span>
+                ObjectMapper.DefaultTyping.NON_FINAL, JsonTypeInfo.As.PROPERTY);
+
+        GenericJackson2JsonRedisSerializer valueSerializer =
+                <span class="kw">new</span> GenericJackson2JsonRedisSerializer(om);
+        template.setValueSerializer(valueSerializer);
+        template.setHashValueSerializer(valueSerializer);
+
+        template.afterPropertiesSet();
+        <span class="kw">return</span> template;
+    }
+
+    <span class="cm">/**
+     * 纯字符串模板：用于计数器、分布式锁等只需 String 的场景，避免 JSON 开销
+     */</span>
+    <span class="kw">@Bean</span>
+    <span class="kw">public</span> StringRedisTemplate <span class="fn">stringRedisTemplate</span>(RedisConnectionFactory factory) {
+        <span class="kw">return new</span> StringRedisTemplate(factory);
+    }
+}</code></pre>
+
+<div class="box b-x">
+  <div class="box-t">🚨 序列化踩坑警告（真实事故高发点）</div>
+  <ol style="margin-bottom:0">
+    <li><strong>默认 JDK 序列化</strong>：<code class="inline">RedisTemplate</code> 默认用 <code class="inline">JdkSerializationRedisSerializer</code>，存进去的是二进制，<code class="inline">redis-cli</code> 完全看不懂，排查困难、体积大、跨语言不可用。<strong>必须改。</strong></li>
+    <li><strong><code class="inline">GenericJackson2JsonRedisSerializer</code> 会写入 <code class="inline">@class</code> 字段</strong>：这带来两个问题——① 增加存储体积（有时超过 20%）；② <strong>反序列化存在安全风险</strong>（若开启 defaultTyping 且未做白名单，可能有反序列化漏洞）。生产建议<strong>用明确类型的 <code class="inline">Jackson2JsonRedisSerializer&lt;T&gt;</code></strong>，或对无多态需求的对象关闭 defaultTyping。</li>
+    <li><strong>对象类结构变更导致反序列化失败</strong>：改了字段名/类型，历史缓存反序列化会抛异常。<strong>应对</strong>：缓存中不放易变结构、加版本号（<code class="inline">user:v2:1001</code>）、或统一用 Map/JSON 字符串存。</li>
+    <li><strong>LocalDateTime 序列化</strong>：不加 <code class="inline">JavaTimeModule</code> 会直接抛异常，这是最常见的启动失败原因之一。</li>
+  </ol>
+</div>
+
+<h3>缓存的三种写法对比（推荐用第三种）</h3>
+<pre><code class="lang-java"><span class="cm">/**
+ * 反面教材 1：手写读写缓存，问题很多
+ */</span>
+<span class="kw">public</span> User <span class="fn">getUserBad</span>(Long id) {
+    String key = <span class="st">"user:"</span> + id;
+    String cached = redis.opsForValue().get(key);       <span class="cm">// 问题：类型转换 + 反序列化异常未处理</span>
+    <span class="kw">if</span> (cached != <span class="kw">null</span>) <span class="kw">return</span> JSON.parseObject(cached, User.class);
+    User user = userMapper.selectById(id);              <span class="cm">// 问题：没有防穿透、没有防击穿</span>
+    redis.opsForValue().set(key, JSON.toJSONString(user));
+    <span class="kw">return</span> user;                                        <span class="cm">// 问题：没有 TTL，永久不过期，内存会涨满</span>
+}
+
+<span class="cm">/**
+ * 推荐：用 Spring Cache 抽象 + 注解（简洁、统一、易维护）
+ */</span>
+<span class="kw">@Service</span>
+<span class="kw">public class</span> <span class="fn">UserService</span> {
+
+    <span class="kw">@Cacheable</span>(cacheNames = <span class="st">"user"</span>, key = <span class="st">"#id"</span>,
+               unless = <span class="st">"#result == null"</span>)                 <span class="cm">// null 不缓存（防穿透需另行处理）</span>
+    <span class="kw">public</span> User <span class="fn">getById</span>(Long id) {
+        <span class="kw">return</span> userMapper.selectById(id);
+    }
+
+    <span class="kw">@CachePut</span>(cacheNames = <span class="st">"user"</span>, key = <span class="st">"#user.id"</span>)      <span class="cm">// 更新后刷新缓存</span>
+    <span class="kw">public</span> User <span class="fn">update</span>(User user) {
+        userMapper.updateById(user);
+        <span class="kw">return</span> user;
+    }
+
+    <span class="kw">@CacheEvict</span>(cacheNames = <span class="st">"user"</span>, key = <span class="st">"#id"</span>)          <span class="cm">// 删除时清缓存</span>
+    <span class="kw">public void</span> <span class="fn">delete</span>(Long id) {
+        userMapper.deleteById(id);
+    }
+}</code></pre>
+
+<pre><code class="lang-java"><span class="cm">/**
+ * 生产级缓存工具：带 TTL 随机抖动、防穿透、防击穿
+ */</span>
+<span class="kw">@Component</span>
+<span class="kw">@RequiredArgsConstructor</span>
+<span class="kw">public class</span> <span class="fn">CacheHelper</span> {
+
+    <span class="kw">private static final</span> String NULL_PLACEHOLDER = <span class="st">"__NULL__"</span>;
+
+    <span class="kw">private final</span> StringRedisTemplate redis;
+
+    <span class="cm">/**
+     * 缓存读取（防穿透 + 防击穿 + 抖动 TTL）
+     *
+     * @param key        缓存 key
+     * @param type       返回类型
+     * @param baseTtl    基础过期秒数
+     * @param jitter     抖动秒数（防雪崩）
+     * @param loader     回源函数
+     */</span>
+    <span class="kw">public</span> &lt;T&gt; T <span class="fn">getWithProtect</span>(String key, Class&lt;T&gt; type, <span class="kw">long</span> baseTtl, <span class="kw">long</span> jitter,
+                                    Supplier&lt;T&gt; loader) {
+        String cached = redis.opsForValue().get(key);
+
+        <span class="cm">// 1) 命中了「空值占位符」→ 直接返回 null（防穿透）</span>
+        <span class="kw">if</span> (NULL_PLACEHOLDER.equals(cached)) {
+            <span class="kw">return null</span>;
+        }
+        <span class="kw">if</span> (cached != <span class="kw">null</span>) {
+            <span class="kw">return</span> JSON.parseObject(cached, type);
+        }
+
+        <span class="cm">// 2) 未命中 → 加分布式锁重建，防击穿（只有一个线程回源）</span>
+        String lockKey = <span class="st">"lock:cache:"</span> + key;
+        String token = UUID.randomUUID().toString();
+        Boolean locked = redis.opsForValue()
+                .setIfAbsent(lockKey, token, Duration.ofSeconds(<span class="nu">10</span>));
+
+        <span class="kw">try</span> {
+            <span class="kw">if</span> (Boolean.TRUE.equals(locked)) {
+                <span class="cm">// 双检：拿到锁后再查一次，可能已被其他线程写入</span>
+                cached = redis.opsForValue().get(key);
+                <span class="kw">if</span> (cached != <span class="kw">null</span>) {
+                    <span class="kw">return</span> NULL_PLACEHOLDER.equals(cached) ? <span class="kw">null</span> : JSON.parseObject(cached, type);
+                }
+
+                T value = loader.get();
+                <span class="kw">long</span> ttl = baseTtl + ThreadLocalRandom.current().nextLong(<span class="nu">0</span>, jitter + <span class="nu">1</span>);
+
+                <span class="kw">if</span> (value == <span class="kw">null</span>) {
+                    <span class="cm">// 空值也要缓存（短 TTL），防止反复穿透到 DB</span>
+                    redis.opsForValue().set(key, NULL_PLACEHOLDER, Duration.ofSeconds(<span class="nu">60</span> + ttl % <span class="nu">30</span>));
+                } <span class="kw">else</span> {
+                    redis.opsForValue().set(key, JSON.toJSONString(value), Duration.ofSeconds(ttl));
+                }
+                <span class="kw">return</span> value;
+            }
+
+            <span class="cm">// 3) 没抢到锁 → 短暂等待后重试读缓存，避免大量线程同时回源</span>
+            Thread.sleep(<span class="nu">50</span>);
+            cached = redis.opsForValue().get(key);
+            <span class="kw">if</span> (cached != <span class="kw">null</span> && !NULL_PLACEHOLDER.equals(cached)) {
+                <span class="kw">return</span> JSON.parseObject(cached, type);
+            }
+            <span class="cm">// 兜底：直接查库（保证可用性优先，不无限等待）</span>
+            <span class="kw">return</span> loader.get();
+
+        } <span class="kw">catch</span> (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            <span class="kw">return</span> loader.get();
+        } <span class="kw">finally</span> {
+            <span class="cm">// 4) 释放锁：必须校验 token，防止误删别人的锁</span>
+            unlock(lockKey, token);
+        }
+    }
+
+    <span class="cm">/** 用 Lua 保证「比较 + 删除」的原子性 */</span>
+    <span class="kw">private static final</span> String UNLOCK_LUA =
+            <span class="st">"if redis.call('get', KEYS[1]) == ARGV[1] then "</span> +
+            <span class="st">"  return redis.call('del', KEYS[1]) "</span> +
+            <span class="st">"else return 0 end"</span>;
+
+    <span class="kw">private void</span> <span class="fn">unlock</span>(String key, String token) {
+        redis.execute(<span class="kw">new</span> DefaultRedisScript&lt;&gt;(UNLOCK_LUA, Long.class),
+                      Collections.singletonList(key), token);
+    }
+}</code></pre>
+
+<h2 id="c03-5">5. Pipeline：什么时候真有用</h2>
+<pre><code class="lang-java"><span class="cm">/**
+ * Pipeline 实测：本机/局域网下，批量写 10000 个 key
+ */</span>
+<span class="kw">public void</span> <span class="fn">compareWrite</span>() {
+    <span class="kw">int</span> N = <span class="nu">10000</span>;
+
+    <span class="cm">// ---- 方式 1：逐条 set（每次一个 RTT）----</span>
+    <span class="kw">long</span> t1 = System.currentTimeMillis();
+    <span class="kw">for</span> (<span class="kw">int</span> i = <span class="nu">0</span>; i &lt; N; i++) {
+        redis.opsForValue().set(<span class="st">"k"</span> + i, <span class="st">"v"</span> + i);
+    }
+    System.out.println(<span class="st">"逐条: "</span> + (System.currentTimeMillis() - t1) + <span class="st">"ms"</span>);
+    <span class="cm">// 局域网 0.1ms RTT → 约 1000ms+；本机约 300-600ms</span>
+
+    <span class="cm">// ---- 方式 2：Pipeline（一次发送多条，只等一次响应）----</span>
+    <span class="kw">long</span> t2 = System.currentTimeMillis();
+    redis.executePipelined((RedisCallback&lt;Object&gt;) conn -&gt; {
+        <span class="kw">for</span> (<span class="kw">int</span> i = <span class="nu">0</span>; i &lt; N; i++) {
+            conn.stringCommands().set((<span class="st">"k"</span> + i).getBytes(), (<span class="st">"v"</span> + i).getBytes());
+        }
+        <span class="kw">return null</span>;
+    });
+    System.out.println(<span class="st">"Pipeline: "</span> + (System.currentTimeMillis() - t2) + <span class="st">"ms"</span>);
+    <span class="cm">// 通常快 5-20 倍（取决于网络 RTT）</span>
+
+    <span class="cm">// ---- 方式 3：Pipeline + 分批（避免单次过多命令导致内存暴涨）----</span>
+    <span class="kw">int</span> batchSize = <span class="nu">500</span>;
+    <span class="kw">for</span> (<span class="kw">int</span> start = <span class="nu">0</span>; start &lt; N; start += batchSize) {
+        <span class="kw">final int</span> s = start;
+        redis.executePipelined((RedisCallback&lt;Object&gt;) conn -&gt; {
+            <span class="kw">for</span> (<span class="kw">int</span> i = s; i &lt; Math.min(s + batchSize, N); i++) {
+                conn.stringCommands().set((<span class="st">"k"</span> + i).getBytes(), (<span class="st">"v"</span> + i).getBytes());
+            }
+            <span class="kw">return null</span>;
+        });
+    }
+}</code></pre>
+
+<div class="box b-x">
+  <div class="box-t">🚨 Pipeline 的四个关键认知（面试高频深挖点）</div>
+  <ol style="margin-bottom:0">
+    <li><strong>Pipeline 不是原子的</strong>：它只是把多条命令<strong>一次性打包发送</strong>，Redis 仍然是逐条执行。中间可能插入其他客户端的命令。<strong>要原子性用 <code class="inline">MULTI/EXEC</code> 或 Lua。</strong></li>
+    <li><strong>不是「越批量越好」</strong>：单次 pipeline 命令太多，客户端和 Redis 都要缓存大量数据（Redis 要为回复分配输出缓冲区），可能<strong>触发输出缓冲区超限（client-output-buffer-limit）导致连接被断开</strong>。生产建议<strong>每批 100~1000 条</strong>。</li>
+    <li><strong>收益取决于网络 RTT</strong>：局域网 RTT 0.1ms 时收益有限（主要是 syscall 次数减少）；跨机房 RTT 5ms 时收益巨大。<strong>「局域网下 Pipeline 收益不大」是很反直觉但正确的认知。</strong></li>
+    <li><strong>与 MULTI 一起用会变慢</strong>：在 MULTI 里放大量命令，Redis 会把整个事务的回复缓存在内存里，容易 OOM。正确做法是 pipeline 批量命令，每批单独 EXEC。</li>
+  </ol>
+  <p style="margin-bottom:0"><strong>真实案例</strong>：有个线上事故就是「pipeline 一次塞 50 万条命令」，导致 Redis 输出缓冲区达到 1GB，触发 <code class="inline">client-output-buffer-limit</code> 被强制断开连接，客户端报 <code class="inline">Unexpected end of stream</code>。</p>
+</div>
+
+<h2 id="c03-6">6. 连接池：最常见的线上性能杀手</h2>
+<pre><code class="lang-java"><span class="cm">/**
+ * JedisPool 生产级配置 + 使用规范
+ */</span>
+<span class="kw">@Configuration</span>
+<span class="kw">public class</span> <span class="fn">JedisConfig</span> {
+
+    <span class="kw">@Bean</span>
+    <span class="kw">public</span> JedisPool <span class="fn">jedisPool</span>(
+            @Value(<span class="st">"${redis.host}"</span>) String host,
+            @Value(<span class="st">"${redis.port}"</span>) <span class="kw">int</span> port,
+            @Value(<span class="st">"${redis.password}"</span>) String password) {
+
+        JedisPoolConfig config = <span class="kw">new</span> JedisPoolConfig();
+
+        <span class="cm">// ---- 连接数 ----</span>
+        config.setMaxTotal(<span class="nu">64</span>);            <span class="cm">// 最大连接数 = 单实例能扛的并发 × 安全系数</span>
+        config.setMaxIdle(<span class="nu">16</span>);             <span class="cm">// 最大空闲连接（避免频繁创建销毁）</span>
+        config.setMinIdle(<span class="nu">8</span>);              <span class="cm">// 最小空闲连接（预热，防突发流量抖动）</span>
+        config.setMaxWaitMillis(<span class="nu">1000</span>);     <span class="cm">// ⚠️ 池耗尽时的等待时间，必须设置！否则线程无限阻塞</span>
+
+        <span class="cm">// ---- 连接有效性检测 ----</span>
+        config.setTestOnBorrow(<span class="kw">false</span>);      <span class="cm">// 借出时检测（有 RTT 开销，高并发下慎用）</span>
+        config.setTestOnReturn(<span class="kw">false</span>);
+        config.setTestWhileIdle(<span class="kw">true</span>);       <span class="cm">// ✅ 空闲时检测（推荐，配合下面两个参数）</span>
+        config.setTimeBetweenEvictionRunsMillis(<span class="nu">30000</span>);  <span class="cm">// 30秒检测一次空闲连接</span>
+        config.setMinEvictableIdleTimeMillis(<span class="nu">60000</span>);     <span class="cm">// 空闲超过60秒则回收</span>
+        config.setNumTestsPerEvictionRun(-<span class="nu">1</span>);              <span class="cm">// 每次检测全部空闲连接</span>
+
+        <span class="cm">// ---- 连接超时（防止网络故障时线程堆积）----</span>
+        <span class="kw">int</span> timeout = <span class="nu">3000</span>;
+        <span class="kw">return new</span> JedisPool(config, host, port, timeout, password);
+    }
+}
+
+<span class="cm">/**
+ * ✅ 正确的使用方式：try-with-resources 保证归还
+ */</span>
+<span class="kw">public</span> String <span class="fn">getValue</span>(String key) {
+    <span class="kw">try</span> (Jedis jedis = jedisPool.getResource()) {   <span class="cm">// 自动归还，即使抛异常</span>
+        <span class="kw">return</span> jedis.get(key);
+    }
+}
+
+<span class="cm">/**
+ * ❌ 错误示范 1：忘记归还 → 连接泄漏 → 池耗尽 → 全站阻塞
+ */</span>
+<span class="kw">public</span> String <span class="fn">leak</span>(String key) {
+    Jedis jedis = jedisPool.getResource();
+    <span class="kw">return</span> jedis.get(key);      <span class="cm">// 没有 close()，这个连接永远不会回到池里！</span>
+}
+
+<span class="cm">/**
+ * ❌ 错误示范 2：把 Jedis 当成员变量共享 → 线程安全问题
+ * Jedis 内部是有状态协议流，多线程共用一个 Jedis 实例会导致响应错乱
+ */</span>
+<span class="kw">private</span> Jedis jedis = <span class="kw">new</span> Jedis(<span class="st">"localhost"</span>);   <span class="cm">// 绝对不要这样写！</span></code></pre>
+
+<div class="box b-x">
+  <div class="box-t">🚨 连接池的五个经典线上问题</div>
+  <table style="margin:8px 0 0">
+  <thead><tr><th style="width:24%">问题</th><th>现象</th><th>根因与解法</th></tr></thead>
+  <tbody>
+  <tr><td>未设置 maxWait</td><td>高峰期线程全部阻塞，接口超时</td><td>池耗尽后无限等待。设 <code class="inline">maxWaitMillis=1000</code>，快速失败 + 降级</td></tr>
+  <tr><td>连接泄漏</td><td>连接数缓慢上涨直到打满</td><td>忘记 close / 异常路径未释放。用 try-with-resources；用 <code class="inline">CLIENT LIST</code> 看 idle 连接</td></tr>
+  <tr><td>maxTotal 过大</td><td>Redis 侧 <code class="inline">maxclients</code> 被打满，新连接被拒</td><td>总连接数 = 池大小 × 实例数，必须 ≤ Redis maxclients（留 20% 余量）</td></tr>
+  <tr><td>minIdle=0</td><td>流量突发时大量建连，出现延迟毛刺</td><td>保持 <code class="inline">minIdle</code> 为预估峰值的 20%~30%，预热连接</td></tr>
+  <tr><td>无连接有效性检测</td><td>偶发 <code class="inline">Connection reset</code></td><td>Redis 侧 timeout 断开了空闲连接，池里拿到死连接。开 <code class="inline">testWhileIdle</code></td></tr>
+  </tbody>
+  </table>
+</div>
+
+<div class="box b-tip">
+  <div class="box-t">💡 一个能体现 10 年经验的计算题</div>
+  <p><strong>「你的服务有 50 个实例，Redis 连接池 maxTotal=64，会有什么问题？」</strong></p>
+  <p>答案：50 × 64 = <strong>3200 个连接</strong>。如果 Redis 的 <code class="inline">maxclients</code> 是默认的 10000，看似够；但如果有 4 个服务都这么配，就是 12800 个连接，<strong>超过 maxclients，新连接直接被拒绝（<code class="inline">ERR max number of clients reached</code>）</strong>，生产上会出现「部分实例正常、部分实例全部报错」的诡异现象。</p>
+  <p style="margin-bottom:0"><strong>正确做法</strong>：先算总连接预算（Redis 侧 maxclients 的 70%），再除以实例数得到单实例池上限。同时注意 <strong>Lettuce 的共享连接模型</strong>——Lettuce 默认是单连接多路复用，可以几百个线程共用一个连接，所以 Lettuce 的连接数需求远小于 Jedis。</p>
+</div>
+
+<h2 id="c03-7">面试深度问答</h2>
+
+<details class="qa"><summary>Jedis 和 Lettuce 的区别？Spring Boot 2.x 为什么默认用 Lettuce？<span class="lvl lv2">进阶</span></summary>
+<div class="qa-b">
+<table>
+<thead><tr><th style="width:18%">维度</th><th>Jedis</th><th>Lettuce</th></tr></thead>
+<tbody>
+<tr><td>I/O 模型</td><td>同步阻塞（BIO 风格）</td><td>Netty NIO，异步非阻塞</td></tr>
+<tr><td>线程安全</td><td>❌ 单个实例非线程安全，必须配连接池</td><td>✅ 线程安全，一个连接可被多线程共享</td></tr>
+<tr><td>连接占用</td><td>每个并发操作占用一个连接</td><td>多路复用，少量连接支撑高并发</td></tr>
+<tr><td>API 风格</td><td>同步 <code class="inline">jedis.get()</code></td><td>同步 <code class="inline">sync().get()</code> / 异步 <code class="inline">async().get()</code> / 响应式 <code class="inline">reactive().get()</code></td></tr>
+<tr><td>重连与故障转移</td><td>较弱，需自己处理</td><td>内置自动重连、支持哨兵/集群拓扑刷新</td></tr>
+<tr><td>资源开销</td><td>连接数多时内存开销大</td><td>连接数少，总体资源更省</td></tr>
+</tbody>
+</table>
+<p><strong>Spring Boot 2.x+ 默认 Lettuce 的原因</strong>：① 线程安全，天然适配 Spring 的 Bean 单例模型（不需要每个线程拿连接）；② 基于 Netty，能平滑支持响应式（WebFlux / Reactor）；③ 自动重连和拓扑刷新对云原生、容器频繁扩缩容的环境更友好；④ 支持 RESP3 和客户端缓存等新特性。</p>
+<p><strong>什么时候还用 Jedis</strong>：需要完全掌控连接（比如精确控制连接生命周期）、需要同步的阻塞语义、老项目兼容，或者需要用到 Jedis 独有的 API。另外 <strong>Redisson 内部其实用了 Netty + 自己的协议实现</strong>，不依赖这两者。</p>
+</div></details>
+
+<details class="qa"><summary>Pipeline 和事务（MULTI/EXEC）有什么区别？分别什么场景用？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<table>
+<thead><tr><th style="width:16%">维度</th><th>Pipeline</th><th>MULTI/EXEC 事务</th></tr></thead>
+<tbody>
+<tr><td>目的</td><td><strong>减少网络 RTT</strong>（性能优化）</td><td><strong>保证命令批量原子执行</strong>（正确性保证）</td></tr>
+<tr><td>原子性</td><td>❌ 不是原子，中间可插入其他客户端命令</td><td>✅ EXEC 时连续执行，不被其他客户端打断</td></tr>
+<tr><td>命令执行</td><td>客户端打包发送，Redis 逐条执行并缓存回复</td><td>命令先入队（QUEUED），EXEC 时统一执行</td></tr>
+<tr><td>失败回滚</td><td>无事务概念</td><td>⚠️ <strong>也没有回滚</strong>！某条命令失败，其他命令照常执行</td></tr>
+<tr><td>错误检测</td><td>执行时才知道</td><td>入队时能发现语法错误（EXEC 会放弃整个事务）；运行期错误（如类型错误）不会中止</td></tr>
+<tr><td>结果读取</td><td>需要自己处理回复列表</td><td>EXEC 返回结果数组</td></tr>
+<tr><td>适用</td><td>批量导入、批量查询、批量删除</td><td>需要「一组命令不被其他客户端插入」的原子场景</td></tr>
+</tbody>
+</table>
+<p><strong>关键认知（面试必讲）</strong>：Redis 事务<strong>不具备「回滚」能力</strong>，因为它追求简单和性能，没有像 MySQL 那样的 undo log。所以：</p>
+<ul>
+<li>想用 Redis 事务实现「扣库存 + 记流水」的原子性，<strong>是错误的</strong>——如果第二条命令失败，第一条已经生效了。</li>
+<li>正确做法：<strong>用 Lua 脚本</strong>（脚本中的错误会导致脚本中止，且脚本整体在 Redis 中是单线程原子执行的），或者用 <code class="inline">WATCH</code> 实现乐观锁（CAS）。</li>
+<li>所以面试回答的顺序应该是：<strong>需要原子性 → 优先考虑 Lua / Redis Function；需要高性能批量 → Pipeline；MULTI/EXEC 主要用于 WATCH 乐观锁 + 简单批量。</strong></li>
+</ul>
+<p><strong>WATCH 的用法</strong>：<code class="inline">WATCH key</code> → 读值 → 计算 → <code class="inline">MULTI</code> → <code class="inline">SET key newValue</code> → <code class="inline">EXEC</code>；如果 key 在 WATCH 后被别人改过，EXEC 返回 nil（事务放弃）。这是 Redis 版的 CAS。</p>
+</div></details>
+
+<details class="qa"><summary>为什么 Redis 的 Lua 脚本能做到原子性？它有什么限制？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p><strong>原子性的来源</strong>：Redis 执行 Lua 脚本时，<strong>整个脚本作为一个命令来处理</strong>，在单线程模型下执行期间<strong>不会处理其他客户端的命令</strong>（<code class="inline">scripts are atomic</code>）。这和普通命令的单线程执行是同一套机制——不是通过锁，而是通过「同一时间只有一个命令在执行」。</p>
+<p><strong>限制与风险（这几条很值钱）</strong>：</p>
+<ol>
+<li><strong>脚本必须快</strong>：脚本执行期间阻塞整个 Redis，所以<strong>严禁在脚本里做 O(N) 大操作</strong>（遍历大集合、大循环）。Redis 有 <code class="inline">lua-time-limit</code>（默认 5 秒），超时后 Redis 会开始回复 <code class="inline">BUSY</code> 错误，但<strong>脚本不会自动终止</strong>——只能 <code class="inline">SCRIPT KILL</code>（如果脚本还没写数据）或 <code class="inline">SHUTDOWN NOSAVE</code>（已经写了数据时）。这就是为什么「Lua 脚本写死循环」是经典的生产事故。</li>
+<li><strong>不能跨 slot</strong>：Cluster 模式下，脚本中用到的所有 key 必须在<strong>同一个 slot</strong>（用 hash tag 保证），否则报 <code class="inline">CROSSSLOT</code> 错误。</li>
+<li><strong>随机写与复制</strong>：脚本中如果用了 <code class="inline">RANDOMKEY</code>、<code class="inline">SRANDMEMBER</code>、<code class="inline">TIME</code> 等非确定性命令，在旧版本会导致主从数据不一致。Redis 5.0+ 通过「<strong>效果复制</strong>」（复制脚本产生的实际写命令而非脚本本身）解决了这个问题，但要知道这个历史细节。</li>
+<li><strong>调试困难</strong>：只能用 <code class="inline">redis-cli --eval</code> 或 Redis Insight 的调试器，日志输出到 Redis 日志（<code class="inline">redis.log</code>）。</li>
+<li><strong>7.0 起推荐 Function 替代 Lua</strong>：Function 支持持久化（<code class="inline">FUNCTION LOAD</code> 后可跨重启保留）、可命名调用、可复用，比「每次传整段脚本」更优。但要注意 Function 也需要在集群中部署到所有节点。</li>
+</ol>
+<p><strong>实战建议</strong>：「用 Lua 实现『判断-操作』的原子组合（比如释放分布式锁、滑动窗口限流、库存扣减），但脚本要短小、纯内存计算、不做批量遍历。」</p>
+</div></details>
+
+<details class="qa"><summary>你们项目 Redis 的 key 是怎么设计的？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p>按「规范 → 理由 → 工具」三段回答：</p>
+<p><strong>1. 命名规范</strong>：<code class="inline">业务模块:实体:唯一标识[:子维度]</code>，例如：</p>
+<pre style="margin:8px 0"><code>user:profile:1001              <span class="cm"># 用户资料</span>
+order:detail:2026093010001     <span class="cm"># 订单详情</span>
+product:stock:sku_2001         <span class="cm"># 商品库存</span>
+cart:{user:1001}:items         <span class="cm"># 用 hash tag 保证同用户的多 key 同 slot</span>
+rate:api:/order/submit:uid:1001   <span class="cm"># 限流</span>
+lock:order:1001                <span class="cm"># 分布式锁</span></code></pre>
+<p><strong>2. 设计理由</strong>：</p>
+<ul>
+<li><strong>冒号分隔</strong>：Redis Insight / 客户端可视化时能形成层级树，也便于 <code class="inline">SCAN</code> 按前缀遍历。</li>
+<li><strong>前缀可枚举</strong>：便于 ACL 按 <code class="inline">~order:*</code> 授权、便于按业务批量清理、便于监控按前缀统计内存。</li>
+<li><strong>避免特殊字符</strong>：不用空格、换行、<code class="inline">{}</code>（除 hash tag）、避免超长 key（key 本身也占内存）。</li>
+<li><strong>不带时间戳除非必要</strong>：会破坏 key 复用，导致内存碎片。</li>
+</ul>
+<p><strong>3. 配套工具与制度</strong>（这段最能体现成熟度）：</p>
+<ul>
+<li><strong>维护一份 key 清单文档</strong>：前缀、结构类型、TTL、负责人、预估大小。听起来土，但接手三年老系统时能省下几天。</li>
+<li><strong>接入规范检查</strong>：CI 阶段静态扫描代码中的 key 字面量，检查是否符合规范、是否设置 TTL。</li>
+<li><strong>监控按前缀统计</strong>：识别哪个业务在膨胀、哪个前缀出了大 key。</li>
+<li><strong>版本化</strong>：结构变更时用 <code class="inline">user:v2:profile:1001</code>，避免新旧结构反序列化冲突。</li>
+</ul>
+</div></details>
+
+<details class="qa"><summary>缓存该不该设置过期时间？设多久？<span class="lvl lv2">进阶</span></summary>
+<div class="qa-b">
+<p><strong>结论：绝大多数缓存都应该设 TTL，但 TTL 是「兜底」而不是「失效手段」。</strong></p>
+<ol>
+<li><strong>为什么不设 TTL 很危险</strong>：数据永久驻留，一旦业务逻辑有 bug 写了脏数据，或者数据量持续增长，最终内存打满触发淘汰——这时<strong>淘汰的 key 是随机/按 LRU 的，可能把还在用的数据淘汰掉</strong>，反而造成更严重的抖动。</li>
+<li><strong>TTL 是「最终一致性的兜底」</strong>：比如商品价格改了但删除缓存失败（网络抖动、服务重启），TTL 到期后自动纠正。TTL 越短，不一致窗口越短，但缓存命中率越低、回源压力越大。</li>
+<li><strong>怎么定 TTL 的值</strong>：
+  <ul>
+  <li>看<strong>数据变化的频率</strong>和<strong>业务对陈旧的容忍度</strong>。商品详情、用户资料这类可以容忍几秒到几分钟的，设 5-30 分钟。</li>
+  <li>看<strong>回源（DB）的承受能力</strong>：TTL 太短，缓存 miss 率高，DB 压力大。用命中率指标反推：<code class="inline">命中率 = 1 - 回源QPS/总请求QPS</code>，一般要求 90%+。</li>
+  <li>看<strong>内存预算</strong>：TTL 越长，内存占用越大（活跃数据堆积）。</li>
+  </ul>
+</li>
+<li><strong>一定要加随机抖动</strong>：<code class="inline">TTL = base + random(0, jitter)</code>，避免大量 key 同时过期导致<strong>缓存雪崩</strong>。这是必答点。</li>
+<li><strong>热点 key 用「逻辑过期」而非物理 TTL</strong>：物理 TTL 到期瞬间会有大量请求回源（击穿）。逻辑过期是——不设物理 TTL，value 里带一个 <code class="inline">expireTime</code> 字段；读到发现逻辑过期时，<strong>由一个线程异步更新，其他线程仍返回旧数据</strong>。这样任何时候都可用，不会击穿。</li>
+</ol>
+</div></details>
+
+<h2 id="c03-8">本节自测</h2>
+<div class="track">
+  <label><input type="checkbox" data-k="d1-15"><span>我能用 redis-cli 完成：延迟诊断、慢日志、大 key 扫描、压测</span></label>
+  <label><input type="checkbox" data-k="d1-16"><span>我能说清 --bigkeys 与 --memkeys 的统计口径差异</span></label>
+  <label><input type="checkbox" data-k="d1-17"><span>我能对比 Jedis / Lettuce / Redisson，并说出选型依据</span></label>
+  <label><input type="checkbox" data-k="d1-18"><span>我能解释 Pipeline 为什么在局域网收益有限，且它不是原子的</span></label>
+  <label><input type="checkbox" data-k="d1-19"><span>我能说清连接池 maxTotal 与 Redis maxclients 的容量关系计算</span></label>
+  <label><input type="checkbox" data-k="d1-20"><span>我能写出一份生产级 RedisTemplate 配置，并说出默认 JDK 序列化的问题</span></label>
+  <label><input type="checkbox" data-k="d1-21"><span>我能解释 Redis 事务为什么没有回滚，以及正确的替代方案</span></label>
+  <label><input type="checkbox" data-k="d1-22"><span>我能说出缓存 TTL 的设计方法（为什么设、设多久、为什么要抖动）</span></label>
+</div>
+</section>

@@ -1,0 +1,409 @@
+<section id="c01-install" class="anchor" data-title="Day1.1 · 环境与部署（大厂标准姿势）">
+<div class="ch-meta">
+  <span class="ch-num">Day 1 · 第 1 节</span>
+  <span class="badge bg-blue">预计 60 分钟</span>
+  <span class="badge bg-green">动手为主</span>
+</div>
+<h1>Day1.1 · 环境与部署：一次性搭出「大厂同构」环境</h1>
+
+<div class="box b-tip">
+  <div class="box-t">一句话结论</div>
+  <p>学习阶段用 <strong>Docker 起一套完整拓扑</strong>（单机 + 主从 + 哨兵 + Cluster），比在物理机上折腾编译安装高效得多；但要知道生产环境标准姿势长什么样——<strong>关掉危险命令、设密码 + ACL、改持久化、调 maxmemory、绑内网、部署哨兵/集群而非单机</strong>。</p>
+</div>
+
+<h2 id="c01-1">1. 为什么先学部署，而不是先学命令</h2>
+<p>大厂面试有个习惯：问完八股，会突然切到「你线上的 Redis 是怎么部署的？怎么保证不丢数据？」。如果你只会 <code class="inline">set/get</code>，这一问就露底了。</p>
+<p>更实际的是：<strong>你后面学的所有原理（主从复制、哨兵选举、Cluster 槽迁移、热 Key 打爆某分片），都需要一个多节点环境才能亲手验证</strong>。所以第一天先花 1 小时把环境搭起来，后面每一节都能立刻做实验。</p>
+
+<h3>三种安装方式对比（选一种即可）</h3>
+<table>
+<thead><tr><th style="width:15%">方式</th><th style="width:26%">命令</th><th>适用场景</th><th>备注</th></tr></thead>
+<tbody>
+<tr><td><strong>Docker</strong><br><span class="badge bg-green">推荐</span></td><td><code class="inline">docker run -d -p 6379:6379 redis:8.6</code></td><td>开发、学习、多节点模拟</td><td>最快，可秒级起 6 节点集群；生产也可用官方镜像</td></tr>
+<tr><td>包管理器</td><td>Ubuntu: <code class="inline">apt install redis-server</code><br>macOS: <code class="inline">brew install redis</code></td><td>本机快速体验</td><td>⚠️ <strong>apt 仓库版本往往很旧</strong>（可能还是 6.x），且默认无密码、绑 0.0.0.0 的风险需自己改</td></tr>
+<tr><td>源码编译</td><td><code class="inline">make && make install</code></td><td>需要特定版本 / 二次开发</td><td>可精确控制版本，能调编译参数；阿里/腾讯内部自研分支多走这条路</td></tr>
+</tbody>
+</table>
+
+<div class="box b-x">
+  <div class="box-t">🚨 生产环境的三个致命默认值</div>
+  <p>Redis 默认配置是「开发友好、生产危险」的。<strong>这三个必须改</strong>：</p>
+  <ul>
+    <li><code class="inline">bind 0.0.0.0</code> + 无密码 → <strong>公网裸奔</strong>，Redis 未授权访问是历史上最经典的入侵入口之一，会被写 SSH 公钥 / 挖矿。</li>
+    <li><code class="inline">protected-mode no</code> → 关闭保护模式后无密码也能远程连。</li>
+    <li><code class="inline">maxmemory 0</code>（不限制）+ <code class="inline">maxmemory-policy noeviction</code> → 内存涨满后<strong>所有写命令直接报错</strong>，业务瞬间雪崩。</li>
+  </ul>
+  <p>另外 <code class="inline">CONFIG</code>、<code class="inline">FLUSHALL</code>、<code class="inline">KEYS</code>、<code class="inline">EVAL</code> 这类命令在生产应通过 <code class="inline">rename-command</code> 或 ACL 限制。</p>
+</div>
+
+<h2 id="c01-2">2. 动手：用 Docker Compose 搭一套「大厂同构」环境</h2>
+<p>我们一次性起 4 组环境，对应后面 5 天所有实验：</p>
+<div class="grid2">
+  <div class="card"><h4 style="margin-top:0">🖥 单机实例（6379）</h4><p style="margin:0;font-size:13.5px">Day1 数据类型实验用，配好密码、持久化、内存上限，模拟一台生产实例。</p></div>
+  <div class="card"><h4 style="margin-top:0">🔁 主从 + 哨兵（6380/6381/26379...）</h4><p style="margin:0;font-size:13.5px">Day3 高可用实验用，能亲手触发故障转移。</p></div>
+  <div class="card"><h4 style="margin-top:0">🧩 Cluster 集群（7001-7006）</h4><p style="margin:0;font-size:13.5px">Day3 分片实验用，3 主 3 从，能模拟槽迁移与节点宕机。</p></div>
+  <div class="card"><h4 style="margin-top:0">🧰 工具链</h4><p style="margin:0;font-size:13.5px">Redis Insight（可视化）+ redis-exporter（监控），模拟大厂可观测性。</p></div>
+</div>
+
+<p>先建目录并写入主配置文件：</p>
+<pre><code class="lang-bash"><span class="cm"># 建议在教程目录下创建实验环境</span>
+mkdir -p redis-lab/conf redis-lab/data &amp;&amp; cd redis-lab</code></pre>
+
+<pre><code class="lang-conf"><span class="cm"># ===== conf/master.conf · 生产级单机配置（可直接复用到生产）=====</span>
+
+<span class="cm"># ---- 网络与安全 ----</span>
+<span class="kw">bind</span> <span class="nu">0.0.0.0</span>                  <span class="cm"># 容器内需 0.0.0.0；物理机请绑内网 IP，如 bind 10.0.0.5</span>
+<span class="kw">protected-mode</span> <span class="st">yes</span>           <span class="cm"># 保护模式保持开启</span>
+<span class="kw">port</span> <span class="nu">6379</span>
+<span class="kw">tcp-backlog</span> <span class="nu">511</span>
+<span class="kw">timeout</span> <span class="nu">0</span>                    <span class="cm"># 不主动断开空闲连接（由客户端连接池管理）</span>
+<span class="kw">tcp-keepalive</span> <span class="nu">300</span>
+
+<span class="cm"># ---- 密码（第 6 节会升级为 ACL 多用户）----</span>
+<span class="kw">requirepass</span> <span class="st">"你的强密码_至少32位随机串"</span>
+<span class="kw">masterauth</span> <span class="st">"你的强密码_至少32位随机串"</span>   <span class="cm"># 主从复制时从节点连主节点用</span>
+<span class="kw">aclfile</span> <span class="st">/usr/local/etc/redis/users.acl</span>  <span class="cm"># 启用 ACL 文件（配合 requirepass 使用）</span>
+
+<span class="cm"># ---- 通用 ----</span>
+<span class="kw">daemonize</span> <span class="st">no</span>                <span class="cm"># Docker 中必须 no</span>
+<span class="kw">loglevel</span> <span class="st">notice</span>
+<span class="kw">databases</span> <span class="nu">16</span>                 <span class="cm"># 集群模式只能 1 个库</span>
+
+<span class="cm"># ---- 持久化：RDB + AOF 混合（生产推荐）----</span>
+<span class="kw">dir</span> <span class="st">/data</span>
+<span class="kw">dbfilename</span> <span class="st">dump.rdb</span>
+<span class="kw">save</span> <span class="nu">900 1</span>                   <span class="cm"># 900秒内至少1次写则快照</span>
+<span class="kw">save</span> <span class="nu">300 10</span>
+<span class="kw">save</span> <span class="nu">60 10000</span>
+<span class="kw">stop-writes-on-bgsave-error</span> <span class="st">yes</span>   <span class="cm"># 快照失败则停止写入（暴露问题而不是静默丢数据）</span>
+
+<span class="kw">appendonly</span> <span class="st">yes</span>
+<span class="kw">appendfilename</span> <span class="st">"appendonly.aof"</span>
+<span class="kw">appenddirname</span> <span class="st">"appendonlydir"</span>  <span class="cm"># 7.0+ Multi-Part AOF 目录</span>
+<span class="kw">appendfsync</span> <span class="st">everysec</span>        <span class="cm"># 每秒刷盘，最多丢 1 秒（生产首选）</span>
+<span class="kw">aof-use-rdb-preamble</span> <span class="st">yes</span>     <span class="cm"># 混合持久化，恢复更快</span>
+<span class="kw">auto-aof-rewrite-percentage</span> <span class="nu">100</span>
+<span class="kw">auto-aof-rewrite-min-size</span> <span class="st">64mb</span>
+
+<span class="cm"># ---- 内存 ----</span>
+<span class="kw">maxmemory</span> <span class="st">768mb</span>              <span class="cm"># 生产设为物理内存的 60%~75%，留出 fork/COW 空间</span>
+<span class="kw">maxmemory-policy</span> <span class="st">allkeys-lru</span>   <span class="cm"># 纯缓存场景；混合存储用 volatile-lru</span>
+<span class="kw">maxmemory-samples</span> <span class="nu">5</span>
+
+<span class="cm"># ---- 慢查询（生产必开，阈值按需调）----</span>
+<span class="kw">slowlog-log-slower-than</span> <span class="nu">10000</span>   <span class="cm"># 单位微秒，10ms</span>
+<span class="kw">slowlog-max-len</span> <span class="nu">128</span>
+
+<span class="cm"># ---- 危险命令限制（生产强烈建议）----</span>
+<span class="kw">rename-command</span> <span class="st">FLUSHALL</span> <span class="st">""</span>
+<span class="kw">rename-command</span> <span class="st">FLUSHDB</span> <span class="st">""</span>
+<span class="kw">rename-command</span> <span class="st">KEYS</span> <span class="st">""</span>
+<span class="kw">rename-command</span> <span class="st">SHUTDOWN</span> <span class="st">""</span>
+
+<span class="cm"># ---- 客户端 ----</span>
+<span class="kw">maxclients</span> <span class="nu">10000</span>
+<span class="kw">lazyfree-lazy-eviction</span> <span class="st">yes</span>   <span class="cm"># 异步释放，避免大 key 淘汰阻塞主线程</span>
+<span class="kw">lazyfree-lazy-expire</span> <span class="st">yes</span>
+<span class="kw">lazyfree-lazy-server-del</span> <span class="st">yes</span>
+<span class="kw">lazyfree-lazy-user-del</span> <span class="st">yes</span>
+
+<span class="cm"># ---- 8.0+ 多线程 I/O（多核机器建议开）----</span>
+<span class="kw">io-threads</span> <span class="nu">4</span>                  <span class="cm"># 建议 = CPU核数的 1/2 ~ 3/4，4核以上才有效果</span>
+<span class="kw">io-threads-do-reads</span> <span class="st">yes</span></code></pre>
+
+<div class="box b-tip">
+  <div class="box-t">💡 面试记忆点：为什么 maxmemory 只给 60%~75%</div>
+  <p>因为 <strong>RDB 快照和 AOF 重写都要 fork 子进程</strong>，靠 <strong>COW（写时复制）</strong>共享内存页。如果写入很频繁，被修改的内存页会被复制一份，最坏情况下内存占用接近翻倍。留出 25%~40% 的余量，是防止 OOM Killer 干掉 Redis 进程的关键。<strong>能说出这一点的候选人，立刻和「只会配 maxmemory」的拉开差距。</strong></p>
+</div>
+
+<p>接着写 docker-compose.yml，一次起全套：</p>
+
+<pre><code class="lang-yaml"><span class="cm"># ===== docker-compose.yml · 一次启动全套实验环境 =====</span>
+<span class="kw">services</span>:
+  <span class="cm"># ---------- 1) 生产级单机实例 ----------</span>
+  <span class="fn">redis-master</span>:
+    <span class="kw">image</span>: redis:<span class="nu">8.6</span>
+    <span class="kw">container_name</span>: redis-master
+    <span class="kw">command</span>: [<span class="st">"redis-server"</span>, <span class="st">"/usr/local/etc/redis/redis.conf"</span>]
+    <span class="kw">ports</span>: [<span class="st">"6379:6379"</span>]
+    <span class="kw">volumes</span>:
+      - ./conf/master.conf:/usr/local/etc/redis/redis.conf:ro
+      - ./data/master:/data
+    <span class="kw">restart</span>: unless-stopped
+    <span class="kw">healthcheck</span>:
+      <span class="kw">test</span>: [<span class="st">"CMD"</span>, <span class="st">"redis-cli"</span>, <span class="st">"-a"</span>, <span class="st">"你的强密码_至少32位随机串"</span>, <span class="st">"ping"</span>]
+      <span class="kw">interval</span>: 10s
+      <span class="kw">timeout</span>: 3s
+
+  <span class="cm"># ---------- 2) 主从 + 哨兵（Day3 用）----------</span>
+  <span class="fn">redis-s1</span>:
+    <span class="kw">image</span>: redis:<span class="nu">8.6</span>
+    <span class="kw">container_name</span>: redis-s1
+    <span class="kw">command</span>: [<span class="st">"redis-server"</span>, <span class="st">"--port"</span>, <span class="st">"6379"</span>, <span class="st">"--requirepass"</span>, <span class="st">"repl123456"</span>, <span class="st">"--masterauth"</span>, <span class="st">"repl123456"</span>]
+    <span class="kw">ports</span>: [<span class="st">"6380:6379"</span>]
+
+  <span class="fn">redis-s2</span>:
+    <span class="kw">image</span>: redis:<span class="nu">8.6</span>
+    <span class="kw">container_name</span>: redis-s2
+    <span class="kw">command</span>: [<span class="st">"redis-server"</span>, <span class="st">"--port"</span>, <span class="st">"6379"</span>, <span class="st">"--replicaof"</span>, <span class="st">"redis-s1"</span>, <span class="st">"6379"</span>, <span class="st">"--requirepass"</span>, <span class="st">"repl123456"</span>, <span class="st">"--masterauth"</span>, <span class="st">"repl123456"</span>]
+    <span class="kw">ports</span>: [<span class="st">"6381:6379"</span>]
+
+  <span class="fn">sentinel1</span>:
+    <span class="kw">image</span>: redis:<span class="nu">8.6</span>
+    <span class="kw">container_name</span>: sentinel1
+    <span class="kw">command</span>: [<span class="st">"redis-sentinel"</span>, <span class="st">"/etc/sentinel.conf"</span>, <span class="st">"--sentinel"</span>]
+    <span class="kw">depends_on</span>: [redis-s1, redis-s2]
+    <span class="kw">volumes</span>: [<span class="st">"./conf/sentinel.conf:/etc/sentinel.conf"</span>]
+    <span class="kw">ports</span>: [<span class="st">"26379:26379"</span>]
+
+  <span class="cm"># ---------- 3) 可视化 &amp; 监控 ----------</span>
+  <span class="fn">redis-insight</span>:
+    <span class="kw">image</span>: redis/redisinsight:latest
+    <span class="kw">container_name</span>: redis-insight
+    <span class="kw">ports</span>: [<span class="st">"5540:5540"</span>]
+
+  <span class="fn">redis-exporter</span>:
+    <span class="kw">image</span>: oliver006/redis_exporter:latest
+    <span class="kw">container_name</span>: redis-exporter
+    <span class="kw">environment</span>:
+      <span class="kw">REDIS_ADDR</span>: <span class="st">"redis://redis-master:6379"</span>
+      <span class="kw">REDIS_PASSWORD</span>: <span class="st">"你的强密码_至少32位随机串"</span>
+    <span class="kw">ports</span>: [<span class="st">"9121:9121"</span>]</code></pre>
+
+<pre><code class="lang-conf"><span class="cm"># ===== conf/sentinel.conf =====</span>
+<span class="kw">port</span> <span class="nu">26379</span>
+<span class="kw">sentinel monitor</span> mymaster redis-s1 <span class="nu">6379</span> <span class="nu">2</span>   <span class="cm"># 2 表示至少 2 个哨兵同意才判定客观下线</span>
+<span class="kw">sentinel auth-pass</span> mymaster repl123456
+<span class="kw">sentinel down-after-milliseconds</span> mymaster <span class="nu">5000</span>   <span class="cm"># 5秒主观下线</span>
+<span class="kw">sentinel failover-timeout</span> mymaster <span class="nu">60000</span>
+<span class="kw">sentinel parallel-syncs</span> mymaster <span class="nu">1</span>          <span class="cm"># 每次只让1个从节点同步，避免全部不可读</span>
+<span class="kw">sentinel resolve-hostnames</span> <span class="st">yes</span></code></pre>
+
+<div class="steps">
+  <div class="step">
+    <div class="st-t">启动环境</div>
+    <pre><code class="lang-bash">docker compose up -d
+docker compose ps</code></pre>
+  </div>
+  <div class="step">
+    <div class="st-t">验证连通性</div>
+    <pre><code class="lang-bash"><span class="cm"># 单机实例</span>
+docker exec -it redis-master redis-cli -a <span class="st">'你的强密码_至少32位随机串'</span> ping
+<span class="cm"># 期望输出：PONG（会有一行密码警告，稍后处理）</span>
+
+<span class="cm"># 主从关系（Day3 详解）</span>
+docker exec -it redis-s1 redis-cli -a repl123456 info replication | head -12</code></pre>
+  </div>
+  <div class="step">
+    <div class="st-t">打开可视化界面</div>
+    <p>浏览器访问 <code class="inline">http://localhost:5540</code>（Redis Insight），添加连接：Host <code class="inline">redis-master</code>（或 localhost）、Port <code class="inline">6379</code>、密码填上面的强密码。以后所有数据类型实验，都能边敲命令边看内存结构。</p>
+  </div>
+  <div class="step">
+    <div class="st-t">从节点只读验证</div>
+    <pre><code class="lang-bash"><span class="cm"># 从节点默认 replica-read-only yes，写入应报错</span>
+docker exec -it redis-s2 redis-cli -a repl123456 set k1 v1
+<span class="cm"># 期望：(error) READONLY You can't write against a read only replica.</span></code></pre>
+  </div>
+</div>
+
+<h2 id="c01-3">3. 无 Docker 时的安装方式</h2>
+
+<h3>方式 A：Linux 源码编译（能拿到任意版本）</h3>
+<pre><code class="lang-bash"><span class="cm"># 1) 装依赖</span>
+sudo apt update &amp;&amp; sudo apt install -y build-essential tcl pkg-config libssl-dev
+
+<span class="cm"># 2) 下载指定版本（示例 8.6.0）</span>
+cd /opt &amp;&amp; sudo wget https://download.redis.io/releases/redis-8.6.0.tar.gz
+sudo tar -xzf redis-8.6.0.tar.gz &amp;&amp; cd redis-8.6.0
+
+<span class="cm"># 3) 编译（多核加速；jemalloc 默认启用，比 glibc malloc 碎片更少）</span>
+sudo make -j$(nproc) BUILD_TLS=yes     <span class="cm"># BUILD_TLS 开启 TLS 支持，生产跨机房建议开</span>
+sudo make install PREFIX=/opt/redis
+
+<span class="cm"># 4) 生产级目录规范（大厂一般这么分）</span>
+sudo mkdir -p /opt/redis/{conf,data,logs,run}
+sudo cp redis.conf /opt/redis/conf/
+sudo cp src/redis-server src/redis-cli src/redis-sentinel /opt/redis/bin/ 2&gt;/dev/null || true
+
+<span class="cm"># 5) 修改关键项</span>
+<span class="cm">#   daemonize yes</span>
+<span class="cm">#   logfile /opt/redis/logs/redis.log</span>
+<span class="cm">#   dir /opt/redis/data</span>
+<span class="cm">#   pidfile /opt/redis/run/redis.pid</span>
+
+<span class="cm"># 6) 启动与验证</span>
+/opt/redis/bin/redis-server /opt/redis/conf/redis.conf
+/opt/redis/bin/redis-cli ping</code></pre>
+
+<h3>方式 B：macOS</h3>
+<pre><code class="lang-bash">brew install redis          <span class="cm"># Homebrew 版本通常较新</span>
+brew services start redis   <span class="cm"># 注册为后台服务</span>
+redis-cli ping
+<span class="cm"># 配置路径：/opt/homebrew/etc/redis.conf</span></code></pre>
+
+<h3>方式 C：Windows</h3>
+<div class="box b-warn">
+  <div class="box-t">Windows 用户注意</div>
+  <p>Redis 官方<strong>不提供 Windows 原生版本</strong>。历史上微软维护的 3.x 移植版早已过时，<strong>不要用于任何严肃场景</strong>。Windows 上推荐两种做法：</p>
+  <ul>
+    <li><strong>Docker Desktop</strong>（最推荐）：本教程所有命令通用，包括 Cluster 多节点。</li>
+    <li><strong>WSL2 + Ubuntu</strong>：体验接近 Linux 生产环境，适合做内核参数、网络实验。</li>
+  </ul>
+</div>
+
+<h2 id="c01-4">4. 配置 ACL 多用户（生产必备，面试加分）</h2>
+<p>Redis 6.0 引入 ACL，让「一个密码全权限」成为历史。大厂内部通常按业务线分用户、按 key 前缀授权。这既是安全要求，也是面试常问的「你们 Redis 怎么做权限隔离」。</p>
+
+<pre><code class="lang-bash"><span class="cm"># ===== users.acl 文件示例 =====</span>
+<span class="cm"># 语法：user &lt;用户名&gt; &lt;on/off&gt; &gt;密码 ~key前缀 +命令 -命令 ...</span>
+
+<span class="cm"># 默认超级用户（保留）</span>
+user default on <span class="st">&gt;你的强密码_至少32位随机串</span> ~* &amp;* +@all
+
+<span class="cm"># 订单业务：只能操作 order: 前缀，只允许读 + 常用写，禁止危险命令</span>
+user order-svc on <span class="st">&gt;Order@2026#Secret</span> ~order:* &amp;order-events +@read +@write -@dangerous -flushall -keys -config
+
+<span class="cm"># 只读监控账号：只能读，且只看统计</span>
+user monitor on <span class="st">&gt;Mon@2026#Secret</span> ~* +@read +info +slowlog +client|list -keys -scan
+
+<span class="cm"># 复制专用账号（主从复制需要）</span>
+user repl on <span class="st">&gt;Repl@2026#Secret</span> ~* +psync +replconf +ping +sync</code></pre>
+
+<pre><code class="lang-bash"><span class="cm"># 运行时动态管理 ACL（无需重启）</span>
+redis-cli -a <span class="st">'你的强密码'</span> ACL SETUSER app1 on <span class="st">&gt;App1Pwd</span> ~app1:* +@read +@write -@dangerous
+redis-cli -a <span class="st">'你的强密码'</span> ACL LIST              <span class="cm"># 查看所有用户规则</span>
+redis-cli -a <span class="st">'你的强密码'</span> ACL WHOAMI            <span class="cm"># 当前用户</span>
+redis-cli -a <span class="st">'你的强密码'</span> ACL CAT               <span class="cm"># 所有命令类别</span>
+redis-cli -a <span class="st">'你的强密码'</span> ACL CAT dangerous     <span class="cm"># 危险命令有哪些</span>
+redis-cli -a <span class="st">'你的强密码'</span> ACL GETUSER order-svc  <span class="cm"># 查看某用户详情</span>
+redis-cli -a <span class="st">'你的强密码'</span> ACL SAVE              <span class="cm"># 持久化到 aclfile（8.0 起支持）</span>
+
+<span class="cm"># 影响面分析：某用户被改了权限，怎么知道错在哪？看 ACL LOG</span>
+redis-cli -a <span class="st">'你的强密码'</span> ACL LOG 5
+<span class="cm"># 输出会告诉你：哪个用户、执行什么命令、被拒绝的原因、来自哪个 IP</span></code></pre>
+
+<div class="box b-tip">
+  <div class="box-t">💡 面试点：ACL 与 rename-command 怎么选</div>
+  <p><code class="inline">rename-command</code> 是<strong>全局</strong>禁用命令，粒度粗且需要改配置重启；ACL 是<strong>按用户</strong>授权，可动态生效、可审计（ACL LOG）。<br>
+  现代做法：<strong>用 ACL 按业务授权 + 保留少数高危命令的 rename 作为兜底</strong>。注意 Redis 8.0 起对模块命令的 ACL 归类有 breaking change——<code class="inline">+@all -@write</code> 这类规则不再自动放行模块命令（如 <code class="inline">JSON.SET</code>），升级时要复核权限。</p>
+</div>
+
+<h2 id="c01-5">5. 四种部署形态速览（Day3 会深入）</h2>
+<table>
+<thead><tr><th style="width:16%">形态</th><th style="width:22%">能力</th><th>数据上限</th><th>故障切换</th><th>典型场景</th></tr></thead>
+<tbody>
+<tr><td><strong>单机</strong></td><td>缓存、简单业务</td><td>单机内存</td><td>无，挂了就挂</td><td>开发、小流量、对可用性要求不高</td></tr>
+<tr><td><strong>主从</strong></td><td>读写分离 + 数据热备</td><td>单机内存</td><td>手动</td><td>读多写少、报表类查询分流</td></tr>
+<tr><td><strong>哨兵</strong><br><span class="badge bg-green">中小厂主流</span></td><td>主从 + 自动故障转移</td><td>单机内存</td><td>自动（秒级~十秒级）</td><td>数据量 &lt; 单机内存、需要高可用</td></tr>
+<tr><td><strong>Cluster</strong><br><span class="badge bg-red">大厂主流</span></td><td>分片 + 高可用 + 水平扩展</td><td>N × 单机内存</td><td>自动 + 分片级隔离</td><td>海量数据、高吞吐、需要线性扩容</td></tr>
+</tbody>
+</table>
+
+<div class="box b-warn">
+  <div class="box-t">⚠️ 选型的关键判断（面试高频）</div>
+  <p><strong>只要数据量可能超过单机内存上限，就必须上 Cluster</strong>；否则哨兵更简单、运维成本更低、没有跨槽事务/多 key 操作的诸多限制。<br>
+  反过来，如果业务有<strong>大量多 key 原子操作、Lua 脚本跨 key、需要 16 个 database</strong>，Cluster 会带来麻烦——这也是为什么很多公司核心交易仍用哨兵，只在大的、可分的业务上 Cluster。</p>
+</div>
+
+<h2 id="c01-6">6. 验证你的环境：一份自查脚本</h2>
+<pre><code class="lang-bash"><span class="cm">#!/bin/bash</span>
+
+# Redis 环境健康自查
+PASS=<span class="st">'你的强密码_至少32位随机串'</span>
+R=<span class="st">"docker exec redis-master redis-cli -a $PASS"</span>
+
+echo <span class="st">"1) 连通性:      $($R ping)"</span>
+echo <span class="st">"2) 版本:        $($R info server | grep redis_version)"</span>
+echo <span class="st">"3) 运行模式:    $($R info server | grep redis_mode)"</span>
+echo <span class="st">"4) 内存上限:    $($R config get maxmemory | tail -1)"</span>
+echo <span class="st">"5) 淘汰策略:    $($R config get maxmemory-policy | tail -1)"</span>
+echo <span class="st">"6) AOF 状态:    $($R info persistence | grep aof_enabled)"</span>
+echo <span class="st">"7) 当前连接数:  $($R info clients | grep connected_clients)"</span>
+echo <span class="st">"8) 已用内存:    $($R info memory | grep used_memory_human)"</span>
+echo <span class="st">"9) 角色:        $($R info replication | grep role)"</span>
+echo <span class="st">"10) 慢日志条数: $($R slowlog len)"</span></code></pre>
+
+<h2 id="c01-7">面试深度问答</h2>
+
+<details class="qa"><summary>你们的 Redis 是怎么部署的？为什么这么选？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p><strong>错误答法</strong>：「我们用 Cluster，因为 Cluster 好。」——面试官立刻会问「为什么不用哨兵」，答不出就崩。</p>
+<p><strong>正确答法（结构化 + trade-off）：</strong></p>
+<ol>
+<li><strong>先讲判断依据</strong>：数据量是否需要超过单机内存、QPS 是否超过单实例承载（一般单实例 8-10 万 QPS）、是否需要水平扩容能力。</li>
+<li><strong>再讲选型</strong>：
+  <ul>
+    <li>缓存型业务、数据量可控 → <strong>哨兵（主从）</strong>。优势：无跨槽限制，多 key 操作/Lua/事务都能用，运维简单。缺点：容量和 QPS 受单机限制，扩容需停机或上代理（如 Codis 类方案）。</li>
+    <li>海量数据、需要线性扩展 → <strong>Cluster</strong>。优势：分片扩容、故障域隔离（单分片挂了只影响 1/N 数据）。代价：多 key 操作受限（须同 slot，用 hash tag）、Lua 不能跨槽、只有 db0、客户端要支持重定向、运维复杂度高。</li>
+  </ul>
+</li>
+<li><strong>最后讲演进</strong>：「我们早期用哨兵，数据涨到 XX GB 后迁移到 Cluster，迁移过程用 DTS/双写灰度……」——有演进史的回答最能体现真实经验。</li>
+</ol>
+<p><strong>加分细节</strong>：提一句 Cluster 的故障切换不是全局的——只影响该分片，但如果某分片主从同时挂，这部分数据就不可用（比如 3 主 3 从，挂一主一从，1/3 数据丢失）。</p>
+</div></details>
+
+<details class="qa"><summary>Redis 线上安全生产要注意什么？（这道题在考你的运维意识）<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p>按「网络 / 权限 / 内存 / 持久化 / 命令 / 监控」六层回答，每层给出具体动作：</p>
+<table>
+<thead><tr><th style="width:14%">层面</th><th>动作</th><th>为什么</th></tr></thead>
+<tbody>
+<tr><td>网络</td><td>绑内网 IP、安全组白名单、绝不放公网</td><td>未授权访问是最常见入侵路径</td></tr>
+<tr><td>权限</td><td>ACL 按业务授权 + 强密码 + TLS（跨机房）</td><td>最小权限、可审计</td></tr>
+<tr><td>内存</td><td>maxmemory 为物理内存 60%~75%；明确淘汰策略；监控 used_memory 与 evicted_keys</td><td>防 OOM Killer；防写满后全部写失败</td></tr>
+<tr><td>持久化</td><td>开启 AOF everysec + RDB 冷备；stop-writes-on-bgsave-error yes</td><td>限制数据丢失窗口；避免静默失败</td></tr>
+<tr><td>命令</td><td>rename/ACL 禁用 KEYS、FLUSHALL、CONFIG；用 SCAN 替代 KEYS；用 UNLINK 替代 DEL 删大 key</td><td>防阻塞主线程、防误操作</td></tr>
+<tr><td>监控</td><td>慢日志 + 延迟监控 + 内存/连接数/命中率/主从延迟告警</td><td>问题是「发现不了」而非「解决不了」</td></tr>
+</tbody>
+</table>
+<p><strong>专家级补充</strong>：还要提<strong>容量规划</strong>（预留 fork 内存、考虑 COW 峰值）、<strong>变更管理</strong>（禁止业务高峰期 <code class="inline">CONFIG SET</code> 高风险参数、大 key 清理要低峰期）、<strong>演练</strong>（定期做故障转移演练、验证备份可恢复）。</p>
+</div></details>
+
+<details class="qa"><summary>Redis 的内存应该设多大？为什么要留 25%~40% 余量？<span class="lvl lv3">高级</span></summary>
+<div class="qa-b">
+<p><strong>核心机制是 fork + COW（写时复制）</strong>：</p>
+<ol>
+<li>RDB 快照 / AOF 重写时，Redis <code class="inline">fork()</code> 出子进程。fork 本身在 Linux 上是写时复制，子进程与父进程<strong>共享同一份物理内存页</strong>，所以瞬间内存不会翻倍。</li>
+<li>但<strong>只要父进程（主线程）修改了某个内存页，这个页就会被复制一份</strong>给子进程。写的 key 越多、越分散，被复制的页就越多。</li>
+<li>最坏情况（全量写入）：额外占用接近一份完整数据集的内存。所以实际峰值可能是 <strong>1.x ~ 2 倍</strong>。</li>
+<li>如果内存不够，Linux 的 OOM Killer 可能直接杀掉 Redis 进程——比 OOM 报错更糟（报错只影响写，被杀是服务全挂）。</li>
+</ol>
+<p><strong>实践建议</strong>：maxmemory 设为物理内存的 <strong>60%~75%</strong>；如果写入极频繁（大量随机写），可以更保守（50%~60%）。同时 <code class="inline">vm.overcommit_memory=1</code> 避免 fork 时因内存不足失败（这条内核参数是大厂标配）。</p>
+<p><strong>还能再说一层</strong>：这也是为什么「大 key 治理」很重要——大 key 在被修改和删除时，会产生大页复制和长时间阻塞。<strong>把 fork/COW、maxmemory、大 key 串起来讲，才是 10 年经验的样子。</strong></p>
+</div></details>
+
+<details class="qa"><summary>6.x/7.x/8.x 版本差异，你升级过 Redis 吗？<span class="lvl lv4">专家</span></summary>
+<div class="qa-b">
+<p>按「能力 / 性能 / 兼容性」三层回答：</p>
+<table>
+<thead><tr><th style="width:11%">版本</th><th>关键变化</th><th>升级要评估什么</th></tr></thead>
+<tbody>
+<tr><td>6.0</td><td>多线程 I/O、ACL、RESP3、客户端缓存</td><td>ACL 对模块命令的兼容；客户端需支持 RESP3 才能用推送</td></tr>
+<tr><td>6.2</td><td>性能优化、<code class="inline">GETDEL</code>/<code class="inline">GETEX</code>、<code class="inline">SMISMEMBER</code></td><td>低风险</td></tr>
+<tr><td>7.0</td><td>Function、Multi-Part AOF、Sharded Pub/Sub、listpack 替代 ziplist</td><td><strong>MP-AOF 改变了 AOF 文件结构</strong>，回滚到 6.x 需转换；大版本降级基本不支持</td></tr>
+<tr><td>7.2 / 7.4</td><td>Hash 字段级 TTL（7.4）、Cluster 分片 Pub/Sub 增强</td><td>低风险</td></tr>
+<tr><td>8.0</td><td><strong>模块并入内核</strong>（Search/JSON/TS/Bloom/Vector）、Vector Set beta、I/O 线程重构、ACL 归类变更、87% 延迟下降、AGPLv3 选项</td><td><strong>ACL breaking change</strong>：原来 <code class="inline">+@all -@write</code> 的用户会失去模块命令权限；插件版本需统一；license 变更需法务确认</td></tr>
+<tr><td>8.2</td><td>SVS-VAMANA 索引、BF16/FP16 向量压缩、<code class="inline">CLUSTER SLOT-STATS</code></td><td>低风险</td></tr>
+<tr><td>8.4</td><td><code class="inline">FT.HYBRID</code> 混合检索、<strong>原子槽迁移</strong>、<code class="inline">SET</code> 的 compare-and-set/delete、<code class="inline">MSETEX</code>、JSON 数组内存省 92%</td><td>搜索索引重建（BM25 评分默认变更）</td></tr>
+<tr><td>8.6</td><td><strong>HOTKEYS 热键检测命令</strong>、LRM 淘汰策略、XADD 幂等（IDMP）、mTLS 自动认证、TimeSeries NaN、Sorted Set 内存省 30.5%</td><td>低风险；<code class="inline">HOTKEYS</code> 采集期有性能开销需低峰期使用</td></tr>
+</tbody>
+</table>
+<p><strong>升级方法论</strong>（这段很值钱）：</p>
+<ol>
+<li><strong>先评测</strong>：用从节点 + 生产流量回放（或影子流量）验证新版本性能与兼容性。</li>
+<li><strong>灰度顺序</strong>：从节点 → 主节点切换（Cluster 逐个分片）；先升从、后升主，利用主从切换把旧版本节点替换掉。</li>
+<li><strong>兼容性检查清单</strong>：ACL 规则、客户端版本（Jedis/Lettuce/Redisson）、Lua 脚本用到的 API、AOF/RDB 格式、集群协议、监控探针。</li>
+<li><strong>回滚预案</strong>：RDB/AOF 向下不兼容，所以回滚必须靠<strong>数据备份 + 重放</strong>，因此升级前要做一次全量备份并验证可恢复。</li>
+</ol>
+</div></details>
+
+<h2 id="c01-8">本节自测</h2>
+<div class="track">
+  <label><input type="checkbox" data-k="d1-1"><span>我能用 Docker Compose 起一套含密码/持久化/内存上限的 Redis 实例</span></label>
+  <label><input type="checkbox" data-k="d1-2"><span>我能说出至少 3 个 Redis 生产环境必须修改的默认配置，并解释原因</span></label>
+  <label><input type="checkbox" data-k="d1-3"><span>我能用 ACL 为不同业务创建最小权限用户，并会用 ACL LOG 排查权限拒绝</span></label>
+  <label><input type="checkbox" data-k="d1-4"><span>我能解释 maxmemory 为什么只设为物理内存的 60%~75%（fork + COW）</span></label>
+  <label><input type="checkbox" data-k="d1-5"><span>我能对比单机/主从/哨兵/Cluster 四种形态，并说出各自的适用边界</span></label>
+  <label><input type="checkbox" data-k="d1-6"><span>我能说出 8.0 版本引入的一个重要 breaking change（ACL 归类 / 模块并入内核）</span></label>
+</div>
+</section>
