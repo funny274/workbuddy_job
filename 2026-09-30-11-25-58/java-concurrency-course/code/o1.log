@@ -1,0 +1,59 @@
+===== 1) 为什么 HashMap 并发下会死循环 / 数据丢失 =====
+JDK7 的 HashMap 扩容用头插法，并发 transfer 会形成环形链表 → get 时死循环（CPU 100%）。
+JDK8 改成尾插法，解决了死循环，但仍有「数据覆盖」问题：
+  两个线程同时 put 到同一个空桶，都会走 CAS/赋值，后写的覆盖先写的。
+结论：并发场景必须用 ConcurrentHashMap。
+
+===== 2) 常用并发容器职责划分 =====
+| 接口        | 并发实现                       | 特点/替换关系                    |
+|-------------|--------------------------------|----------------------------------|
+| Map         | ConcurrentHashMap              | 替代 Hashtable/synchronizedMap   |
+| List        | CopyOnWriteArrayList           | 读多写极少（配置、监听器列表）    |
+| Set         | ConcurrentHashMap.newKeySet()  | 底层就是 CHM                     |
+| Queue       | ConcurrentLinkedQueue          | 无界、CAS 无锁、高吞吐           |
+| BlockingQueue| ArrayBlockingQueue            | 有界数组、单锁双条件              |
+| BlockingQueue| LinkedBlockingQueue           | 有界/无界、双锁分离，吞吐更高     |
+| BlockingQueue| SynchronousQueue              | 容量0，直接移交（CachedThreadPool）|
+| BlockingQueue| PriorityBlockingQueue         | 无界优先队列                     |
+| BlockingQueue| DelayQueue                    | 延时队列（订单超时取消）          |
+| BlockingQueue| LinkedTransferQueue           | 更强的 SynchronousQueue          |
+| Deque       | ConcurrentLinkedDeque          | 无锁双端队列                     |
+| ~~Vector~~  | -                              | 全表锁，已淘汰                   |
+
+===== 3) Map 并发写性能实测 =====
+  synchronizedMap      :   162 ms
+  ConcurrentHashMap    :   181 ms  (快 0.9 倍)
+  → synchronizedMap 是「一把大锁锁全表」，CHM 是「CAS + 桶级锁」
+
+===== 4) CopyOnWriteArrayList 读性能优势 =====
+  synchronizedList 读:   275 ms
+  CopyOnWriteArrayList 读:    20 ms  (快 13.8 倍)
+  → COW 读完全无锁（读的是快照），但写会复制整个数组，只适合读多写极少
+
+===== 5) ConcurrentHashMap 常用 API 实战 =====
+  merge + computeIfAbsent + computeIfPresent → {a=20, b=100}
+  search 第一个 >50 的值 = 100
+  replace(k, expect, new) = true → {a=999, b=100}
+
+============== ConcurrentHashMap 关键设计 ==============
+【JDK7】Segment 分段锁：默认 16 段，每段一把 ReentrantLock。
+        并发度 = 段数，段数在初始化后不可变。
+
+【JDK8+】彻底重构：
+  - 取消 Segment，直接「CAS + synchronized(桶头节点)」
+  - 数组 + 链表 + 红黑树（链表长度 ≥8 且数组长度 ≥64 时树化）
+  - size() 用 baseCount + CounterCell[] 分段计数（和 LongAdder 同思路）
+  - 扩容支持多线程协同（helpTransfer）：每个线程负责一段迁移
+
+【为什么不用读写锁？】
+  读写锁在「读多写少」时好，但 CHM 的场景是「读写混合、每个操作都很短」，
+  桶级锁粒度更细，锁冲突概率远低于整表读写锁。
+
+【要点】
+  ① key/value 都不能为 null（无法区分「不存在」和「值为 null」）
+  ② size() 是「近似值」不是强一致（并发写入时）
+  ③ 复合操作必须用 compute/merge/putIfAbsent，不能自己 get 再 put
+  ④ 弱一致性迭代器：遍历时不会抛 ConcurrentModificationException，
+     但可能看不到最新修改，也可能看到部分修改
+=========================================================
+

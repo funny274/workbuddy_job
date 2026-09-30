@@ -1,0 +1,81 @@
+src\main\java\course\ch12\_02_CommonPitfalls.java:117: 警告: [identity] 尝试在基于值的类的实例上同步
+                    synchronized (Integer.valueOf(1000)) {   // 每次都是新对象！
+                    ^
+1 个警告
+===== 陷阱1：SimpleDateFormat 非线程安全 =====
+  50 个线程共用 SimpleDateFormat → 异常次数 = 14（常见 NumberFormatException / 结果错乱）
+
+===== 陷阱2：Integer 缓存导致的「锁失效」=====
+  Integer.valueOf(100) == Integer.valueOf(100)  → true   （在缓存范围内，同一对象）
+  Integer.valueOf(1000) == Integer.valueOf(1000) → false  （超出缓存范围，不同对象）
+  → 如果用 Integer 当锁对象，值相同但对象不同 → 锁根本锁不住！
+  【结论】锁对象必须用 private final Object，绝不用 Integer/String
+
+===== 陷阱3：字符串常量池锁（不同模块互相阻塞）=====
+  模块A 拿到 "common" 的锁
+  模块B 尝试拿同一把（字符串常量池）锁，被无辜阻塞...
+  模块B 等了 250ms 才拿到
+  → 两个毫无关系的模块因为字符串常量池共用锁而互相干扰
+
+===== 陷阱4：HashMap 并发 put 数据丢失 =====
+  HashMap 期望 size = 800000，实际 = 561238，丢失 = 238762
+  → 并发 put 会互相覆盖（JDK7 还会形成环形链表死循环）
+
+===== 陷阱5：双重检查锁缺少 volatile =====
+  → 已在 ch02_03 详细演示，此处略
+
+===== 陷阱6：线程池用无界队列导致 OOM =====
+Executors.newFixedThreadPool(n) 内部是：
+    new LinkedBlockingQueue<Runnable>()   ← 默认容量 Integer.MAX_VALUE
+任务堆积速度 > 消费速度时，队列无限增长 → OutOfMemoryError: Java heap space
+同理 newCachedThreadPool() 的 maximumPoolSize = Integer.MAX_VALUE
+→ 会创建几十万线程，直接 OOM: unable to create native thread
+【正确做法】new ThreadPoolExecutor(...) 全部参数显式指定
+
+===== 陷阱7：ThreadLocal 未清理导致内存泄漏 =====
+  → 已在 ch10_01 详细演示，此处略
+
+===== 陷阱8：父子线程池共用导致级联阻塞 =====
+场景：线程池 A（核心2）的任务里，又向线程池 A 提交子任务并等待结果。
+     2 个核心线程都在等子任务，但子任务排在队列里没人执行 → 死锁。
+【正确做法】父子任务用不同线程池；或改用 CompletableFuture 异步编排。
+
+===== 陷阱9：volatile 数组元素不保证可见性 =====
+volatile int[] arr = new int[10];
+arr[0] = 1;      // ← 这行没有 volatile 语义！
+volatile 只保证「arr 这个引用」的可见性，
+不保证「arr 指向的数组元素」的可见性。
+【正确做法】
+  AtomicIntegerArray / AtomicLongArray
+  或 volatile int[] + 配合 Unsafe/VarHandle
+
+
+===== 陷阱10：interrupt 被吞掉 =====
+  子线程被中断，但异常被吞掉了（错误示范）
+  【正确做法】
+try { Thread.sleep(1000); }
+catch (InterruptedException e) {
+    Thread.currentThread().interrupt();   // 恢复中断标志
+    // 可选：做清理工作后 return / throw
+    return;
+}
+为什么必须恢复？
+  ① 中断是「协作式」的，上层可能也在 await 中断标志
+  ② 吞掉中断会让「优雅停机」「超时取消」功能全部失效
+
+
+================ 陷阱速查表 ================
+| # | 陷阱                        | 一句话解决                          |
+|---|-----------------------------|-------------------------------------|
+| 1 | SimpleDateFormat 非线程安全 | 用 DateTimeFormatter 或 ThreadLocal |
+| 2 | 小整数 Integer 缓存         | 别用 Integer 做锁对象，用 Object    |
+| 3 | 字符串常量池锁              | 别用 String 做锁，用 new Object()   |
+| 4 | HashMap 并发丢数据          | 用 ConcurrentHashMap                |
+| 5 | DCL 缺 volatile             | 加 volatile                         |
+| 6 | 无界队列 OOM                | 手动 new ThreadPoolExecutor + 有界队列|
+| 7 | ThreadLocal 泄漏            | finally 里 remove()                 |
+| 8 | 父子线程池死锁              | 分离线程池 / 异步编排               |
+| 9 | volatile 数组元素           | volatile 不修饰元素，用 Atomic*Array|
+|10 | interrupt 被吞              | 捕获后必须 Thread.currentThread().interrupt()|
+============================================
+

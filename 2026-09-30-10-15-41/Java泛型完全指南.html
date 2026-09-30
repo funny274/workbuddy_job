@@ -1,0 +1,3260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Java 泛型完全指南 · 从语法到字节码，从 JDK 到大厂框架</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-light.min.css">
+<style>
+:root{
+  --bg:#f8fafc; --card:#ffffff; --text:#1e293b; --text2:#64748b; --text3:#94a3b8;
+  --line:#e2e8f0; --line2:#eef2f7;
+  --brand:#2563eb; --brand-d:#1d4ed8; --purple:#7c3aed; --teal:#0d9488;
+  --code-bg:#f7f9fc; --ok:#059669; --ok-bg:#ecfdf5; --warn:#b45309; --warn-bg:#fffbeb;
+  --danger:#dc2626; --danger-bg:#fef2f2; --info-bg:#eff6ff; --purple-bg:#f5f3ff;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0;background:var(--bg);color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  font-size:16px;line-height:1.85;-webkit-font-smoothing:antialiased;
+}
+#progress{position:fixed;top:0;left:0;height:3px;width:0;background:linear-gradient(90deg,var(--brand),var(--purple));z-index:99;transition:width .12s linear}
+
+/* ---------- 侧边栏 ---------- */
+.sidebar{position:fixed;left:0;top:0;bottom:0;width:288px;overflow-y:auto;background:#fff;
+  border-right:1px solid var(--line);padding:26px 16px 80px;z-index:50}
+.sidebar::-webkit-scrollbar{width:6px}
+.sidebar::-webkit-scrollbar-thumb{background:#dbe2ea;border-radius:3px}
+.sb-title{font-size:15px;font-weight:700;color:var(--brand);padding:0 10px 4px;letter-spacing:.3px}
+.sb-sub{font-size:12px;color:var(--text3);padding:0 10px 18px;line-height:1.6}
+.sb-group{font-size:11px;font-weight:700;color:var(--text3);letter-spacing:1.5px;padding:16px 10px 6px;text-transform:uppercase}
+.sidebar a{display:block;padding:6px 10px;color:var(--text2);text-decoration:none;font-size:13.5px;
+  border-radius:7px;border-left:2px solid transparent;line-height:1.5;transition:.15s}
+.sidebar a:hover{background:var(--line2);color:var(--brand)}
+.sidebar a.active{background:var(--info-bg);color:var(--brand-d);font-weight:600;border-left-color:var(--brand)}
+
+/* ---------- 主体 ---------- */
+.main{margin-left:288px;max-width:1000px;padding:56px 60px 160px}
+@media(max-width:1180px){.sidebar{display:none}.main{margin-left:0;padding:28px 20px 100px}}
+
+/* ---------- 标题 ---------- */
+h1{font-size:34px;line-height:1.35;margin:0 0 8px;letter-spacing:-.5px}
+h2{font-size:25px;margin:70px 0 18px;padding-bottom:12px;border-bottom:2px solid var(--line);letter-spacing:-.3px}
+h2 .num{display:inline-block;font-size:14px;font-weight:700;color:#fff;background:var(--brand);
+  border-radius:7px;padding:2px 9px;margin-right:10px;vertical-align:3px;letter-spacing:0}
+h3{font-size:19px;margin:38px 0 12px;color:#0f2d52}
+h3::before{content:"";display:inline-block;width:4px;height:16px;background:var(--purple);
+  border-radius:2px;margin-right:9px;vertical-align:-2px}
+h4{font-size:16.5px;margin:26px 0 8px;color:#1e3a5f}
+p{margin:12px 0}
+a{color:var(--brand)}
+ul,ol{padding-left:26px;margin:12px 0}
+li{margin:5px 0}
+strong{color:#0f2d52;font-weight:600}
+hr{border:none;border-top:1px solid var(--line);margin:44px 0}
+
+/* ---------- Hero ---------- */
+.hero{background:linear-gradient(135deg,#1e3a8a 0%,#2563eb 45%,#7c3aed 100%);color:#fff;
+  border-radius:18px;padding:40px 42px;margin-bottom:20px;box-shadow:0 12px 32px rgba(37,99,235,.22)}
+.hero h1{color:#fff}
+.hero p{color:#dbeafe;margin:14px 0 0;font-size:15.5px}
+.hero .tags{margin-top:20px;display:flex;flex-wrap:wrap;gap:8px}
+.hero .tag{background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.28);
+  border-radius:20px;padding:3px 13px;font-size:12.5px;color:#f0f9ff}
+
+/* ---------- 代码 ---------- */
+code{font-family:"JetBrains Mono","Cascadia Code",Consolas,Monaco,"Courier New",monospace}
+p code,li code,td code,th code,h3 code,h4 code,dt code{background:#eef3f9;color:#0b4a8f;
+  padding:1.5px 6px;border-radius:5px;font-size:.88em;border:1px solid #e2ecf7}
+pre{background:var(--code-bg);border:1px solid var(--line);border-left:4px solid var(--brand);
+  border-radius:9px;padding:16px 18px;overflow-x:auto;margin:18px 0;font-size:13.6px;line-height:1.75}
+pre code{background:none!important;padding:0!important;border:none!important;font-size:inherit;color:inherit}
+pre.term{border-left-color:#334155;background:#0f172a;color:#e2e8f0}
+pre.term code{color:#e2e8f0!important}
+.caption{font-size:12.5px;color:var(--text3);margin:-10px 0 20px;text-align:center}
+
+/* ---------- 表格 ---------- */
+.tbl-wrap{overflow-x:auto;margin:18px 0}
+table{border-collapse:collapse;width:100%;font-size:14px;background:#fff;
+  border-radius:10px;overflow:hidden;box-shadow:0 1px 3px rgba(15,23,42,.06)}
+th{background:#f1f5f9;text-align:left;padding:11px 14px;font-weight:600;color:#0f2d52;
+  border-bottom:2px solid var(--line);white-space:nowrap}
+td{padding:10px 14px;border-bottom:1px solid var(--line2);vertical-align:top}
+tr:last-child td{border-bottom:none}
+tbody tr:hover{background:#fafcff}
+
+/* ---------- 提示框 ---------- */
+.box{border-radius:10px;padding:14px 18px;margin:18px 0;font-size:14.6px;border-left:4px solid}
+.box .bt{font-weight:700;display:block;margin-bottom:4px;font-size:14px;letter-spacing:.2px}
+.box p{margin:6px 0}
+.box ul{margin:6px 0}
+.tip{background:var(--ok-bg);border-color:var(--ok)}.tip .bt{color:var(--ok)}
+.warn{background:var(--warn-bg);border-color:var(--warn)}.warn .bt{color:var(--warn)}
+.danger{background:var(--danger-bg);border-color:var(--danger)}.danger .bt{color:var(--danger)}
+.info{background:var(--info-bg);border-color:var(--brand)}.info .bt{color:var(--brand-d)}
+.deep{background:var(--purple-bg);border-color:var(--purple)}.deep .bt{color:var(--purple)}
+
+/* ---------- 卡片网格 ---------- */
+.grid{display:grid;gap:14px;margin:20px 0}
+.g2{grid-template-columns:1fr 1fr}
+.g3{grid-template-columns:repeat(3,1fr)}
+@media(max-width:820px){.g2,.g3{grid-template-columns:1fr}}
+.card{background:#fff;border:1px solid var(--line);border-radius:11px;padding:16px 18px}
+.card h4{margin:0 0 6px;font-size:15px}
+.card p{margin:0;font-size:13.8px;color:var(--text2);line-height:1.7}
+
+/* ---------- 面试题块 ---------- */
+.qa{border:1px solid var(--line);border-radius:12px;overflow:hidden;margin:20px 0;background:#fff}
+.qa-h{background:#f8fafc;padding:13px 18px;font-weight:600;color:#0f2d52;font-size:15.2px;
+  border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:flex-start}
+.qa-h .lv{flex:0 0 auto;font-size:11px;font-weight:700;padding:2px 8px;border-radius:5px;color:#fff;margin-top:3px}
+.lv-j{background:#10b981}.lv-m{background:#f59e0b}.lv-s{background:#ef4444}
+.qa-b{padding:16px 18px}
+.qa-b>.lab{font-weight:700;color:var(--purple);font-size:13.5px;margin:14px 0 4px;letter-spacing:.3px}
+.qa-b>.lab:first-child{margin-top:0}
+
+/* ---------- 其它 ---------- */
+.pill{display:inline-block;font-size:11.5px;font-weight:700;padding:2px 9px;border-radius:20px;
+  background:#eef2f7;color:#475569;margin-right:6px;vertical-align:2px}
+.pill.b{background:#dbeafe;color:#1d4ed8}
+.pill.p{background:#ede9fe;color:#6d28d9}
+.pill.g{background:#d1fae5;color:#047857}
+.pill.r{background:#fee2e2;color:#b91c1c}
+.toc-inline{background:#fff;border:1px solid var(--line);border-radius:12px;padding:20px 24px;margin:24px 0}
+.toc-inline ol{columns:2;column-gap:36px;margin:0;padding-left:20px}
+@media(max-width:820px){.toc-inline ol{columns:1}}
+.toc-inline a{text-decoration:none;color:var(--text2);font-size:14px}
+.toc-inline a:hover{color:var(--brand)}
+.kbd{display:inline-block;background:#fff;border:1px solid #cbd5e1;border-bottom-width:2px;
+  border-radius:5px;padding:0 6px;font-size:12.5px;font-family:monospace;color:#334155}
+#top{position:fixed;right:26px;bottom:26px;width:44px;height:44px;border-radius:50%;
+  background:var(--brand);color:#fff;border:none;cursor:pointer;font-size:18px;
+  box-shadow:0 6px 18px rgba(37,99,235,.35);display:none;z-index:60}
+.foot{margin-top:80px;padding-top:24px;border-top:1px solid var(--line);color:var(--text3);font-size:13px}
+</style>
+</head>
+<body>
+<div id="progress"></div>
+
+<nav class="sidebar">
+  <div class="sb-title">Java 泛型完全指南</div>
+  <div class="sb-sub">从语法到字节码 · 从 JDK 到大厂框架<br>面向 10 年经验后端工程师</div>
+
+  <div class="sb-group">Part 1 · 地基</div>
+  <a href="#ch1">1. 为什么需要泛型</a>
+  <a href="#ch2">2. 泛型基础语法全解</a>
+
+  <div class="sb-group">Part 2 · 核心机制</div>
+  <a href="#ch3">3. 类型擦除</a>
+  <a href="#ch4">4. 桥接方法与字节码实证</a>
+  <a href="#ch5">5. 型变：不变 / 协变 / 逆变</a>
+
+  <div class="sb-group">Part 3 · 进阶</div>
+  <a href="#ch6">6. 通配符 vs 类型参数</a>
+  <a href="#ch7">7. 边界与递归类型参数</a>
+  <a href="#ch8">8. 类型推断与语言演进</a>
+  <a href="#ch9">9. 数组 / 可变参数 / 堆污染</a>
+  <a href="#ch10">10. 反射与运行时泛型信息</a>
+  <a href="#ch11">11. Java 泛型 vs C++ 模板</a>
+
+  <div class="sb-group">Part 4 · 工程实战</div>
+  <a href="#ch12">12. 大厂框架泛型全景</a>
+  <a href="#ch13">13. 泛型设计模式与套路</a>
+  <a href="#ch14">14. 生产陷阱与排错清单</a>
+
+  <div class="sb-group">Part 5 · 面试</div>
+  <a href="#ch15">15. 分层面试题库</a>
+  <a href="#ch16">16. 速查表</a>
+</nav>
+
+<div class="main">
+
+<div class="hero">
+  <h1>Java 泛型完全指南</h1>
+  <p>从语法糖到字节码，从类型系统理论到大厂框架源码。<br>
+  这份文档的目标只有一个：读完之后，你对泛型的理解要达到「能给别人讲清楚为什么」的深度，而不只是「知道怎么写」。</p>
+  <div class="tags">
+    <span class="tag">类型擦除</span><span class="tag">桥接方法</span><span class="tag">PECS</span>
+    <span class="tag">通配符捕获</span><span class="tag">堆污染</span><span class="tag">TypeReference</span>
+    <span class="tag">ResolvableType</span><span class="tag">Spring / MyBatis / Jackson</span>
+    <span class="tag">面试题库</span>
+  </div>
+</div>
+
+<h2 id="intro">如何使用这份教程</h2>
+
+<p>这不是一份「把 API 罗列一遍」的文档。Java 泛型真正的难点不在语法——语法两小时就能学完——而在于三个问题：</p>
+
+<div class="grid g3">
+  <div class="card"><h4>1. 它为什么这样设计？</h4><p>为什么 <code>List&lt;String&gt;</code> 不是 <code>List&lt;Object&gt;</code> 的子类型？为什么不能 <code>new T()</code>？这些「别扭」全部来自同一个源头：类型擦除。</p></div>
+  <div class="card"><h4>2. 擦除之后还剩什么？</h4><p>运行时泛型信息真的全丢了吗？并不是。<code>TypeReference</code>、<code>ResolvableType</code> 这些框架基石，正是建立在「擦除后仍残留的信息」之上。</p></div>
+  <div class="card"><h4>3. 生产代码里怎么用？</h4><p>统一响应封装、泛型 DAO、RPC 编解码、AOP 切面泛型匹配——这是大厂真实代码里泛型出现的地方。</p></div>
+</div>
+
+<div class="box info">
+  <span class="bt">阅读建议</span>
+  <p><strong>第一遍</strong>：按顺序读 Part 1 → Part 2 → Part 3，这一遍务必亲手敲代码、跑 <code>javap</code>。泛型是那种「看会了但一写就错」的知识。</p>
+  <p><strong>第二遍</strong>：直接跳到 Part 4（工程实战）和 Part 5（面试题库），把知识点挂到真实场景上。</p>
+  <p><strong>面试前</strong>：只看 Part 5 的题库和 Part 2 的擦除章节。90% 的泛型面试题都在这两条脉络上。</p>
+</div>
+
+<div class="box deep">
+  <span class="bt">版本说明</span>
+  <p>本文基于 <strong>Java 5 引入泛型 → Java 25 的完整演进</strong>编写（2026 年 9 月）。需要明确一点：<strong>从 Java 5 到今天，Java 泛型的核心语义——类型擦除——从未改变</strong>。中间所有版本（7 的菱形、8 的目标类型推断、10 的 <code>var</code>、21 的 Record 模式）都只是让「写起来更省事」，没有动摇擦除这个根基。所以本文第 3、4 章的内容，在可预见的未来仍然有效。</p>
+</div>
+
+<div class="toc-inline">
+  <ol>
+    <li><a href="#ch1">为什么需要泛型：一个 Object 容器的血案</a></li>
+    <li><a href="#ch2">泛型基础语法全解</a></li>
+    <li><a href="#ch3">类型擦除：Java 泛型的全部秘密</a></li>
+    <li><a href="#ch4">桥接方法与字节码实证</a></li>
+    <li><a href="#ch5">型变：不变、协变、逆变与 PECS</a></li>
+    <li><a href="#ch6">通配符 vs 类型参数：何时用哪个</a></li>
+    <li><a href="#ch7">边界与递归类型参数（F-bounded）</a></li>
+    <li><a href="#ch8">类型推断与语言演进（Java 5→25）</a></li>
+    <li><a href="#ch9">泛型数组、可变参数与堆污染</a></li>
+    <li><a href="#ch10">反射与运行时泛型信息</a></li>
+    <li><a href="#ch11">Java 泛型 vs C++ 模板</a></li>
+    <li><a href="#ch12">大厂框架中的泛型全景</a></li>
+    <li><a href="#ch13">泛型设计模式与可复用代码</a></li>
+    <li><a href="#ch14">生产陷阱与排错清单</a></li>
+    <li><a href="#ch15">分层面试题库（含追问）</a></li>
+    <li><a href="#ch16">速查表</a></li>
+  </ol>
+</div>
+
+<!-- ================= 第 1 章 ================= -->
+<h2 id="ch1"><span class="num">01</span>为什么需要泛型：一个 Object 容器的血案</h2>
+
+<h3>1.1 没有泛型的年代</h3>
+
+<p>Java 5 之前，集合框架只能存 <code>Object</code>。任何类型都能塞进去，取出来必须自己强转：</p>
+
+<pre><code class="language-java">// JDK 1.4 风格：List 内部就是 Object[]
+List list = new ArrayList();
+list.add("hello");
+list.add(Integer.valueOf(123));   // 手写装箱
+list.add(new Date());
+
+String s = (String) list.get(1);  // 编译通过，运行时炸
+// java.lang.ClassCastException: java.lang.Integer cannot be cast to java.lang.String</code></pre>
+
+<p>这段代码暴露了三个致命问题：</p>
+
+<div class="grid g3">
+  <div class="card"><h4>类型不安全</h4><p>编译器完全不知道你往里放什么、取什么。错误从「编译期」推迟到了「生产环境的某个凌晨」。</p></div>
+  <div class="card"><h4>强制转换噪音</h4><p>每个 <code>get()</code> 都要加一个强转。代码里塞满了 <code>(String)</code>、<code>(User)</code>，读起来全是噪音。</p></div>
+  <div class="card"><h4>无自文档性</h4><p>看到一个 <code>List</code> 参数，你得翻遍调用方才能猜出里面装的是用户还是订单。</p></div>
+</div>
+
+<h3>1.2 泛型的三大收益</h3>
+
+<pre><code class="language-java">List&lt;String&gt; list = new ArrayList&lt;&gt;();
+list.add("hello");
+list.add(123);          // ❌ 编译错误：不兼容的类型。错误被提前了！
+
+String s = list.get(0); // ✅ 不需要强转，编译器已经知道是 String</code></pre>
+
+<table>
+<thead><tr><th>收益</th><th>一句话解释</th><th>工程价值</th></tr></thead>
+<tbody>
+<tr><td><strong>类型安全</strong></td><td>把类型错误的发现时间从运行时提前到编译期</td><td>缺陷成本：编译期 1 倍 vs 生产环境 100 倍</td></tr>
+<tr><td><strong>消除强转</strong></td><td>编译器自动插入正确的类型转换</td><td>代码可读性显著提升，减少 <code>ClassCastException</code></td></tr>
+<tr><td><strong>泛型算法</strong></td><td>一套算法适配多种类型，且保持类型信息</td><td><code>Collections.sort</code>、<code>Stream</code>、框架的通用能力</td></tr>
+</tbody>
+</table>
+
+<h3>1.3 关键设计决策：为什么 Java 选择了「擦除」</h3>
+
+<p>这是理解后续所有「别扭之处」的钥匙，必须讲清楚。</p>
+
+<p>2004 年 Java 5 引入泛型时，Sun 面临一个硬约束：<strong>世界上已经存在海量的 Java 代码和已编译的 class 文件，不能因为引入泛型就把它们全部作废</strong>。这个约束在 JSR 14 里被称为 <strong>迁移兼容性（Migration Compatibility）</strong>。</p>
+
+<div class="box deep">
+  <span class="bt">两条技术路线</span>
+  <p><strong>路线 A：具化泛型（Reified Generics）</strong>——像 C# 那样，运行时真的存在 <code>List&lt;String&gt;</code> 和 <code>List&lt;Integer&gt;</code> 两个不同的类型，各有自己的 <code>Class</code> 对象。类型信息保留到运行时。</p>
+  <p><strong>路线 B：类型擦除（Type Erasure）</strong>——泛型只是编译期的「类型检查 + 自动插桩」。编译完成后，<code>List&lt;String&gt;</code> 就是 <code>List</code>，和老的 class 文件二进制兼容。</p>
+  <p>Java 选了 <strong>B</strong>。代价是运行时拿不到泛型实参；收益是<strong>新老代码可以无缝混用</strong>——这正是 Java 生态能平滑演进二十年的原因之一。</p>
+</div>
+
+<p>所以你后面遇到的所有限制——不能 <code>new T()</code>、不能 <code>instanceof List&lt;String&gt;</code>、不能重载——<strong>都不是设计者疏忽，而是为兼容性付出的、经过权衡的代价</strong>。面试时能说出这一层，档次立刻不同。</p>
+
+<h3>1.4 三语言横向对比（先建立全局印象）</h3>
+
+<table>
+<thead><tr><th>维度</th><th>Java 泛型</th><th>C# 泛型</th><th>C++ 模板</th></tr></thead>
+<tbody>
+<tr><td>实现时机</td><td>编译期检查，运行时擦除</td><td>运行时具化（CLR 支持）</td><td>编译期展开（代码生成）</td></tr>
+<tr><td>运行时类型</td><td><code>List&lt;String&gt;</code> → <code>List</code></td><td>有独立 <code>Type</code> 对象</td><td>无类型概念（编译后即消失）</td></tr>
+<tr><td>能否 <code>new T()</code></td><td>不能（需 <code>Class&lt;T&gt;</code> 辅助）</td><td>可以（<code>new T()</code> 带约束）</td><td>可以</td></tr>
+<tr><td>基本类型</td><td>不支持，必须装箱</td><td>支持（值类型特化）</td><td>支持，且每类型一份代码</td></tr>
+<tr><td>代码膨胀</td><td>无（一份字节码）</td><td>较小</td><td>严重（模板实例化膨胀）</td></tr>
+<tr><td>老代码兼容</td><td>二进制兼容</td><td>需要泛型化改造</td><td>不涉及</td></tr>
+<tr><td>编译错误质量</td><td>较好</td><td>好</td><td>极差（模板报错天书）</td></tr>
+</tbody>
+</table>
+
+<p class="caption">表 1-1：三种泛型实现路线的对比。第 11 章会展开讲 Java 与 C++ 的差异，如果你有 C++ 背景，那一章会很有共鸣。</p>
+
+<!-- ================= 第 2 章 ================= -->
+<h2 id="ch2"><span class="num">02</span>泛型基础语法全解</h2>
+
+<h3>2.1 泛型类</h3>
+
+<p>把类型当作参数传给类。注意 <code>T</code> 只是一个<strong>占位符</strong>，它没有任何运行时实体：</p>
+
+<pre><code class="language-java">public class Box&lt;T&gt; {
+    private T value;                 // 字段类型可以是 T
+
+    public Box(T value) { this.value = value; }
+
+    public void set(T value) { this.value = value; }
+    public T get() { return value; }
+
+    public static void main(String[] args) {
+        Box&lt;String&gt; b1 = new Box&lt;&gt;("hello");   // T 被实参化为 String
+        Box&lt;Integer&gt; b2 = new Box&lt;&gt;(42);        // T 被实参化为 Integer
+        String s = b1.get();                     // 无需强转
+        Integer i = b2.get();
+        System.out.println(b1.getClass() == b2.getClass());  // true！
+    }
+}</code></pre>
+
+<div class="box warn">
+  <span class="bt">注意最后一行</span>
+  <p><code>b1.getClass() == b2.getClass()</code> 输出 <code>true</code>。这是类型擦除最直接的证据：运行时 <code>Box&lt;String&gt;</code> 和 <code>Box&lt;Integer&gt;</code> 都是 <strong>同一个类 <code>Box</code></strong>，只有一份字节码。</p>
+</div>
+
+<p>多个类型参数：</p>
+
+<pre><code class="language-java">public class Pair&lt;K, V&gt; {
+    private final K key;
+    private final V value;
+    public Pair(K key, V value) { this.key = key; this.value = value; }
+    public K getKey() { return key; }
+    public V getValue() { return value; }
+}
+
+Pair&lt;String, Integer&gt; p = new Pair&lt;&gt;("age", 30);</code></pre>
+
+<h3>2.2 泛型接口</h3>
+
+<p>泛型接口是大厂框架里最常见的抽象手段。<code>Repository&lt;T, ID&gt;</code> 就是典型：</p>
+
+<pre><code class="language-java">public interface Repository&lt;T, ID&gt; {
+    T findById(ID id);
+    List&lt;T&gt; findAll();
+    void save(T entity);
+    void deleteById(ID id);
+}
+
+// 使用时把类型参数「钉死」
+public class UserRepository implements Repository&lt;User, Long&gt; {
+    @Override public User findById(Long id) { return null; /* ... */ }
+    @Override public List&lt;User&gt; findAll() { return List.of(); }
+    @Override public void save(User entity) { }
+    @Override public void deleteById(Long id) { }
+}</code></pre>
+
+<p>两种实现风格，理解它们的差别很重要：</p>
+
+<table>
+<thead><tr><th>实现方式</th><th>写法</th><th>含义</th><th>典型场景</th></tr></thead>
+<tbody>
+<tr><td>固定实参</td><td><code>class UserRepo implements Repository&lt;User, Long&gt;</code></td><td>实现类就是某个具体类型</td><td>业务 DAO</td></tr>
+<tr><td>传递参数</td><td><code>class BaseRepo&lt;T, ID&gt; implements Repository&lt;T, ID&gt;</code></td><td>实现类保持泛型</td><td>MyBatis-Plus 的 <code>BaseMapper&lt;T&gt;</code></td></tr>
+</tbody>
+</table>
+
+<h3>2.3 泛型方法（最容易搞混的部分）</h3>
+
+<p><strong>泛型方法的类型参数声明在返回类型之前</strong>，位置极其关键：</p>
+
+<pre><code class="language-java">// 类型参数 &lt;T&gt; 在修饰符之后、返回类型之前
+public static &lt;T&gt; T firstOrNull(List&lt;T&gt; list) {
+    return (list == null || list.isEmpty()) ? null : list.get(0);
+}
+
+// 多个类型参数的泛型方法
+public static &lt;K, V&gt; Map&lt;V, K&gt; invert(Map&lt;K, V&gt; source) {
+    Map&lt;V, K&gt; result = new HashMap&lt;&gt;();
+    source.forEach((k, v) -&gt; result.put(v, k));
+    return result;
+}</code></pre>
+
+<div class="box danger">
+  <span class="bt">三个高频错误写法</span>
+  <pre style="margin:8px 0 0"><code class="language-java">// ❌ 错误 1：&lt;T&gt; 写在返回类型之后 —— 这不是泛型方法
+public static T first(List&lt;T&gt; list) { ... }
+
+// ❌ 错误 2：静态方法直接用类的类型参数
+public class Box&lt;T&gt; {
+    public static T create() { ... }   // 编译错误！
+    // 原因：静态成员属于类本身，不随实例的类型参数变化
+}
+
+// ✅ 正确：静态方法自己声明类型参数
+public class Box&lt;T&gt; {
+    public static &lt;E&gt; Box&lt;E&gt; create(E value) { return new Box&lt;&gt;(value); }
+}</code></pre>
+</div>
+
+<p><strong>泛型方法与所在类是否为泛型类完全无关</strong>。这是面试常考点。一个普通类里也可以有泛型方法；一个泛型类里的方法也未必是泛型方法。判断标准只有一个：<strong>该方法自己有没有声明 <code>&lt;T&gt;</code></strong>。</p>
+
+<pre><code class="language-java">public class Utils {
+    // 普通类中的泛型方法：类型参数 T 只在这个方法里生效
+    public static &lt;T extends Comparable&lt;T&gt;&gt; T max(List&lt;T&gt; list) {
+        T m = list.get(0);
+        for (T t : list) if (t.compareTo(m) &gt; 0) m = t;
+        return m;
+    }
+}</code></pre>
+
+<h3>2.4 类型参数的命名约定（别小看它，这是代码素养）</h3>
+
+<table>
+<thead><tr><th>符号</th><th>含义</th><th>典型出处</th></tr></thead>
+<tbody>
+<tr><td><code>T</code></td><td>Type，通用类型</td><td>几乎无处不在</td></tr>
+<tr><td><code>E</code></td><td>Element，集合元素</td><td><code>List&lt;E&gt;</code>、<code>Set&lt;E&gt;</code></td></tr>
+<tr><td><code>K</code> / <code>V</code></td><td>Key / Value</td><td><code>Map&lt;K,V&gt;</code></td></tr>
+<tr><td><code>N</code></td><td>Number，数值类型</td><td><code>&lt;N extends Number&gt;</code></td></tr>
+<tr><td><code>R</code></td><td>Result / Return，返回值</td><td><code>Function&lt;T,R&gt;</code>、<code>Callable&lt;R&gt;</code></td></tr>
+<tr><td><code>S, U, V</code></td><td>第二、三、四个类型参数</td><td><code>BiFunction&lt;T,U,R&gt;</code></td></tr>
+<tr><td><code>ID</code></td><td>主键类型（非单字母，也合法）</td><td><code>Repository&lt;T, ID&gt;</code></td></tr>
+</tbody>
+</table>
+
+<p>单字母是<strong>约定而非语法</strong>。但请遵守：<code>&lt;Foo&gt;</code> 这种命名会让人误以为是个具体类，反而降低可读性。框架里常见的例外是 <code>ID</code>、<code>RES</code> 这类语义明确的短名。</p>
+
+<h3>2.5 菱形运算符与类型推断</h3>
+
+<table>
+<thead><tr><th>JDK 版本</th><th>特性</th><th>示例</th></tr></thead>
+<tbody>
+<tr><td>Java 5</td><td>必须两侧都写全</td><td><code>Map&lt;String,List&lt;Integer&gt;&gt; m = new HashMap&lt;String,List&lt;Integer&gt;&gt;();</code></td></tr>
+<tr><td>Java 7</td><td><strong>菱形运算符</strong>：右侧可省略</td><td><code>Map&lt;String,List&lt;Integer&gt;&gt; m = new HashMap&lt;&gt;();</code></td></tr>
+<tr><td>Java 9</td><td>匿名内部类也支持菱形</td><td><code>new Comparator&lt;&gt;() { ... }</code></td></tr>
+</tbody>
+</table>
+
+<div class="box tip">
+  <span class="bt">最佳实践</span>
+  <p>Java 7+ 一律用菱形 <code>&lt;&gt;</code>，不要重复写右侧类型。<code>new ArrayList&lt;String&gt;()</code> 这种写法在 code review 里是会被挑出来的。</p>
+</div>
+
+<h3>2.6 原始类型（Raw Type）：一个必须理解的「逃生口」</h3>
+
+<p>不使用任何类型参数的泛型类型，叫<strong>原始类型</strong>：</p>
+
+<pre><code class="language-java">List rawList = new ArrayList();      // Raw Type
+List&lt;String&gt; typed = new ArrayList&lt;&gt;();  // Parameterized Type</code></pre>
+
+<div class="box danger">
+  <span class="bt">Raw Type ≠ List&lt;Object&gt;</span>
+  <p>这是一个极其常见的误解。它们的区别在于：<strong><code>List&lt;Object&gt;</code> 参与泛型检查，<code>List</code>（raw）会关闭所有泛型检查</strong>。</p>
+  <pre style="margin:8px 0 0"><code class="language-java">List&lt;String&gt; typed = new ArrayList&lt;&gt;();
+
+List raw = typed;            // 赋值给 raw type：仅产生警告
+raw.add(123);                // ⚠️ 编译通过（只警告），但污染了集合
+
+String s = typed.get(0);     // 💥 ClassCastException 在别的代码里爆发</code></pre>
+  <p>这就是所谓的<strong>堆污染（Heap Pollution）</strong>，第 9 章会详述。Raw type 的可怕之处在于：<strong>它把编译期的类型安全网撕开了一个口子，而且错误会传染到看起来完全无辜的代码里</strong>。</p>
+</div>
+
+<p>什么时候<strong>必须</strong>用 raw type？只有三处：</p>
+
+<ol>
+  <li><strong>class 字面量</strong>：<code>List.class</code>（不能写 <code>List&lt;String&gt;.class</code>）</li>
+  <li><strong><code>instanceof</code> 检查</strong>：<code>obj instanceof List</code>（不能写 <code>instanceof List&lt;String&gt;</code>）</li>
+  <li><strong>与遗留（Java 5 之前）代码互操作</strong></li>
+</ol>
+
+<h3>2.7 显式类型见证（Explicit Type Argument）</h3>
+
+<p>当编译器推断不出类型时，可以手工指定：</p>
+
+<pre><code class="language-java">// 历史写法（Java 8 之前很常见）
+List&lt;String&gt; empty = Collections.&lt;String&gt;emptyList();
+
+// 注意语法：&lt;String&gt; 在方法名之前，紧跟在点号之后
+// Java 8 起有了目标类型推断，多数情况可以省：
+List&lt;String&gt; empty2 = Collections.emptyList();</code></pre>
+
+<p>真正需要手工见证的，是<strong>编译器拿不到类型线索</strong>的场景——也就是表达式没有「目标类型」可供反推的时候：</p>
+
+<pre><code class="language-java">// 语法：&lt;具体类型&gt; 写在方法名之前
+List&lt;String&gt; a = Collections.&lt;String&gt;emptyList();
+Map&lt;String, Integer&gt; b = Collections.&lt;String, Integer&gt;emptyMap();   // 多个类型参数
+
+// 目标类型推断（Java 8+）覆盖了绝大多数情况 —— 从左侧变量或方法形参反推
+List&lt;String&gt; c = Collections.emptyList();     // ✅ 从 c 的声明推断 T = String
+process(Collections.emptyList());              // ✅ 从 process(List&lt;String&gt;) 的形参推断
+
+// 一旦失去了赋值目标或形参上下文，推断只能退化为 Object
+System.out.println(Collections.emptyList());   // T = Object（这里恰好无所谓）
+Object any = Collections.emptyList();          // T = Object
+
+// 此时若确实需要特定类型，显式见证就是唯一的兜底手段
+List&lt;String&gt; d = Collections.&lt;String&gt;emptyList();</code></pre>
+
+<div class="box tip">
+  <span class="bt">顺带澄清一个常被混淆的点</span>
+  <p><code>list.toArray()</code> 返回 <code>Object[]</code> <strong>不是</strong>「类型推断失败」——它的签名本来就是这样。<code>Object[] toArray()</code> 和 <code>&lt;T&gt; T[] toArray(T[] a)</code> 是两个不同的重载，后者要求你传一个数组进去充当「类型载体」。这个惯用法（以及为什么是 <code>new T[0]</code> 而不是 <code>new T[size]</code>）在第 9 章会专门讲。</p>
+</div>
+
+<div class="box info">
+  <span class="bt">小结：本章需要形成肌肉记忆的四条</span>
+  <ul>
+    <li>泛型方法的 <code>&lt;T&gt;</code> 在<strong>返回类型之前</strong>，静态方法必须自己声明</li>
+    <li><code>Box&lt;String&gt;.class == Box&lt;Integer&gt;.class</code> —— 擦除的体现</li>
+    <li>Raw Type 会<strong>关闭</strong>泛型检查，是堆污染的入口</li>
+    <li>菱形 <code>&lt;&gt;</code> 是首选，显式类型见证是兜底手段</li>
+  </ul>
+</div>
+
+<!-- ================= 第 3 章 ================= -->
+<h2 id="ch3"><span class="num">03</span>类型擦除：Java 泛型的全部秘密</h2>
+
+<div class="box deep">
+  <span class="bt">一句话定义</span>
+  <p><strong>类型擦除（Type Erasure）</strong>：Java 编译器在把源码编译成字节码时，会<strong>丢弃所有泛型类型实参</strong>，把类型变量替换成它的边界（无界则替换为 <code>Object</code>），并在必要的地方插入强制类型转换。运行时，泛型「不存在」。</p>
+</div>
+
+<h3>3.1 擦除的四条规则</h3>
+
+<table>
+<thead><tr><th>#</th><th>源码中的类型</th><th>擦除后</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>1</td><td><code>List&lt;String&gt;</code>、<code>Box&lt;T&gt;</code></td><td><code>List</code>、<code>Box</code></td><td>泛型实参被抹掉，只剩原始类型</td></tr>
+<tr><td>2</td><td><code>T</code>（无界类型变量）</td><td><code>Object</code></td><td>没有边界就退化为 Object</td></tr>
+<tr><td>3</td><td><code>T extends Number</code></td><td><code>Number</code></td><td>擦除到<strong>最左侧边界</strong></td></tr>
+<tr><td>4</td><td><code>T extends Comparable&lt;T&gt; &amp; Serializable</code></td><td><code>Comparable</code></td><td>多边界时只保留第一个（可以是类或接口）</td></tr>
+</tbody>
+</table>
+
+<p>规则 4 有个重要推论，而且它直接呼应了第 1 章的主题——<strong>边界的顺序会影响擦除结果，而擦除结果决定了方法签名的二进制形态</strong>。</p>
+
+<div class="box deep">
+  <span class="bt">JDK 里最著名的一个「多此一举」：<code>Collections.max</code></span>
+  <p>翻 JDK 源码会发现 <code>Collections.max</code> 的签名长得很奇怪：</p>
+  <pre style="margin:8px 0 0"><code class="language-java">public static &lt;T extends Object &amp; Comparable&lt;? super T&gt;&gt; T max(Collection&lt;? extends T&gt; coll)</code></pre>
+  <p>第一个边界 <code>Object</code> 看起来完全多余——<code>Comparable</code> 本来就继承自 <code>Object</code>，写它干什么？答案是：<strong>为了二进制兼容</strong>。</p>
+  <ul>
+    <li>JDK 1.4 时代，<code>max</code> 的签名是 <code>public static Object max(Collection)</code></li>
+    <li>泛型化时如果只写 <code>&lt;T extends Comparable&lt;? super T&gt;&gt;</code>，擦除结果是 <code>Comparable</code>，返回类型描述符就从 <code>Ljava/lang/Object;</code> 变成了 <code>Ljava/lang/Comparable;</code></li>
+    <li>描述符一变，<strong>所有已经编译好的调用方字节码都会在链接阶段找不到方法</strong>，直接抛 <code>NoSuchMethodError</code></li>
+    <li>加上 <code>Object &amp;</code> 让擦除回退成 <code>Object</code>，二十年前编译的老字节码依然能正常链接</li>
+  </ul>
+  <p><strong>一个看似多余的写法，背后是整个 Java 生态的兼容包袱。</strong>这是「擦除决定一切」最精妙的注脚，也是 Joshua Bloch 在《Effective Java》里专门讨论这个签名的原因。</p>
+</div>
+
+<h3>3.2 字节码实证：亲眼看到擦除</h3>
+
+<p>光看规则不够，我们反编译看真相。准备两个文件：</p>
+
+<pre><code class="language-java">// Box.java
+public class Box&lt;T&gt; {
+    private T value;
+    public void set(T value) { this.value = value; }
+    public T get() { return value; }
+}</code></pre>
+
+<pre><code class="language-java">// Main.java
+public class Main {
+    public static void main(String[] args) {
+        Box&lt;String&gt; box = new Box&lt;&gt;();
+        box.set("hello");
+        String s = box.get();
+    }
+}</code></pre>
+
+<p>编译后执行 <code>javap -c -p Box</code>，看字段和方法签名：</p>
+
+<pre class="term"><code>public class Box&lt;T&gt; {
+  private T value;              <span style="color:#64748b">// 源码里的 T</span>
+
+  public Box();
+    Code:
+       0: aload_0
+       1: invokespecial #1      // Method java/lang/Object."&lt;init&gt;":()V
+       4: return
+
+  public void set(T);
+    Code:
+       0: aload_0
+       1: aload_1
+       2: putfield      #7      // Field value:Ljava/lang/Object;   ← 注意这里
+       5: return
+
+  public T get();
+    Code:
+       0: aload_0
+       1: getfield      #7      // Field value:Ljava/lang/Object;   ← 和这里
+       4: areturn
+}</code></pre>
+
+<p class="caption">Box 的字节码：字段描述符是 <code>Ljava/lang/Object;</code>，不是 <code>T</code>。T 已经蒸发了。</p>
+
+<p>再看调用方 <code>javap -c Main</code>：</p>
+
+<pre class="term"><code>public static void main(java.lang.String[]);
+  Code:
+     0: new           #7      // class Box
+     3: dup
+     4: invokespecial #9      // Method Box."&lt;init&gt;":()V
+     7: astore_1
+     8: aload_1
+     9: ldc           #10     // String hello
+    11: invokevirtual #12     // Method Box.set:(Ljava/lang/Object;)V
+    14: aload_1
+    15: invokevirtual #14     // Method Box.get:()Ljava/lang/Object;
+    18: checkcast     #16     // class java/lang/String    ← 编译器插入的强转！
+    21: astore_2
+    22: return</code></pre>
+
+<div class="box info">
+  <span class="bt">这段字节码揭示了全部真相</span>
+  <ul>
+    <li><code>Box.set</code> 的签名是 <code>(Ljava/lang/Object;)V</code> —— 参数类型在字节码里就是 Object</li>
+    <li><code>Box.get</code> 返回 <code>Object</code></li>
+    <li><strong>第 18 行的 <code>checkcast java/lang/String</code> 是编译器自动插入的</strong> —— 这就是「消除强制转换」的实现方式：不是真的不需要转换，而是<strong>转换从你的源码搬到了编译器生成的字节码里</strong></li>
+  </ul>
+  <p>所以泛型的准确表述是：<strong>用编译期的类型检查 + 自动插桩，换来了源码层面的类型安全和简洁</strong>。运行时该转的还是在转，只是你看不到了。</p>
+</div>
+
+<h3>3.3 由擦除导致的七大限制</h3>
+
+<p>这七条是大厂面试的绝对高频区，建议逐条背下「限制 + 原因 + 规避方案」三件套。</p>
+
+<h4>限制 1：不能实例化类型变量 —— <code>new T()</code> 非法</h4>
+
+<pre><code class="language-java">public class Factory&lt;T&gt; {
+    public T create() {
+        return new T();   // ❌ 编译错误：类型参数 T 不能被直接实例化
+        // 原因：擦除后这行代码变成 new Object()，编译器不知道要 new 什么
+    }
+}</code></pre>
+
+<p><strong>规避方案 A：传入 <code>Class&lt;T&gt;</code>（类型令牌）</strong></p>
+
+<pre><code class="language-java">public class Factory&lt;T&gt; {
+    private final Class&lt;T&gt; type;
+    public Factory(Class&lt;T&gt; type) { this.type = type; }
+
+    public T create() throws Exception {
+        return type.getDeclaredConstructor().newInstance();
+    }
+}
+
+Factory&lt;User&gt; f = new Factory&lt;&gt;(User.class);
+User u = f.create();</code></pre>
+
+<p><strong>规避方案 B：传入工厂函数（更现代，推荐）</strong></p>
+
+<pre><code class="language-java">public class Factory&lt;T&gt; {
+    private final Supplier&lt;T&gt; supplier;
+    public Factory(Supplier&lt;T&gt; supplier) { this.supplier = supplier; }
+    public T create() { return supplier.get(); }
+}
+
+Factory&lt;User&gt; f = new Factory&lt;&gt;(User::new);
+Factory&lt;List&lt;String&gt;&gt; fl = new Factory&lt;&gt;(ArrayList::new);</code></pre>
+
+<div class="box tip">
+  <span class="bt">方案 B 优于方案 A 的三个理由</span>
+  <ul>
+    <li>没有受检异常（<code>Class.newInstance()</code> 会抛 <code>InstantiationException</code> / <code>IllegalAccessException</code>）</li>
+    <li>支持无默认构造器的类（可以传 <code>() -&gt; new User("default")</code>）</li>
+    <li>支持带类型参数的构造（<code>ArrayList&lt;String&gt;::new</code> 这种方案 A 做不到，因为 <code>ArrayList&lt;String&gt;.class</code> 不合法）</li>
+  </ul>
+</div>
+
+<h4>限制 2：不能创建泛型数组 —— <code>new T[]</code> / <code>new List&lt;String&gt;[10]</code> 非法</h4>
+
+<pre><code class="language-java">List&lt;String&gt;[] arr = new List&lt;String&gt;[10];  // ❌ 编译错误：泛型数组创建
+T[] tArr = new T[10];                        // ❌ 编译错误</code></pre>
+
+<div class="box danger">
+  <span class="bt">为什么禁止？因为数组是「运行时类型检查」的</span>
+  <p>数组在运行时知道自己的元素类型（<code>String[].class</code> 真的存在）。而擦除后 <code>List&lt;String&gt;[]</code> 会变成 <code>List[]</code>，此时下面这段代码就会出问题：</p>
+  <pre style="margin:8px 0 0"><code class="language-java">// 假设允许（实际上不允许）
+List&lt;String&gt;[] lsa = new List&lt;String&gt;[10];
+Object[] oa = lsa;                    // 数组协变，合法
+List&lt;Integer&gt; li = new ArrayList&lt;&gt;();
+oa[0] = li;                           // 💥 编译期无法拦截（擦除后都是 List）
+String s = lsa[0].get(0);             // 💥 ClassCastException
+</code></pre>
+  <p>所以编译器干脆<strong>在编译期就禁止你创建泛型数组</strong>，从源头堵死这个漏洞。</p>
+</div>
+
+<p><strong>规避方案：用集合代替数组，或用通配符数组 + 强转</strong></p>
+
+<pre><code class="language-java">// 方案 A：用 List 代替数组（首选）
+List&lt;List&lt;String&gt;&gt; lists = new ArrayList&lt;&gt;();
+
+// 方案 B：确实需要数组时，用通配符 + 受控强转
+@SuppressWarnings("unchecked")
+List&lt;String&gt;[] arr = (List&lt;String&gt;[]) new List&lt;?&gt;[10];
+
+// 方案 C：泛型方法里的数组（借助反射）
+@SuppressWarnings("unchecked")
+public static &lt;T&gt; T[] newArray(Class&lt;T&gt; type, int size) {
+    return (T[]) java.lang.reflect.Array.newInstance(type, size);
+}</code></pre>
+
+<h4>限制 3：不能在 <code>instanceof</code> 中使用泛型实参</h4>
+
+<pre><code class="language-java">if (obj instanceof List&lt;String&gt;) { }   // ❌ 编译错误
+if (obj instanceof List&lt;?&gt;) { }         // ✅ 通配符可以（无意义但合法）
+if (obj instanceof List) { }            // ✅ Raw type 可以，但仍有警告</code></pre>
+
+<p>原因同样是擦除：运行时的 <code>obj.getClass()</code> 拿不到 <code>&lt;String&gt;</code>，这个判断无法执行。</p>
+
+<h4>限制 4：不能重载「擦除后签名相同」的方法</h4>
+
+<pre><code class="language-java">public class Holder {
+    public void print(List&lt;String&gt; list) { }   // ❌
+    public void print(List&lt;Integer&gt; list) { }  // ❌
+    // 编译错误：name clash: print(List&lt;Integer&gt;) and print(List&lt;String&gt;)
+    //          have the same erasure
+}</code></pre>
+
+<div class="box warn">
+  <span class="bt">一个容易踩的变体：泛型方法重载</span>
+  <pre style="margin:8px 0 0"><code class="language-java">public class Holder {
+    public &lt;T&gt; void print(List&lt;T&gt; list) { }
+    public void print(List&lt;Integer&gt; list) { }   // ❌ 同样冲突
+}</code></pre>
+  <p>因为 <code>&lt;T&gt; void print(List&lt;T&gt;)</code> 擦除后就是 <code>void print(List)</code>，与 <code>print(List&lt;Integer&gt;)</code> 的擦除签名一致。</p>
+</div>
+
+<h4>限制 5：类级别的类型参数不能用于静态成员</h4>
+
+<pre><code class="language-java">public class Box&lt;T&gt; {
+    private static T instance;                        // ❌ 编译错误
+    public static T getInstance() { return null; }    // ❌ 编译错误
+}</code></pre>
+
+<p><strong>原因</strong>：静态成员属于类，不属于某个实例。<code>Box&lt;String&gt;</code> 和 <code>Box&lt;Integer&gt;</code> 共享同一份静态区，那 <code>instance</code> 到底该是什么类型？<strong>无解，所以禁止</strong>。</p>
+
+<p>同时也解释了为什么 <code>Collection&lt;E&gt;</code> 里没有静态的泛型方法，而 <code>Collections</code>（独立的工具类）里有。</p>
+
+<h4>限制 6：不能是基本类型</h4>
+
+<pre><code class="language-java">List&lt;int&gt; list = new ArrayList&lt;int&gt;();   // ❌ 编译错误
+List&lt;Integer&gt; list2 = new ArrayList&lt;&gt;(); // ✅ 必须用包装类</code></pre>
+
+<div class="box warn">
+  <span class="bt">这条限制的代价比想象中大</span>
+  <p>因为擦除后是 <code>Object</code>，而 <code>Object</code> 装不下 <code>int</code>，所以只能用包装类：每次存取都要<strong>装箱/拆箱</strong>。在高频场景（比如每秒百万次的大数据量循环）下，这个开销是真实存在的：</p>
+  <pre style="margin:8px 0 0"><code class="language-java">// 写入时装箱：1000 万个 int 变成 1000 万个 Integer 对象
+List&lt;Integer&gt; list = new ArrayList&lt;&gt;();
+for (int i = 0; i &lt; 10_000_000; i++) {
+    list.add(i);              // 隐式装箱：Integer.valueOf(i)
+}
+
+// 读取时拆箱：每次 get 都要调一次 intValue()
+long sum = 0;
+for (int i = 0; i &lt; 10_000_000; i++) {
+    sum += list.get(i);       // 隐式拆箱：Integer.intValue()
+}
+
+// 对照：换成原始类型数组，装箱拆箱开销全部消失
+int[] arr = new int[10_000_000];</code></pre>
+  <p><strong>这是一道很好的面试延伸题</strong>：泛型不支持基本类型 → 用包装类 → 装箱开销 → 引出「为什么会有 <code>IntStream</code>、<code>ToIntFunction</code>、<code>mapToInt</code>」。这正是 JDK 8 引入原始类型特化流（primitive stream specialization）的动机之一。</p>
+</div>
+
+<h4>限制 7：不能捕获或抛出类型变量的异常</h4>
+
+<pre><code class="language-java">public &lt;T extends Exception&gt; void run() {
+    try {
+        // ...
+    } catch (T e) { }        // ❌ 编译错误：不能捕获类型变量
+}
+
+public class MyException&lt;T&gt; extends Throwable { }  // ❌ 泛型类不能继承 Throwable</code></pre>
+
+<p>泛型方法可以声明 <code>throws T</code>，但用处极其有限（调用方无法通过 catch 精确捕获）。实践中基本不用。</p>
+
+<h3>3.4 一张表总结七大限制</h3>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>限制</th><th>根本原因</th><th>工程规避方案</th><th>出现频率</th></tr></thead>
+<tbody>
+<tr><td>不能 <code>new T()</code></td><td>擦除后不知道 new 什么</td><td><code>Class&lt;T&gt;</code> 令牌 / <code>Supplier&lt;T&gt;</code></td><td>高</td></tr>
+<tr><td>不能 <code>new T[]</code></td><td>数组需运行时类型</td><td>用 <code>List</code> / <code>Array.newInstance</code></td><td>中</td></tr>
+<tr><td>不能 <code>instanceof List&lt;String&gt;</code></td><td>运行时无泛型实参</td><td>用 raw + 元素类型判断</td><td>中</td></tr>
+<tr><td>不能重载</td><td>擦除后签名相同</td><td>改方法名 / 加区分参数</td><td>低</td></tr>
+<tr><td>静态成员不能用类类型参数</td><td>静态区不随实例变化</td><td>静态方法自己声明 <code>&lt;E&gt;</code></td><td>低</td></tr>
+<tr><td>不支持基本类型</td><td>擦除到 Object</td><td>包装类 + 特化流 API</td><td>中</td></tr>
+<tr><td>不能 catch <code>T</code></td><td>异常表需精确类型</td><td>不这么做</td><td>极低</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>3.5 常见误解澄清（面试爱挖这些坑）</h3>
+
+<div class="grid g2">
+  <div class="card">
+    <h4>❌ 误解：运行时泛型信息全丢了</h4>
+    <p><strong>事实</strong>：类、方法、字段的<strong>声明处</strong>的泛型签名，以 <code>Signature</code> 属性的形式保留在 class 文件里（不是为了运行时使用，而是为了编译器在编译下游代码时能校验）。所以 <code>getGenericReturnType()</code> 能拿到 <code>List&lt;String&gt;</code>。丢失的只是<strong>对象实例上</strong>的实参。第 10 章细讲。</p>
+  </div>
+  <div class="card">
+    <h4>❌ 误解：<code>List</code> 就是 <code>List&lt;Object&gt;</code></h4>
+    <p><strong>事实</strong>：两者编译产物相同，但语义完全不同。<code>List&lt;Object&gt;</code> 参与泛型检查（只能加 Object 及其子类，但读出来都是 Object）；<code>List</code> 关闭所有检查（可以加任何东西，读出即炸）。</p>
+  </div>
+  <div class="card">
+    <h4>❌ 误解：泛型有运行时性能损耗</h4>
+    <p><strong>事实</strong>：泛型本身零运行时开销（就是 Object + checkcast）。真正的开销来自<strong>装箱/拆箱</strong>和<strong>checkcast 的类型检查</strong>。前者的锅是「不支持基本类型」，不是泛型的锅。</p>
+  </div>
+  <div class="card">
+    <h4>❌ 误解：擦除是「为了省字节码空间」</h4>
+    <p><strong>事实</strong>：压缩体积只是副产品。<strong>真正的第一动机是二进制向后兼容</strong>——让 Java 5 编译的泛型代码能和 Java 1.4 的已编译代码无缝互调。</p>
+  </div>
+</div>
+
+<!-- ================= 第 4 章 ================= -->
+<h2 id="ch4"><span class="num">04</span>桥接方法与字节码实证</h2>
+
+<p>这一章讲一个<strong>90% 的 Java 开发者不知道，但面试官一问就露底</strong>的知识点。它也是理解 AOP 代理、反射调用、MyBatis 方法解析等一系列生产问题的前提。</p>
+
+<h3>4.1 问题的起源：擦除破坏了「重写」</h3>
+
+<p>先看一段看起来很正常的代码：</p>
+
+<pre><code class="language-java">public class Node&lt;T&gt; {
+    private T data;
+    public void setData(T data) { this.data = data; }
+}
+
+public class MyNode extends Node&lt;Integer&gt; {
+    @Override
+    public void setData(Integer data) {     // 意图：重写父类方法
+        System.out.println("MyNode.setData: " + data);
+    }
+}</code></pre>
+
+<p>问题来了。擦除之后：</p>
+
+<ul>
+  <li><code>Node.setData</code> 的签名是 <code>setData(Object)</code></li>
+  <li><code>MyNode.setData</code> 的签名是 <code>setData(Integer)</code></li>
+</ul>
+
+<p><strong>参数类型不同，这是重载（overload），不是重写（override）！</strong> 如果照这个逻辑运行，多态就失效了：</p>
+
+<pre><code class="language-java">Node&lt;Integer&gt; node = new MyNode();
+node.setData(42);   // 期望调用 MyNode.setData，实际会调用 Node.setData —— 输出丢失</code></pre>
+
+<p>但现实中这段代码<strong>运行正常</strong>，输出确实是 <code>MyNode.setData: 42</code>。为什么？</p>
+
+<h3>4.2 答案：编译器偷偷生成了一个桥接方法</h3>
+
+<p><strong>桥接方法（Bridge Method）</strong>：编译器会在子类中自动合成一个与父类擦除后签名一致的方法，内部把调用<strong>转发</strong>给真正的实现。它是 <code>synthetic</code> 的（合成），在源码中不可见。</p>
+
+<p>反编译 <code>javap -c -p MyNode</code>：</p>
+
+<pre class="term"><code>public class MyNode extends Node&lt;java.lang.Integer&gt; {
+  public MyNode();
+    Code:
+       0: aload_0
+       1: invokespecial #1    // Method Node."&lt;init&gt;":()V
+       4: return
+
+  public void setData(java.lang.Integer);       <span style="color:#0d9488">// 你写的那个</span>
+    Code:
+       0: getstatic     #7    // Field java/lang/System.out:Ljava/io/PrintStream;
+       3: invokedynamic #13   // makeConcatWithConstants
+       8: invokevirtual #17   // PrintStream.println
+      11: return
+
+  public void setData(java.lang.Object);        <span style="color:#dc2626">// ★ 编译器合成的桥接方法</span>
+    Code:
+       0: aload_0
+       1: aload_1
+       2: checkcast     #23   // class java/lang/Integer   ← 强转
+       5: invokevirtual #25   // Method setData:(Ljava/lang/Integer;)V  ← 转发给真实现
+       8: return
+}</code></pre>
+
+<div class="box info">
+  <span class="bt">桥接方法做了什么</span>
+  <p><code>setData(Object)</code> 是编译器<strong>凭空造出来</strong>的，它有且仅有两个动作：</p>
+  <ol>
+    <li><code>checkcast Integer</code> —— 把 <code>Object</code> 转回 <code>Integer</code></li>
+    <li><code>invokevirtual setData(Integer)</code> —— 转发给真正的实现</li>
+  </ol>
+  <p>这样，通过父类引用 <code>Node&lt;Integer&gt;</code> 调用 <code>setData(Object)</code> 时，虚方法表会命中这个桥接方法，桥接方法再转给你的实现。<strong>多态被「修好」了</strong>。</p>
+</div>
+
+<h3>4.3 桥接方法的触发条件</h3>
+
+<table>
+<thead><tr><th>场景</th><th>是否生成桥接方法</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>子类重写泛型父类的泛型方法，且实参不同</td><td><span class="pill g">是</span></td><td>最常见，如上例</td></tr>
+<tr><td>实现泛型接口的泛型方法</td><td><span class="pill g">是</span></td><td><code>Comparable&lt;T&gt;</code>、<code>Comparator&lt;T&gt;</code> 的实现类都是</td></tr>
+<tr><td>协变返回类型</td><td><span class="pill g">是</span></td><td>子类返回更具体的类型时</td></tr>
+<tr><td>方法签名完全相同</td><td><span class="pill r">否</span></td><td>无需桥接</td></tr>
+<tr><td>非泛型类的重写</td><td><span class="pill r">否</span></td><td>擦除前后一致</td></tr>
+</tbody>
+</table>
+
+<p>一个高频实例——实现 <code>Comparable</code>：</p>
+
+<pre><code class="language-java">public class Person implements Comparable&lt;Person&gt; {
+    private int age;
+    @Override
+    public int compareTo(Person o) { return Integer.compare(this.age, o.age); }
+}</code></pre>
+
+<p>编译后 <code>Person</code> 里会有两个 <code>compareTo</code>：</p>
+
+<pre class="term"><code>public int compareTo(Person);            // 你写的
+public int compareTo(java.lang.Object);  // 桥接方法：checkcast Person 后转发</code></pre>
+
+<h3>4.4 桥接方法在生产环境引发的三个真实问题</h3>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-s">坑</span>问题 1：反射遍历方法时出现「重复方法」</div>
+  <div class="qa-b">
+    <pre><code class="language-java">for (Method m : MyNode.class.getDeclaredMethods()) {
+    System.out.println(m.getName() + " | synthetic=" + m.isSynthetic()
+        + " | bridge=" + m.isBridge());
+}
+// 输出：
+// setData | synthetic=false | bridge=false
+// setData | synthetic=true  | bridge=true    ← 凭空多出来的一个</code></pre>
+    <p><strong>后果</strong>：如果你用反射做「方法名 + 参数类型」的映射（比如自研的 RPC 框架、简易版 Spring MVC 参数绑定），桥接方法可能导致<strong>映射到错误的方法</strong>，或者出现「同一个方法被处理两次」。</p>
+    <p><strong>正确的过滤写法</strong>：</p>
+    <pre><code class="language-java">for (Method m : MyNode.class.getDeclaredMethods()) {
+    // 关键：过滤掉桥接方法和合成方法
+    if (m.isBridge() || m.isSynthetic()) continue;
+    // 或者：过滤掉参数类型是 Object 的「重载伪影」
+    // ...
+}</code></pre>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-s">坑</span>问题 2：Spring AOP 代理中桥接方法导致切面失效或重复执行</div>
+  <div class="qa-b">
+    <p>Spring AOP 基于 JDK 动态代理时，是通过接口方法匹配切点的。当代理对象调用泛型方法时，可能走到<strong>桥接方法</strong>上，而桥接方法的注解/参数信息与你源码里的方法不一致，导致：</p>
+    <ul>
+      <li>切点表达式 <code>execution(* com.x.Service.save(..))</code> 匹配不上（因为桥接方法所在类是合成类）</li>
+      <li>自定义注解被读不到（注解写在真方法上，桥接方法上没有）</li>
+      <li><strong>通知执行两次</strong>（真方法一次、桥接转发一次）</li>
+    </ul>
+    <p><strong>排查思路</strong>：在切面里打印 <code>MethodSignature.getMethod().isBridge()</code>；或改用 CGLIB 代理（通过子类继承，行为不同但仍需注意）。</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-m">坑</span>问题 3：MyBatis / JPA 泛型方法解析</div>
+  <div class="qa-b">
+    <p>MyBatis-Plus 的 <code>BaseMapper&lt;T&gt;</code> 需要通过反射知道 <code>T</code> 到底是什么（才能拼出表名）。它的做法是解析 <code>Mapper</code> 接口的<strong>泛型父接口签名</strong>：</p>
+    <pre><code class="language-java">// 简化版原理：从子接口往上找，直到找到带泛型实参的声明
+private Class&lt;?&gt; resolveEntityType(Class&lt;?&gt; mapperInterface) {
+    for (Type type : mapperInterface.getGenericInterfaces()) {
+        if (type instanceof ParameterizedType pt) {
+            Type arg = pt.getActualTypeArguments()[0];
+            if (arg instanceof Class&lt;?&gt; c) return c;
+        }
+    }
+    return null;
+}</code></pre>
+    <p>如果中间隔了多层泛型继承，<code>getActualTypeArguments()</code> 可能返回 <code>TypeVariable</code> 而不是 <code>Class</code>，此时需要<strong>递归向上解析边界</strong>——这正是 <code>ResolvableType</code> 这类工具存在的价值（第 12 章）。</p>
+  </div>
+</div>
+
+<div class="box tip">
+  <span class="bt">动手验证练习（强烈建议做一遍）</span>
+  <ol>
+    <li>写下 <code>Node&lt;T&gt;</code> 和 <code>MyNode</code> 两个类，编译</li>
+    <li>执行 <code>javap -c -p -v MyNode</code>，找 <code>ACC_BRIDGE</code> 和 <code>ACC_SYNTHETIC</code> 标志位</li>
+    <li>把子类方法的参数改成 <code>Object</code>（与父类擦除后的签名一致），桥接方法会消失——此时它已经是真正的重写，不需要转发</li>
+    <li>写一个 <code>implements Comparable&lt;Person&gt;</code>，观察 <code>compareTo(Object)</code> 的出现</li>
+  </ol>
+  <p>亲手做过一次，这个知识点就永久归你了。</p>
+</div>
+
+<!-- ================= 第 5 章 ================= -->
+<h2 id="ch5"><span class="num">05</span>型变：不变、协变、逆变与 PECS</h2>
+
+<p>这是泛型里<strong>最容易在面试中翻车</strong>的一章。<code>List&lt;Object&gt; = new ArrayList&lt;String&gt;()</code> 为什么不行？<code>? extends</code> 和 <code>? super</code> 怎么选？搞清这一章，你对 Java 类型系统的理解会超过大多数 8 年经验的人。</p>
+
+<h3>5.1 先看一个反直觉的事实：数组是协变的，泛型不是</h3>
+
+<pre><code class="language-java">// 数组：协变（covariant）—— 编译通过！
+Object[] objArr = new String[10];
+objArr[0] = 42;      // 💥 编译通过，但运行时 ArrayStoreException
+
+// 泛型：不变（invariant）—— 编译就拦住了
+List&lt;Object&gt; objList = new ArrayList&lt;String&gt;();  // ❌ 编译错误
+// 报错：不兼容的类型: ArrayList&lt;String&gt; 无法转换为 List&lt;Object&gt;</code></pre>
+
+<div class="box deep">
+  <span class="bt">为什么数组允许协变，而泛型不允许？</span>
+  <p><strong>数组协变是 Java 早期设计的一个「历史遗留缺陷」</strong>。它破坏类型安全（上面的 <code>ArrayStoreException</code> 就是代价），但 Java 1.0 为了支持 <code>Object[]</code> 接收任意数组、方便写通用排序/打印工具，就这么定了。</p>
+  <p>这个缺陷的代价是：<strong>每次数组写入都要在运行时做类型检查</strong>（这就是 <code>ArrayStoreException</code> 的由来）——性能损失是真实的。</p>
+  <p>Java 5 设计泛型时，设计者<strong>吸取了这个教训</strong>：与其在运行时检查，不如在编译期禁止。所以泛型选择了<strong>不变</strong>——更安全，零运行时开销。这也是为什么「泛型数组创建」被禁止（第 3 章限制 2）。</p>
+</div>
+
+<p><strong>核心洞察</strong>：泛型的不变不是「麻烦」，而是<strong>用编译期的严格换来了运行时的安全</strong>。</p>
+
+<h3>5.2 为什么 <code>List&lt;String&gt;</code> 不能当成 <code>List&lt;Object&gt;</code></h3>
+
+<p>假设允许，会发生什么：</p>
+
+<pre><code class="language-java">// 假设这行合法（实际不合法）
+List&lt;Object&gt; objs = new ArrayList&lt;String&gt;();
+objs.add(42);                 // Object 的列表，加个 Integer 看起来天经地义
+String s = (String) objs.get(0);   // 💥 而这个 String 列表里现在躺着 Integer</code></pre>
+
+<p><strong>类型安全被彻底破坏</strong>。这就是不变性的必要性。</p>
+
+<h3>5.3 通配符：在不变的基础上找回灵活性</h3>
+
+<p>不能协变，但很多场景确实需要「接受一堆不同类型的 List」。Java 的答案是<strong>通配符（Wildcard）</strong>。</p>
+
+<h4>上界通配符 <code>? extends T</code> —— 协变，只能读</h4>
+
+<pre><code class="language-java">// 接受 List&lt;Integer&gt;、List&lt;Double&gt;、List&lt;Number&gt;……
+public static double sum(List&lt;? extends Number&gt; list) {
+    double total = 0;
+    for (Number n : list) {      // ✅ 读出来一定是 Number（或其子类）
+        total += n.doubleValue();
+    }
+    return total;
+}
+
+sum(List.of(1, 2, 3));           // List&lt;Integer&gt;  ✅
+sum(List.of(1.5, 2.5));          // List&lt;Double&gt;   ✅
+sum(List.of(1L, 2L, 3L));        // List&lt;Long&gt;     ✅</code></pre>
+
+<div class="box danger">
+  <span class="bt">关键：<code>? extends</code> 只能读，不能写</span>
+  <pre style="margin:8px 0 0"><code class="language-java">List&lt;? extends Number&gt; list = new ArrayList&lt;Integer&gt;();
+Number n = list.get(0);   // ✅ 读：一定是 Number
+
+list.add(1);              // ❌ 编译错误
+list.add(1.5);            // ❌ 编译错误
+list.add(null);           // ✅ 只有 null 可以（null 是所有引用类型的成员）
+
+// 为什么不能 add？编译器知道 list 可能是 List&lt;Double&gt;、List&lt;Long&gt;...
+// 无论加什么类型，都可能是错的。所以干脆全部禁止。</code></pre>
+</div>
+
+<h4>下界通配符 <code>? super T</code> —— 逆变，只能写</h4>
+
+<pre><code class="language-java">// 接受 List&lt;Integer&gt;、List&lt;Number&gt;、List&lt;Object&gt;
+public static void fill(List&lt;? super Integer&gt; list) {
+    list.add(1);           // ✅ 写：无论底层是 Integer/Number/Object 的列表，加 Integer 都合法
+    list.add(2);
+
+    // Integer x = list.get(0);  // ❌ 读不了！只能读成 Object
+    Object o = list.get(0);      // ✅ 只能当成 Object
+}
+
+List&lt;Integer&gt; ints = new ArrayList&lt;&gt;();
+List&lt;Number&gt; nums = new ArrayList&lt;&gt;();
+List&lt;Object&gt; objs = new ArrayList&lt;&gt;();
+
+fill(ints);   // ✅
+fill(nums);   // ✅
+fill(objs);   // ✅</code></pre>
+
+<h4>无界通配符 <code>?</code></h4>
+
+<pre><code class="language-java">public static int size(List&lt;?&gt; list) {   // 只想知道长度，不关心元素类型
+    return list.size();
+}</code></pre>
+
+<div class="box warn">
+  <span class="bt"><code>List&lt;?&gt;</code> 和 <code>List&lt;Object&gt;</code> 的区别（高频考点）</span>
+  <div class="tbl-wrap" style="margin:8px 0">
+  <table>
+  <thead><tr><th>操作</th><th><code>List&lt;?&gt;</code></th><th><code>List&lt;Object&gt;</code></th></tr></thead>
+  <tbody>
+  <tr><td>接收 <code>List&lt;String&gt;</code></td><td>✅ 可以</td><td>❌ 不可以</td></tr>
+  <tr><td><code>get()</code></td><td>返回 <code>Object</code></td><td>返回 <code>Object</code></td></tr>
+  <tr><td><code>add(任意对象)</code></td><td>❌ 只能 <code>add(null)</code></td><td>✅ 可以 add 任何东西</td></tr>
+  <tr><td>语义</td><td>「某种未知类型的列表」</td><td>「元素类型明确是 Object 的列表」</td></tr>
+  </tbody>
+  </table>
+  </div>
+  <p><strong>一句话记忆</strong>：<code>List&lt;?&gt;</code> 是<strong>只读视图</strong>，<code>List&lt;Object&gt;</code> 是<strong>明确的万能容器</strong>。方法参数如果只想读，用 <code>List&lt;?&gt;</code>；确实要往里塞各种类型，才用 <code>List&lt;Object&gt;</code>。</p>
+</div>
+
+<h3>5.4 PECS 原则：一劳永逸的选择口诀</h3>
+
+<div class="box deep">
+  <span class="bt">PECS —— Producer Extends, Consumer Super</span>
+  <p>来自 Joshua Bloch《Effective Java》Item 31，是泛型通配符的<strong>唯一实用准则</strong>：</p>
+  <ul>
+    <li>参数是<strong>生产者</strong>（你从它里面<strong>读</strong>数据）→ 用 <code>? extends T</code></li>
+    <li>参数是<strong>消费者</strong>（你往它里面<strong>写</strong>数据）→ 用 <code>? super T</code></li>
+    <li>既是生产者又是消费者 → 别用通配符，老老实实用 <code>&lt;T&gt;</code></li>
+  </ul>
+  <p><strong>直觉记忆法</strong>：<code>extends</code> 向上是「只出」（产出），<code>super</code> 向下是「只进」（消耗）。出 extends，进 super。</p>
+</div>
+
+<p>看 JDK 源码怎么用这个原则：</p>
+
+<pre><code class="language-java">// java.util.Collections
+// 1. copy：从 src 读（生产者），往 dest 写（消费者）
+public static &lt;T&gt; void copy(List&lt;? super T&gt; dest,    // Consumer → super
+                           List&lt;? extends T&gt; src) {  // Producer → extends
+    // ...
+}
+
+// 2. max：从 coll 读，需要比较 → 生产者
+public static &lt;T extends Object &amp; Comparable&lt;? super T&gt;&gt; T max(Collection&lt;? extends T&gt; coll) {
+    // ...
+}
+
+// 3. java.util.stream.Stream
+// forEach：消耗元素 → Consumer&lt;? super T&gt;
+void forEach(Consumer&lt;? super T&gt; action);
+
+// map：从 stream 读（生产者），产出 R
+&lt;R&gt; Stream&lt;R&gt; map(Function&lt;? super T, ? extends R&gt; mapper);</code></pre>
+
+<div class="box tip">
+  <span class="bt">为什么 <code>Stream.map</code> 的参数是 <code>Function&lt;? super T, ? extends R&gt;</code></span>
+  <p>拆开看非常清楚：</p>
+  <ul>
+    <li><code>? super T</code>：这个函数<strong>消费</strong> T 类型的元素，所以参数位置用 <code>super</code></li>
+    <li><code>? extends R</code>：这个函数<strong>产出</strong> R 类型的结果，所以返回位置用 <code>extends</code></li>
+  </ul>
+  <p><strong>一个 <code>Function</code> 的入参是「消费者」，返回是「生产者」</strong>。记住这个模型，JDK 里所有函数式接口的通配符你都能自己推导出来，不用背。</p>
+</div>
+
+<h3>5.5 型变对照图</h3>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>写法</th><th>型变</th><th>能读</th><th>能写</th><th>典型参数位置</th></tr></thead>
+<tbody>
+<tr><td><code>List&lt;T&gt;</code></td><td>不变</td><td>✅ 读成 T</td><td>✅ 写 T</td><td>读写都要用</td></tr>
+<tr><td><code>List&lt;? extends T&gt;</code></td><td>协变</td><td>✅ 读成 T</td><td>❌ 只能 null</td><td>数据源、入参只读</td></tr>
+<tr><td><code>List&lt;? super T&gt;</code></td><td>逆变</td><td>⚠️ 只能读成 Object</td><td>✅ 写 T 及其子类</td><td>结果收集器、回调</td></tr>
+<tr><td><code>List&lt;?&gt;</code></td><td>无界</td><td>⚠️ 读成 Object</td><td>❌ 只能 null</td><td>只做 size/clear/迭代</td></tr>
+<tr><td><code>List&lt;Object&gt;</code></td><td>不变</td><td>✅ 读成 Object</td><td>✅ 写任何引用类型</td><td>真正的万能容器</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>5.6 通配符捕获（Wildcard Capture）：一个巧妙的小坑</h3>
+
+<p>看这段代码，直觉上应该能编译，实际上不行：</p>
+
+<pre><code class="language-java">// 看似合理的写法
+public static void swap(List&lt;?&gt; list, int i, int j) {
+    Object tmp = list.get(i);
+    list.set(i, list.get(j));    // ❌ 编译错误
+    list.set(j, tmp);            // ❌ 编译错误
+}</code></pre>
+
+<div class="box warn">
+  <span class="bt">编译器报错：capture of ? 类型不匹配</span>
+  <p>原因：<code>List&lt;?&gt;</code> 中每个 <code>?</code> 是一个<strong>未知但固定</strong>的类型（叫 capture），编译器无法证明 <code>list.get(j)</code> 拿到的元素与 <code>list.set(i, ...)</code> 期望的元素是同一类型。虽然它们显然来自同一个 list，但编译器的类型系统不这么推理。</p>
+  <p><strong>解决方案：让泛型方法「捕获」这个类型</strong></p>
+  <pre style="margin:8px 0 0"><code class="language-java">// 公开 API 保持通配符，内部用泛型方法捕获
+public static void swap(List&lt;?&gt; list, int i, int j) {
+    swapHelper(list, i, j);      // 调用时，? 被捕获为某个具体的 E
+}
+
+private static &lt;E&gt; void swapHelper(List&lt;E&gt; list, int i, int j) {
+    E tmp = list.get(i);         // 现在 E 是明确的类型，编译通过
+    list.set(i, list.get(j));
+    list.set(j, tmp);
+}</code></pre>
+  <p><strong>这就是 JDK 里 <code>Collections.swap</code> 的实际实现方式。</strong>能说出「通配符捕获」并给出这个解法，是很强的加分项。</p>
+</div>
+
+<h3>5.7 跨语言视角（可选阅读，用来拔高）</h3>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>语言</th><th>声明处型变</th><th>使用处型变</th><th>特点</th></tr></thead>
+<tbody>
+<tr><td><strong>Java</strong></td><td>无</td><td><code>? extends</code> / <code>? super</code></td><td>使用处型变（use-site variance），灵活但冗长</td></tr>
+<tr><td><strong>C#</strong></td><td>支持 <code>out T</code> / <code>in T</code></td><td>无</td><td>声明处型变（declaration-site），类型定义时定好</td></tr>
+<tr><td><strong>Kotlin</strong></td><td><code>out T</code> / <code>in T</code></td><td><code>out</code> / <code>in</code> 投影</td><td>两者都支持，还做了「声明处型变 + 使用时覆盖」</td></tr>
+<tr><td><strong>Scala</strong></td><td><code>+T</code> / <code>-T</code></td><td>存在类型</td><td>声明处型变，理论最完整</td></tr>
+</tbody>
+</table>
+</div>
+
+<p class="caption">表 5-1：主流语言的型变设计。Java 选择「使用处型变」是历史包袱使然——如果是声明处型变，已有 API 都得改签名，破坏兼容。</p>
+
+<div class="box info">
+  <span class="bt">给面试的一句总结</span>
+  <p>「泛型默认不变是<strong>为了类型安全</strong>（对比数组协变带来的 <code>ArrayStoreException</code>）。当需要灵活性时用通配符引入受控型变：<strong>生产者用 <code>? extends</code>（只读）、消费者用 <code>? super</code>（只写），也就是 PECS 原则</strong>。JDK 的 <code>Collections.copy</code> 和 <code>Stream.map</code> 都是这个原则的标准范例。」</p>
+</div>
+
+<!-- ================= 第 6 章 ================= -->
+<h2 id="ch6"><span class="num">06</span>通配符 vs 类型参数：何时用哪个</h2>
+
+<p>这是一个「写 API 时才会遇到，但一遇到就纠结」的问题。<code>&lt;T&gt;</code> 和 <code>?</code> 看起来都能表达「某种类型」，但适用场景截然不同。</p>
+
+<h3>6.1 判断准则：类型参数只出现一次 → 用通配符</h3>
+
+<div class="box deep">
+  <span class="bt">《Effective Java》Item 31 的核心结论</span>
+  <p><strong>如果类型参数在方法签名中只出现一次，就把它替换成通配符。</strong></p>
+  <p>理由：类型参数的作用是<strong>在多个位置之间建立类型约束</strong>。如果它只出现一次，那这个「约束」根本不存在——它只是被用了一次而已，而通配符能表达得更简洁、且能给调用方更多灵活性。</p>
+</div>
+
+<pre><code class="language-java">// ❌ 不好：T 只出现了一次
+public static &lt;T&gt; void printAll(List&lt;T&gt; list) {
+    for (T t : list) System.out.println(t);
+}
+
+// ✅ 更好：用通配符
+public static void printAll(List&lt;?&gt; list) {
+    for (Object t : list) System.out.println(t);
+}</code></pre>
+
+<p>好处在哪里？因为 <code>&lt;T&gt;</code> 版本里，调用方<strong>必须</strong>提供一个具体类型；而 <code>List&lt;?&gt;</code> 版本可以接受任何列表。<strong>API 的约束更弱，意味着适用面更广</strong>。</p>
+
+<h3>6.2 什么时候必须用 <code>&lt;T&gt;</code>：约束需要跨位置传递</h3>
+
+<pre><code class="language-java">// T 出现 3 次：参数、参数、返回值 —— 必须建立它们之间的关系
+public static &lt;T&gt; T pickOne(List&lt;T&gt; from, List&lt;T&gt; to) {
+    T item = from.get(0);
+    to.add(item);       // 语义要求：放进 to 的东西，必须是从 from 里取的
+    return item;
+}
+
+// 用通配符无法表达这个约束：
+// public static Object pickOne(List&lt;?&gt; from, List&lt;?&gt; to) —— 丢失了类型关联</code></pre>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>判断条件</th><th>用 <code>&lt;T&gt;</code></th><th>用 <code>?</code></th></tr></thead>
+<tbody>
+<tr><td>类型在多个参数/返回值间建立关联</td><td><span class="pill g">是</span></td><td><span class="pill r">否</span></td></tr>
+<tr><td>类型只在一个位置出现</td><td><span class="pill r">否</span></td><td><span class="pill g">是</span></td></tr>
+<tr><td>需要往容器里写数据（消费者）</td><td><span class="pill g">是</span></td><td><code>? super T</code> 也可</td></tr>
+<tr><td>需要从容器里读数据（生产者）</td><td><span class="pill g">是</span></td><td><code>? extends T</code> 也可</td></tr>
+<tr><td>需要 <code>new T()</code> / 调用 T 的方法</td><td><span class="pill g">必须</span></td><td><span class="pill r">做不到</span></td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>6.3 常见的重构对比</h3>
+
+<pre><code class="language-java">// ------- ❌ 类型参数版（T 只用一次） -------
+public static &lt;T&gt; void addAll(List&lt;T&gt; dest, Iterable&lt;T&gt; src) { ... }
+
+// ------- ✅ 通配符版（更灵活） -------
+public static &lt;T&gt; void addAll(List&lt;? super T&gt; dest, Iterable&lt;? extends T&gt; src) {
+    // T 仍然需要，因为它连接了 dest 和 src
+    // 但两侧都用通配符放宽了接受的类型范围
+}</code></pre>
+
+<p>这段就是 <code>Collections.addAll</code> 的真实形态。注意它<strong>同时用了 <code>&lt;T&gt;</code> 和通配符</strong>——类型参数负责「建立关系」，通配符负责「放宽边界」。两者不是二选一，而是配合使用。</p>
+
+<div class="box tip">
+  <span class="bt">实用重构检查清单</span>
+  <ol>
+    <li>看看方法签名里的类型参数，<strong>数一下出现次数</strong></li>
+    <li>只出现一次 → 先尝试换成 <code>?</code>，能编译通过就用通配符</li>
+    <li>出现多次 → 保留 <code>&lt;T&gt;</code>，但检查每个位置是否能用 <code>? extends</code>/<code>? super</code> 放宽</li>
+    <li>替换后跑一遍单测——如果调用方反而需要更多强转，说明改错了方向</li>
+  </ol>
+</div>
+
+<!-- ================= 第 7 章 ================= -->
+<h2 id="ch7"><span class="num">07</span>边界与递归类型参数（F-bounded）</h2>
+
+<h3>7.1 上界（Upper Bound）</h3>
+
+<pre><code class="language-java">// 限定 T 必须是 Number 及其子类
+public static &lt;T extends Number&gt; double sum(List&lt;T&gt; list) {
+    double total = 0;
+    for (T t : list) {
+        total += t.doubleValue();   // ✅ 因为 T 是 Number，可以调用 Number 的方法
+    }
+    return total;
+}</code></pre>
+
+<p><strong>上界的真正价值</strong>：它不只是「限制」，更是<strong>授权</strong>——因为 <code>T extends Number</code>，编译器才允许你在方法体里把 <code>T</code> 当作 <code>Number</code> 使用。没有边界，<code>T</code> 就是 <code>Object</code>，什么方法都调不了。</p>
+
+<h3>7.2 多边界（Intersection Type）</h3>
+
+<pre><code class="language-java">// 语法：T extends 类 &amp; 接口1 &amp; 接口2
+public static &lt;T extends Number &amp; Comparable&lt;T&gt; &amp; Serializable&gt; T max(List&lt;T&gt; list) {
+    T m = list.get(0);
+    for (T t : list) {
+        if (t.compareTo(m) &gt; 0) m = t;   // 需要 Comparable
+    }
+    return m;                             // 需要 Serializable 才能序列化返回
+}</code></pre>
+
+<div class="box warn">
+  <span class="bt">多边界的硬性规则</span>
+  <ul>
+    <li>如果有类类型，<strong>类必须放在第一项</strong>：<code>&lt;T extends Number &amp; Serializable&gt;</code> ✅；<code>&lt;T extends Serializable &amp; Number&gt;</code> ❌</li>
+    <li>擦除时只保留第一个边界（所以顺序影响字节码里 T 的实际类型）</li>
+    <li>除了第一个，其余都必须是接口</li>
+  </ul>
+</div>
+
+<h3>7.3 递归类型参数（F-bounded Polymorphism）</h3>
+
+<p>这是泛型里最「烧脑」也最优雅的用法。定义是：<strong>类型参数受自身约束</strong>，写作 <code>T extends Xxx&lt;T&gt;</code>。</p>
+
+<h4>案例 1：JDK 里的 <code>Enum</code></h4>
+
+<pre><code class="language-java">public abstract class Enum&lt;E extends Enum&lt;E&gt;&gt; implements Comparable&lt;E&gt;, Serializable {
+    public final int compareTo(E o) { ... }
+    // ...
+}</code></pre>
+
+<div class="box deep">
+  <span class="bt">为什么要这么写？拆解一下</span>
+  <p>目标是：让 <code>Status.ACTIVE.compareTo(Status.INACTIVE)</code> 里的参数<strong>必须是同一个枚举类型</strong>，而不能是别的枚举。</p>
+  <ul>
+    <li>如果写成 <code>Enum implements Comparable&lt;Enum&gt;</code> → <code>compareTo</code> 接受任何 <code>Enum</code>，任意两个枚举都能比，类型不安全</li>
+    <li>写成 <code>Enum&lt;E&gt; implements Comparable&lt;E&gt;</code> → <code>E</code> 是谁？不知道</li>
+    <li>写成 <code>Enum&lt;E extends Enum&lt;E&gt;&gt;</code> → <strong>「E 是一个枚举，且这个枚举的同类就是 E 自己」</strong>，约束闭环了</li>
+  </ul>
+  <p>于是 <code>class Status extends Enum&lt;Status&gt;</code>，<code>compareTo</code> 的参数就被钉死为 <code>Status</code>。</p>
+</div>
+
+<h4>案例 2：<code>Comparable</code> / <code>Comparator</code> 的正确姿势</h4>
+
+<pre><code class="language-java">// ❌ 错误：一个 Student 竟然能和 Teacher 比较
+public class Student implements Comparable {
+    public int compareTo(Object o) { ... }
+}
+
+// ❌ 半对：编译能过，但语义没约束住
+public class Student implements Comparable&lt;Object&gt; { ... }
+
+// ✅ 正确：只能和 Student 比
+public class Student implements Comparable&lt;Student&gt; {
+    @Override
+    public int compareTo(Student o) { return Integer.compare(this.id, o.id); }
+}</code></pre>
+
+<h4>案例 3：自限定泛型 Builder（大厂里很常见）</h4>
+
+<p>这是 F-bounded 最有工程价值的应用场景——<strong>链路式 API 中的继承</strong>：</p>
+
+<pre><code class="language-java">// 基础 Builder
+public abstract class BaseBuilder&lt;T, B extends BaseBuilder&lt;T, B&gt;&gt; {
+    protected String id;
+    protected long createTime;
+
+    @SuppressWarnings("unchecked")
+    protected B self() { return (B) this; }   // ★ 关键：把自己转成子类型返回
+
+    public B id(String id) { this.id = id; return self(); }
+    public B createTime(long t) { this.createTime = t; return self(); }
+
+    public abstract T build();
+}
+
+// 子类 Builder
+public class UserBuilder extends BaseBuilder&lt;User, UserBuilder&gt; {
+    private String name;
+
+    public UserBuilder name(String name) { this.name = name; return this; }
+
+    @Override
+    public User build() {
+        User u = new User();
+        u.setId(id); u.setName(name); u.setCreateTime(createTime);
+        return u;
+    }
+}
+
+// 使用：所有方法都能链式调用，且顺序随便换
+User user = new UserBuilder()
+        .id("U001")
+        .name("张三")
+        .createTime(System.currentTimeMillis())
+        .build();</code></pre>
+
+<div class="box tip">
+  <span class="bt">没有 F-bounded 会怎样？</span>
+  <pre style="margin:8px 0 0"><code class="language-java">// 如果 BaseBuilder 只写 &lt;T&gt;，那么 id() 只能返回 BaseBuilder&lt;T&gt;
+// 链式调用到这里就断了：
+new UserBuilder().id("U001").name("张三");
+//                 ^^^^^^^^^^^^ 返回 BaseBuilder，没有 name() 方法！
+</code></pre>
+  <p><strong>F-bounded 的核心作用：让父类的方法返回「子类自己的类型」，从而保住链式调用的类型流。</strong> 这一招在 Spring Security 的配置 DSL、各类 RPC 客户端 Builder、领域模型构造器里极为常见。</p>
+</div>
+
+<h4>案例 4：类型安全的「自我比较」与树结构</h4>
+
+<pre><code class="language-java">// 保证树的节点只能包含与自己同类型的子节点
+public abstract class TreeNode&lt;T extends TreeNode&lt;T&gt;&gt; {
+    protected List&lt;T&gt; children = new ArrayList&lt;&gt;();
+
+    public void addChild(T child) { children.add(child); }   // 类型安全
+
+    public abstract T self();
+}
+
+public class DeptNode extends TreeNode&lt;DeptNode&gt; {
+    @Override public DeptNode self() { return this; }
+}
+
+DeptNode root = new DeptNode();
+root.addChild(new DeptNode());     // ✅
+// root.addChild(new UserNode());  // ❌ 编译错误，做到「同类型」约束</code></pre>
+
+<h3>7.4 小结：F-bounded 的识别特征</h3>
+
+<p>看到 <code>&lt;T extends SomeClass&lt;T&gt;&gt;</code> 这种「自己约束自己」的写法，就是 F-bounded。它的三大用途：</p>
+
+<ol>
+  <li><strong>类型安全的比较</strong>（<code>Enum</code>、<code>Comparable</code>）—— 保证只和同类比</li>
+  <li><strong>链式 Builder 的继承</strong> —— 保证父类方法返回子类型</li>
+  <li><strong>同构容器</strong> —— 保证容器只装同类元素</li>
+</ol>
+
+<!-- ================= 第 8 章 ================= -->
+<h2 id="ch8"><span class="num">08</span>类型推断与语言演进（Java 5 → 25）</h2>
+
+<p>这一章讲「Java 泛型越写越省事」的演进史。它本身不太考，但<strong>面试官常用来判断你对 Java 的理解停留在哪个年代</strong>。</p>
+
+<h3>8.1 类型推断的四个层次</h3>
+
+<pre><code class="language-java">// 层次 1：显式声明一切（Java 5 唯一选择）
+Map&lt;String, List&lt;Integer&gt;&gt; map = new HashMap&lt;String, List&lt;Integer&gt;&gt;();
+
+// 层次 2：菱形运算符（Java 7）—— 从左侧推断右侧
+Map&lt;String, List&lt;Integer&gt;&gt; map = new HashMap&lt;&gt;();
+
+// 层次 3：目标类型推断（Java 8）—— 从方法参数位置推断
+List&lt;String&gt; list = Collections.emptyList();          // 从左侧变量类型推断
+Map&lt;String, Integer&gt; m = Collections.emptyMap();
+Collections.sort(list, Comparator.naturalOrder());     // 从参数位置推断
+
+// 层次 4：var（Java 10）—— 局部变量类型推断
+var users = new HashMap&lt;String, List&lt;Integer&gt;&gt;();     // 但仍能从右侧推断
+</code></pre>
+
+<h3>8.2 完整演进时间线</h3>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>版本</th><th>年份</th><th>泛型相关特性</th><th>对日常编码的影响</th></tr></thead>
+<tbody>
+<tr><td>Java 5</td><td>2004</td><td><strong>泛型诞生</strong>、自动装箱、可变参数、增强 for</td><td>历史性变革</td></tr>
+<tr><td>Java 7</td><td>2011</td><td><strong>菱形运算符 <code>&lt;&gt;</code></strong>、多 catch</td><td>代码明显变短</td></tr>
+<tr><td>Java 8</td><td>2014</td><td><strong>目标类型推断</strong>、Lambda、方法引用、Stream</td><td>泛型与函数式结合，写法质变</td></tr>
+<tr><td>Java 9</td><td>2017</td><td>匿名内部类支持菱形</td><td>小改进</td></tr>
+<tr><td>Java 10</td><td>2018</td><td><code>var</code> 局部变量类型推断</td><td>争议较大，团队规范决定</td></tr>
+<tr><td>Java 11</td><td>2018</td><td>Lambda 参数支持 <code>var</code>（可加注解）</td><td>注解场景有用</td></tr>
+<tr><td>Java 16</td><td>2021</td><td><code>instanceof</code> 模式匹配</td><td>减少强转样板代码</td></tr>
+<tr><td>Java 17</td><td>2021</td><td>密封类（sealed）、Record</td><td>与泛型结合表达力更强</td></tr>
+<tr><td>Java 21</td><td>2023</td><td>Record 模式、模式匹配 switch</td><td>代数数据类型风格</td></tr>
+<tr><td>Java 25</td><td>2025</td><td>无泛型语法变化；Valhalla 仍在推进中</td><td>擦除语义保持不变</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>8.3 两个值得注意的细节</h3>
+
+<h4>细节 1：目标类型推断（Target Typing）的威力</h4>
+
+<pre><code class="language-java">// Java 8 前，这种写法编译不过，必须写 Collections.&lt;String&gt;emptyList()
+List&lt;String&gt; list = Collections.emptyList();      // ✅ Java 8+
+
+// 更典型的：从方法参数推断
+public void process(List&lt;String&gt; data) { }
+
+process(Collections.emptyList());                 // ✅ T 从 process 的形参推断为 String
+
+// 泛型方法链中也能传递推断上下文
+Map&lt;String, List&lt;User&gt;&gt; result = users.stream()
+        .collect(Collectors.groupingBy(User::getDept));   // 复杂的推断链</code></pre>
+
+<h4>细节 2：<code>var</code> 与泛型（一个真实争议）</h4>
+
+<div class="box warn">
+  <span class="bt">为什么很多大厂规范禁用或限制 <code>var</code>？</span>
+  <pre style="margin:8px 0 0"><code class="language-java">// var 在泛型场景下会「藏起」关键类型信息
+var list = new ArrayList&lt;&gt;();          // 💀 推断为 ArrayList&lt;Object&gt;！
+list.add("a");
+list.add(123);                          // 编译通过，类型安全丢了
+
+// 对比：显式写法会立刻报错
+List&lt;String&gt; list2 = new ArrayList&lt;&gt;();  // 正确推断为 ArrayList&lt;String&gt;
+list2.add(123);                          // ❌ 编译错误，符合预期
+</code></pre>
+  <p><strong>这是 <code>var</code> 最危险的用法</strong>：在「右侧无法提供类型信息」时用 <code>var</code>，会让泛型实参退化为 <code>Object</code>，悄悄破坏类型安全。正确做法是 <code>var list = new ArrayList&lt;String&gt;();</code>（右侧显式给出）。</p>
+  <p><strong>面试可复用表述</strong>：「<code>var</code> 是局部变量类型推断，它不改变类型系统。风险在于当右侧类型信息不足时（如 <code>new ArrayList&lt;&gt;()</code>）会推断成 <code>ArrayList&lt;Object&gt;</code>，反而丢掉了泛型的类型安全。所以规范里通常要求 <code>var</code> 右侧必须显式带上泛型实参。」</p>
+</div>
+
+<h3>8.4 Record 与泛型：新语法，老规则（Java 16+）</h3>
+
+<p>Record 是 Java 16 正式引入的不可变数据载体。它和泛型组合得非常自然——但要注意：<strong>擦除规则没有任何改变</strong>。</p>
+
+<pre><code class="language-java">// Record 完全可以泛型化
+public record Page&lt;T&gt;(List&lt;T&gt; records, long total, int pageNum, int pageSize) {
+
+    // 紧凑构造器：泛型参数同样可以做校验和防御性拷贝
+    public Page {
+        if (pageNum &lt; 1) throw new IllegalArgumentException("页码必须从 1 开始");
+        records = (records == null) ? List.of() : List.copyOf(records);
+    }
+
+    public boolean isEmpty() { return records.isEmpty(); }
+
+    // 泛型方法照样可以定义 —— 而且写法比传统类更干净
+    public &lt;R&gt; Page&lt;R&gt; map(Function&lt;? super T, ? extends R&gt; mapper) {
+        return new Page&lt;&gt;(records.stream().map(mapper).toList(),
+                          total, pageNum, pageSize);
+    }
+}
+
+// 使用：不可变载体 + 泛型转换，类型安全且零样板代码
+Page&lt;User&gt; userPage = new Page&lt;&gt;(users, 100, 1, 20);
+Page&lt;UserVO&gt; voPage = userPage.map(UserConverter::toVO);</code></pre>
+
+<div class="box warn">
+  <span class="bt">Record 不会「带来」运行时类型信息</span>
+  <p>一个常见误解是：record 是"更具体的类型"，所以能拿到泛型实参。这是错的——record 编译后就是普通类，同样受擦除约束。</p>
+  <pre style="margin:8px 0 0"><code class="language-java">Page&lt;User&gt; p = new Page&lt;&gt;(users, 100, 1, 20);
+
+// ❌ 拿不到 User —— 实例上没有任何泛型信息
+// p.getClass() 就是 Page.class，和 Page&lt;Order&gt; 的实例是同一个类
+
+// ✅ 要拿类型，仍然只能靠「声明处」的信息 —— record 的组件也是一种声明
+TypeVariable&lt;?&gt;[] tv = Page.class.getTypeParameters();      // [T]
+
+// ✅ 反序列化同样躲不开 TypeReference
+Page&lt;User&gt; page = objectMapper.readValue(json,
+        new TypeReference&lt;Page&lt;User&gt;&gt;() {});</code></pre>
+</div>
+
+<p><strong>一个实用的工程观察</strong>：record + 泛型是写「不可变传输对象」的现代组合，<code>map</code> 这类转换方法比传统 DTO 干净得多。但不要因为语法新就以为它绕过了擦除——<strong>所有泛型的限制在这里一条都不少</strong>，这是 Java 类型系统的地基，语言语法层的新特性不会改变它。</p>
+
+<!-- ================= 第 9 章 ================= -->
+<h2 id="ch9"><span class="num">09</span>泛型数组、可变参数与堆污染</h2>
+
+<h3>9.1 堆污染（Heap Pollution）的本质</h3>
+
+<div class="box deep">
+  <span class="bt">定义</span>
+  <p><strong>堆污染</strong>：一个<strong>参数化类型</strong>的变量，指向了一个<strong>不是该参数化类型</strong>的对象，导致运行时出现意料之外的类型错误。</p>
+  <p>它不是「内存泄漏」那种污染，而是<strong>类型系统被欺骗</strong>——编译器以为容器里是 String，实际躺着 Integer。</p>
+</div>
+
+<p>三种产生堆污染的途径：</p>
+
+<h4>途径 1：Raw Type 混用（最常见）</h4>
+
+<pre><code class="language-java">List&lt;String&gt; safe = new ArrayList&lt;&gt;();
+List raw = safe;              // ⚠️ 警告：unchecked
+raw.add(42);                  // ⚠️ 警告但编译通过
+String s = safe.get(0);       // 💥 ClassCastException
+// 注意：异常在 safe 上抛出，但凶手是 raw —— 错误「传染」了</code></pre>
+
+<h4>途径 2：未检查的强转</h4>
+
+<pre><code class="language-java">@SuppressWarnings("unchecked")
+List&lt;String&gt; list = (List&lt;String&gt;) (List&lt;?&gt;) someListOfIntegers;  // 💣
+String s = list.get(0);   // 💥</code></pre>
+
+<h4>途径 3：泛型可变参数（最隐蔽，也是 <code>@SafeVarargs</code> 存在的原因）</h4>
+
+<pre><code class="language-java">// 泛型可变参数会隐式创建一个泛型数组
+public static &lt;T&gt; void dangerous(List&lt;T&gt;... lists) {   // ⚠️ 警告：Possible heap pollution
+    Object[] objects = lists;          // 编译器允许这个赋值
+    objects[0] = Arrays.asList(42);    // 💣 往里面塞了错误类型
+}
+
+List&lt;String&gt; a = new ArrayList&lt;&gt;();
+dangerous(a);                          // 调用后 a 可能被污染</code></pre>
+
+<div class="box info">
+  <span class="bt">为什么可变参数会创建泛型数组？</span>
+  <p>可变参数本质是数组。当 <code>T</code> 是泛型时，编译器需要创建 <code>T[]</code>——而第 3 章说过，<strong>泛型数组创建是被禁止的</strong>。JDK 在这里做了一个妥协：允许它（并给出 <code>unchecked</code> 警告），但要求你<strong>承诺不往数组里写东西</strong>。</p>
+  <p>这个承诺的正式表达方式就是 <code>@SafeVarargs</code>。</p>
+</div>
+
+<h3>9.2 三个注解的正确用法（高频考点）</h3>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>注解</th><th>作用范围</th><th>语义</th><th>风险</th></tr></thead>
+<tbody>
+<tr><td><code>@SuppressWarnings("unchecked")</code></td><td>类 / 方法 / 字段 / 局部变量</td><td>「我知道有未检查警告，别报」</td><td><strong>不校验</strong>，压过头会掩盖真 bug</td></tr>
+<tr><td><code>@SafeVarargs</code></td><td>Java 7：static 方法、final 实例方法、构造器<br>Java 9+：额外支持 private 实例方法</td><td>「我保证不污染可变参数数组」</td><td>编译器信任你，写错了它会替你背锅</td></tr>
+<tr><td>为什么实例方法必须是 <code>final</code></td><td colspan="3">如果允许被重写，子类就能破坏「不污染数组」这个承诺，所以编译器强制要求 <code>final</code>（或 <code>private</code>——private 方法本身不可重写）。这是硬性约束，不是风格建议。</td></tr>
+</tbody>
+</table>
+</div>
+
+<pre><code class="language-java">// 正确的 @SafeVarargs 用法：只读，不写数组
+@SafeVarargs
+public static &lt;T&gt; List&lt;T&gt; listOf(T... items) {
+    return new ArrayList&lt;&gt;(Arrays.asList(items));   // 只读 items，安全
+    // 绝不能：items[0] = something;  ← 这会破坏承诺
+}</code></pre>
+
+<div class="box danger">
+  <span class="bt">反面教材：JDK 里真实踩过的坑</span>
+  <p><code>Arrays.asList</code> 在早期设计上直接包装了传入的数组（而非拷贝），如果配合泛型可变参数使用，就可能把外部数组暴露给调用方造成污染。这也是为什么 <code>List.of(...)</code>（Java 9）返回的是<strong>不可变拷贝</strong>——从设计上堵死了这条路。</p>
+  <p><strong>启示</strong>：接受可变参数时如果需要保存，<strong>先拷贝再存</strong>，不要直接持有调用方传入的数组引用。</p>
+</div>
+
+<h3>9.3 实战建议：怎么写出「零警告」的泛型代码</h3>
+
+<ol>
+  <li><strong>把编译警告当错误</strong>：在 Maven/Gradle 里开启 <code>-Xlint:unchecked</code>，让未检查警告显式暴露</li>
+  <li><strong>把 <code>@SuppressWarnings</code> 缩到最小范围</strong>：写在局部变量上，不要写在类上</li>
+  <li><strong>每处 <code>@SuppressWarnings</code> 都写注释</strong>说明「为什么这里是安全的」——这是团队代码规范的加分项</li>
+  <li><strong>能不用泛型数组就不用</strong>，优先 <code>List</code></li>
+</ol>
+
+<pre><code class="language-xml">&lt;!-- Maven 编译器配置：开启所有 lint 检查 --&gt;
+&lt;plugin&gt;
+  &lt;groupId&gt;org.apache.maven.plugins&lt;/groupId&gt;
+  &lt;artifactId&gt;maven-compiler-plugin&lt;/artifactId&gt;
+  &lt;configuration&gt;
+    &lt;source&gt;17&lt;/source&gt;
+    &lt;target&gt;17&lt;/target&gt;
+    &lt;compilerArgs&gt;
+      &lt;arg&gt;-Xlint:all&lt;/arg&gt;
+      &lt;arg&gt;-Werror&lt;/arg&gt;   &lt;!-- 警告视为错误 --&gt;
+    &lt;/compilerArgs&gt;
+  &lt;/configuration&gt;
+&lt;/plugin&gt;</code></pre>
+
+<h3>9.4 泛型数组的正确姿势：<code>toArray(new T[0])</code></h3>
+
+<p>虽然「创建泛型数组」被禁止，但「把集合转成数组」是日常高频操作。<code>Collection</code> 为此提供了两个重载，理解它们的差别能解释一个被问了十几年的经典问题。</p>
+
+<pre><code class="language-java">public interface Collection&lt;E&gt; {
+    Object[] toArray();                  // 重载 1：无参版，只能返回 Object[]
+    &lt;T&gt; T[] toArray(T[] a);              // 重载 2：泛型方法，你传一个数组充当"类型载体"
+}</code></pre>
+
+<p>重载 2 之所以要传数组进去，本质上是<strong>绕开擦除的一种变通</strong>——运行时拿不到 <code>E</code>，只能由调用方把一个真实类型的<strong>实例</strong>带进来，让方法能通过 <code>a.getClass()</code> 知道该创建什么数组。</p>
+
+<pre><code class="language-java">List&lt;String&gt; list = List.of("a", "b", "c");
+
+// ❌ 只能得到 Object[]，没法直接当 String[] 用
+Object[] arr1 = list.toArray();
+
+// ⚠️ 能跑，但在泛型场景下有隐患：数组实例被交给了集合，可能被写坏
+String[] arr2 = list.toArray(new String[list.size()]);
+
+// ✅ 社区公认的惯用法
+String[] arr3 = list.toArray(new String[0]);</code></pre>
+
+<div class="box deep">
+  <span class="bt">为什么是 <code>new String[0]</code> 而不是 <code>new String[size]</code>？</span>
+  <p>早期答案偏重「可读性好、不用重复算长度」，但<strong>现代 JVM 上的真实原因是 JIT 优化效果不同</strong>。看 JDK 里 <code>ArrayList.toArray(T[] a)</code> 的实现：</p>
+  <pre style="margin:8px 0 0"><code class="language-java">public &lt;T&gt; T[] toArray(T[] a) {
+    if (a.length &lt; size) {
+        // 传入的数组太小 → 按 a 的运行时类型新建一个
+        return (T[]) Arrays.copyOf(elementData, size, a.getClass());
+    }
+    System.arraycopy(elementData, 0, a, 0, size);
+    if (a.length &gt; size) a[size] = null;      // 补齐 null 终止符
+    return a;
+}</code></pre>
+  <p>两个分支都要拷贝数据，差别在于：</p>
+  <ul>
+    <li>传 <code>new T[size]</code> 走下面的 <code>System.arraycopy</code> 分支，需要在堆上分配一个<strong>运行时大小</strong>的数组，JIT 可优化的空间小</li>
+    <li>传 <code>new T[0]</code> 走上面的 <code>Arrays.copyOf</code> 分支——而 <code>Arrays.copyOf</code> 是被 JIT 内联的 intrinsic；同时 <code>new T[0]</code> 是<strong>编译期常量大小</strong>的分配，更容易被逃逸分析消除</li>
+  </ul>
+  <p>JVM 性能专家 Aleksey Shipilëv 在 2016 年的基准测试（<em>Arrays of Wisdom of the Ancients</em>）中给出了这个结论，此后成为社区共识。这条结论对 <code>ArrayList</code>、<code>HashSet</code>、以及集合 <code>Stream.toArray()</code> 同样适用。</p>
+</div>
+
+<div class="box tip">
+  <span class="bt">面试可复用表述</span>
+  <p>「<code>toArray(new T[0])</code> 这个看似浪费的写法是有性能依据的。集合的 <code>toArray()</code> 无参版本无法知道元素类型，只能返回 <code>Object[]</code>；而传一个长度 0 的数组，会让 JVM 走常量长度的分配路径，<code>Arrays.copyOf</code> 又是 intrinsic，实测比传精确长度的数组更快。这个设计本身就是擦除的产物——如果 Java 有具化泛型，<code>toArray()</code> 根本不需要这个参数。」</p>
+</div>
+
+<h3>9.5 补充：什么时候该放弃泛型</h3>
+
+<p>最后一个容易被忽略的判断——<strong>泛型不是越多越好</strong>。下面这些信号说明你可能用过头了：</p>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>信号</th><th>问题</th><th>更合适的做法</th></tr></thead>
+<tbody>
+<tr><td>方法体里出现 <code>instanceof</code> 分支判断类型</td><td>说明你在用泛型模拟「编译期特化」——而 Java 做不到</td><td>改用多态（策略模式）/ 函数式接口</td></tr>
+<tr><td>类型参数超过 3 个</td><td>调用方必须显式写全，可读性急剧下降</td><td>抽成配置对象 / 减少抽象层次</td></tr>
+<tr><td>到处 <code>@SuppressWarnings("unchecked")</code></td><td>类型安全网已经被你自己拆掉了</td><td>重新设计 API，让类型信息显式传入</td></tr>
+<tr><td>为了「通用」写了个 <code>&lt;T&gt;</code>，实际只用了 1~2 种类型</td><td>过度抽象，增加理解成本却没有收益</td><td>直接写具体的重载</td></tr>
+<tr><td>泛型只用来「省一个强转」</td><td>收益太小，白增复杂度</td><td>保留显式强转更清晰</td></tr>
+</tbody>
+</table>
+</div>
+
+<p><strong>核心原则</strong>：泛型的价值在于<strong>「同一套逻辑需要适配多个类型，且类型关系需要被编译器保证」</strong>。如果这两个条件只满足一个，泛型多半是过度设计。这条判断力，往往比会写泛型更体现工程成熟度。</p>
+
+<!-- ================= 第 10 章 ================= -->
+<h2 id="ch10"><span class="num">10</span>反射与运行时泛型信息</h2>
+
+<div class="box deep">
+  <span class="bt">本章要破除的核心误解</span>
+  <p>「类型擦除后，运行时拿不到泛型信息」——<strong>这句话只对了一半</strong>。</p>
+  <p>准确的说法是：<strong>对象实例上的泛型实参丢失了，但类型声明处的泛型签名被保留在 class 文件里</strong>。</p>
+  <ul>
+    <li><code>new ArrayList&lt;String&gt;()</code> 这个<strong>对象</strong>——运行时不知道自己是 String 列表 ❌</li>
+    <li><code>class Foo { List&lt;String&gt; names; }</code> 这个<strong>字段声明</strong>——运行时能读到 <code>List&lt;String&gt;</code> ✅</li>
+  </ul>
+  <p>这个差异是所有框架泛型能力的技术基础。</p>
+</div>
+
+<h3>10.1 为什么声明处的信息能保留？</h3>
+
+<p>因为 <code>Signature</code> 属性。编译器会把泛型签名以 <strong>UTF-8 字符串</strong>的形式写进 class 文件的 attribute 区域：</p>
+
+<pre class="term"><code>// javap -v Foo 输出的片段
+public class com.example.Foo {
+  java.util.List&lt;java.lang.String&gt; names;
+    descriptor: Ljava/util/List;
+    Signature: #15   // Ljava/util/List&lt;Ljava/lang/String;&gt;;   ← 泛型签名在这里
+}</code></pre>
+
+<div class="box info">
+  <span class="bt">保留 Signature 的官方理由</span>
+  <p>Java 虚拟机规范明确写着：保留泛型签名的目的是<strong>「为了支持反射和其他工具（如编译器）使用」</strong>。也就是说，官方从设计之初就为框架留了这个口子——只是不同的 JVM 语言（如 Scala、Kotlin）对它的依赖程度不同。</p>
+</div>
+
+<h3>10.2 核心 API：<code>java.lang.reflect.Type</code> 家族</h3>
+
+<p>运行时泛型信息全部通过 <code>Type</code> 接口体系暴露：</p>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>接口</th><th>表示什么</th><th>关键方法</th><th>示例</th></tr></thead>
+<tbody>
+<tr><td><code>Class&lt;T&gt;</code></td><td>原始类型（实现 <code>Type</code>）</td><td><code>getName()</code></td><td><code>String.class</code></td></tr>
+<tr><td><code>ParameterizedType</code></td><td><strong>参数化类型</strong>（带泛型实参）</td><td><code>getRawType()</code>、<code>getActualTypeArguments()</code></td><td><code>List&lt;String&gt;</code></td></tr>
+<tr><td><code>TypeVariable</code></td><td>类型变量（T、E 等）</td><td><code>getName()</code>、<code>getBounds()</code></td><td><code>T</code></td></tr>
+<tr><td><code>GenericArrayType</code></td><td>泛型数组</td><td><code>getGenericComponentType()</code></td><td><code>T[]</code>、<code>List&lt;String&gt;[]</code></td></tr>
+<tr><td><code>WildcardType</code></td><td>通配符</td><td><code>getUpperBounds()</code>、<code>getLowerBounds()</code></td><td><code>? extends Number</code></td></tr>
+</tbody>
+</table>
+</div>
+
+<pre><code class="language-java">public class Demo&lt;T&gt; {
+    private List&lt;String&gt; names;                 // ParameterizedType
+    private List&lt;List&lt;Integer&gt;&gt; matrix;         // 嵌套 ParameterizedType
+    private T value;                            // TypeVariable
+    private Map&lt;String, List&lt;? extends Number&gt;&gt; complex;   // 全家桶
+    private T[] array;                          // GenericArrayType
+
+    public Map&lt;String, List&lt;T&gt;&gt; getComplex() { return null; }
+}</code></pre>
+
+<pre><code class="language-java">// 反射读取
+Class&lt;?&gt; clazz = Demo.class;
+
+// 1. 字段
+for (Field f : clazz.getDeclaredFields()) {
+    Type gt = f.getGenericType();
+    System.out.println(f.getName() + " → " + gt + " [" + gt.getClass().getSimpleName() + "]");
+}
+// names  → java.util.List&lt;java.lang.String&gt; [ParameterizedTypeImpl]
+// value  → T [TypeVariableImpl]
+// array  → T[] [GenericArrayTypeImpl]
+
+// 2. 方法返回类型
+Method m = clazz.getDeclaredMethod("getComplex");
+Type rt = m.getGenericReturnType();     // Map&lt;String, List&lt;T&gt;&gt;
+
+// 3. 拆解 ParameterizedType
+if (rt instanceof ParameterizedType pt) {
+    System.out.println("原始类型: " + pt.getRawType());               // interface java.util.Map
+    Type[] args = pt.getActualTypeArguments();                        // [String, List&lt;T&gt;]
+    for (Type arg : args) {
+        System.out.println(" 实参: " + arg + " / " + arg.getClass().getSimpleName());
+    }
+}</code></pre>
+
+<h3>10.3 万能取类型：从子类反推父类泛型实参</h3>
+
+<p><strong>这是最重要的一段代码</strong>，它是 <code>TypeReference</code>、<code>TypeToken</code>、泛型 DAO 的技术核心。</p>
+
+<pre><code class="language-java">/**
+ * 从子类/匿名子类反推出父类（或接口）上的泛型实参
+ */
+public static Type resolveTypeArgument(Class&lt;?&gt; childClass, Class&lt;?&gt; targetClass) {
+    // 沿着继承链向上找
+    Class&lt;?&gt; current = childClass;
+    while (current != null &amp;&amp; current != Object.class) {
+        Type superType = current.getGenericSuperclass();       // 父类的泛型信息
+
+        if (superType instanceof ParameterizedType pt) {
+            if (pt.getRawType() == targetClass) {
+                return pt.getActualTypeArguments()[0];          // ★ 拿到了 T 的实参
+            }
+        }
+        current = current.getSuperclass();
+    }
+    return null;
+}</code></pre>
+
+<p>看它怎么工作：</p>
+
+<pre><code class="language-java">public abstract class AbstractDao&lt;T&gt; { }
+
+public class UserDao extends AbstractDao&lt;User&gt; { }      // ★ 实参在这里
+
+// 运行结果
+Type t = resolveTypeArgument(UserDao.class, AbstractDao.class);
+System.out.println(t);   // class com.example.User   —— 找到了！
+
+// 但如果中间隔了一层：
+public abstract class BaseDao&lt;T&gt; extends AbstractDao&lt;T&gt; { }
+public class OrderDao extends BaseDao&lt;Order&gt; { }
+
+// 需要递归解析：BaseDao&lt;T&gt; 拿到的实参是 TypeVariable T 而不是 Class
+// 必须继续往 BaseDao 的边界找 —— 这就是 ResolvableType 要做的事</code></pre>
+
+<h4>实战：手写一个 TypeReference（Jackson 的简化版）</h4>
+
+<pre><code class="language-java">public abstract class TypeReference&lt;T&gt; {
+    private final Type type;
+
+    protected TypeReference() {
+        // ★ 关键：getClass() 拿到的是匿名子类（如 TypeReference&lt;List&lt;User&gt;&gt; 的匿名子类）
+        //   它的 getGenericSuperclass() 保留了 List&lt;User&gt; 的完整信息
+        Type superClass = getClass().getGenericSuperclass();
+        if (superClass instanceof ParameterizedType pt) {
+            this.type = pt.getActualTypeArguments()[0];
+        } else {
+            throw new IllegalStateException("缺少泛型实参，请使用匿名子类语法");
+        }
+    }
+
+    public Type getType() { return type; }
+}
+
+// 使用：注意必须带 {} 创建匿名子类，否则 getGenericSuperclass() 只是原始类型
+TypeReference&lt;List&lt;User&gt;&gt; ref = new TypeReference&lt;List&lt;User&gt;&gt;() {};
+System.out.println(ref.getType());   // java.util.List&lt;com.example.User&gt;  ✅ 信息完整保留</code></pre>
+
+<div class="box tip">
+  <span class="bt">为什么必须写 <code>{}</code>？</span>
+  <p>这是新手最容易犯的错。看两个版本的差别：</p>
+  <pre style="margin:8px 0 0"><code class="language-java">// ❌ 直接实例化抽象类？不行（编译错误），所以必须用匿名子类
+// TypeReference&lt;List&lt;User&gt;&gt; r = new TypeReference&lt;List&lt;User&gt;&gt;();
+
+// ✅ 匿名子类：编译期生成一个 TypeReference$1.class，
+//    它的 getGenericSuperclass() 是 ParameterizedType（信息完整）
+TypeReference&lt;List&lt;User&gt;&gt; r = new TypeReference&lt;List&lt;User&gt;&gt;() {};
+
+// 💀 危险：如果基于已有实例去取，拿不到信息
+class MyRef extends TypeReference&lt;List&lt;User&gt;&gt; { }
+new MyRef().getGenericSuperclass();  // ✅ 可以，因为父类签名保留了
+</code></pre>
+  <p><strong>原理</strong>：泛型信息保留在<strong>「类的声明」</strong>上。只有通过 <code>extends</code> / 匿名子类的方式，才能在<strong>字节码层面</strong>把 <code>List&lt;User&gt;</code> 写进某个类的 <code>Signature</code> 属性。直接 <code>new</code> 出来的对象没有任何声明位置可以承载这个信息。</p>
+</div>
+
+<h4>实战：<code>getClass()</code> 的泛型语义小陷阱</h4>
+
+<pre><code class="language-java">List&lt;String&gt; list = new ArrayList&lt;&gt;();
+Class&lt;?&gt; c1 = list.getClass();          // class java.util.ArrayList（没有 String！）
+Class&lt;? extends List&gt; c2 = list.getClass();
+
+// 编译器对 getClass() 有特殊规则：返回 Class&lt;? extends X&gt;
+// 所以下面这行编译不过：
+// Class&lt;List&lt;String&gt;&gt; c = list.getClass();   // ❌ 泛型信息根本不存在</code></pre>
+
+<h3>10.4 各类框架如何利用这套 API</h3>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>框架</th><th>API</th><th>原理</th></tr></thead>
+<tbody>
+<tr><td>Jackson</td><td><code>new TypeReference&lt;List&lt;User&gt;&gt;(){}</code></td><td>匿名子类 + <code>getGenericSuperclass()</code></td></tr>
+<tr><td>Spring</td><td><code>new ParameterizedTypeReference&lt;Page&lt;User&gt;&gt;(){}</code></td><td>同上，用于 <code>RestTemplate</code> / <code>WebClient</code></td></tr>
+<tr><td>Gson</td><td><code>new TypeToken&lt;List&lt;User&gt;&gt;(){}.getType()</code></td><td>同上</td></tr>
+<tr><td>MyBatis-Plus</td><td><code>BaseMapper&lt;T&gt;</code> 自动推导实体类</td><td>解析接口的 <code>getGenericInterfaces()</code></td></tr>
+<tr><td>Spring Data JPA</td><td><code>JpaRepository&lt;User, Long&gt;</code></td><td><code>ResolvableType</code> 递归解析</td></tr>
+<tr><td>Spring Core</td><td><code>ResolvableType.forClass(...)</code></td><td>完整版解析器，支持嵌套与继承链</td></tr>
+<tr><td>Feign</td><td>方法返回值泛型解码</td><td>方法签名的 <code>Signature</code> + 编码器约定</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="box info">
+  <span class="bt">为什么 Spring 要自己造 <code>ResolvableType</code>？</span>
+  <p>因为原生反射 API <strong>太原始</strong>：处理「多层继承 + 嵌套泛型 + 类型变量替换」需要大量递归代码，而且容易出错。Spring 的 <code>ResolvableType</code> 把这些逻辑统一封装了：</p>
+  <pre style="margin:8px 0 0"><code class="language-java">// 原生方式：手写递归，几百行
+// ResolvableType 方式：一行搞定
+ResolvableType t = ResolvableType.forClass(UserRepository.class)
+        .as(Repository.class);
+Class&lt;?&gt; entityType = t.getGeneric(0).resolve();    // User
+Class&lt;?&gt; idType = t.getGeneric(1).resolve();        // Long</code></pre>
+  <p>第 12 章会给完整的 <code>ResolvableType</code> 实战。</p>
+</div>
+
+<!-- ================= 第 11 章 ================= -->
+<h2 id="ch11"><span class="num">11</span>Java 泛型 vs C++ 模板：一次彻底的对比</h2>
+
+<p>如果你有 C++ 背景，这一章会非常有价值——它能让你把两套心智模型彻底分开，避免「用 C++ 模板的直觉去理解 Java 泛型」而处处碰壁。</p>
+
+<h3>11.1 本质区别：一个是运行时机制，一个是编译期展开</h3>
+
+<div class="grid g2">
+  <div class="card">
+    <h4>C++ 模板：编译期代码生成器</h4>
+    <p>模板是<strong>语法层面的宏展开</strong>。<code>vector&lt;int&gt;</code> 和 <code>vector&lt;double&gt;</code> 会生成<strong>两份完全独立的机器码</strong>。类型信息在编译期全部可用，编译后就不存在了（没有运行时的模板概念）。</p>
+  </div>
+  <div class="card">
+    <h4>Java 泛型：编译期类型检查器</h4>
+    <p>泛型是<strong>类型系统的约束</strong>。只有<strong>一份字节码</strong>，泛型实参在编译后被抹掉。运行时看不到 T，但类型检查在编译期是严格的。</p>
+  </div>
+</div>
+
+<h3>11.2 逐项对比表</h3>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>维度</th><th>Java 泛型</th><th>C++ 模板</th></tr></thead>
+<tbody>
+<tr><td>实例化时机</td><td>编译期类型检查，运行时擦除</td><td>编译期完全展开</td></tr>
+<tr><td>代码膨胀</td><td>无（一份字节码）</td><td>严重（每个类型一份代码）</td></tr>
+<tr><td>运行时类型信息</td><td>声明处保留（Signature），实例上丢失</td><td>完全没有（编译后即消失）</td></tr>
+<tr><td>基本类型</td><td>不支持，必须装箱（<code>List&lt;Integer&gt;</code>）</td><td>支持，且零开销（<code>vector&lt;int&gt;</code>）</td></tr>
+<tr><td>能否 <code>new T()</code></td><td>不能</td><td>可以</td></tr>
+<tr><td>能否 <code>new T[10]</code></td><td>不能</td><td>可以</td></tr>
+<tr><td>类型约束语法</td><td><code>T extends Bound</code>（上界）</td><td>无原生约束（C++20 起有 Concepts）</td></tr>
+<tr><td>特化（Specialization）</td><td>不支持</td><td>支持（全特化、偏特化）</td></tr>
+<tr><td>非类型参数</td><td>不支持</td><td>支持（<code>template&lt;int N&gt;</code>）</td></tr>
+<tr><td>编译期计算</td><td>极弱（只有注解处理）</td><td>极强（模板元编程、constexpr）</td></tr>
+<tr><td>错误信息质量</td><td>较好，定位相对准确</td><td>极差，模板报错常常几百行</td></tr>
+<tr><td>动态派发</td><td>天然支持（虚方法 + 泛型）</td><td>需借助虚函数或 CRTP</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>11.3 三个「思维转换」要点</h3>
+
+<div class="box warn">
+  <span class="bt">转换 1：不要期待 Java 有「编译期 if」</span>
+  <p>C++ 里可以用 <code>if constexpr</code> 或 SFINAE 做到「根据类型选择不同分支」。Java 里<strong>做不到</strong>——因为擦除后只有一个版本的方法体，你无法「按 T 分支」。</p>
+  <pre style="margin:8px 0 0"><code class="language-java">// Java 里想要这种效果，只能靠「运行时判断 + 强转」
+public &lt;T&gt; void handle(T value) {
+    if (value instanceof String) { ... }        // 运行时判断，不是编译期特化
+    else if (value instanceof Integer) { ... }
+    // 这本质上是「伪泛型」——真正的泛型算法不该这么写
+}</code></pre>
+  <p><strong>正确的 Java 思路</strong>：用<strong>多态 + 函数式接口</strong>代替编译期分支。</p>
+</div>
+
+<div class="box warn">
+  <span class="bt">转换 2：Java 泛型的性能优势在别处</span>
+  <p>C++ 模板的一个卖点是「零开销抽象」（无装箱、无虚调用）。Java 泛型的卖点是<strong>「零代码膨胀 + 类型安全」</strong>。</p>
+  <p>所以别指望用 Java 泛型写出「比手写类型更快的数值代码」——那需要 Project Valhalla 的值类型（仍未正式落地）。如果你的场景是「<strong>千万级 int 数组求和</strong>」，正确的 Java 工具是 <code>IntStream</code> / <code>int[]</code>，而不是 <code>List&lt;Integer&gt;</code>。</p>
+</div>
+
+<div class="box warn">
+  <span class="bt">转换 3：Java 泛型没有「特化」，但你的需求通常能变通</span>
+  <div class="tbl-wrap" style="margin:8px 0">
+  <table>
+  <thead><tr><th>C++ 想做的事</th><th>Java 的等价方案</th></tr></thead>
+  <tbody>
+  <tr><td>模板特化</td><td>策略模式 / <code>Map&lt;Class&lt;?&gt;, Handler&gt;</code> 注册表</td></tr>
+  <tr><td>非类型模板参数 <code>template&lt;int N&gt;</code></td><td>构造器参数或字段</td></tr>
+  <tr><td>SFINAE / Concepts</td><td>接口边界 + 编译器类型检查</td></tr>
+  <tr><td>模板元编程</td><td>注解处理器（APT）+ 代码生成</td></tr>
+  <tr><td>CRTP（静态多态）</td><td>F-bounded 递归泛型（见第 7 章）</td></tr>
+  </tbody>
+  </table>
+  </div>
+</div>
+
+<h3>11.4 CRTP vs F-bounded：一个精妙的对照</h3>
+
+<p>如果你写过 C++ 的 CRTP（奇异递归模板模式），你会发现 Java 的 F-bounded 泛型几乎是它的翻版：</p>
+
+<pre><code class="language-cpp">// C++ CRTP
+template &lt;typename T&gt;
+class Base {
+public:
+    void interface() {
+        static_cast&lt;T*&gt;(this)-&gt;implementation();   // 静态派发到子类
+    }
+};
+
+class Derived : public Base&lt;Derived&gt; {
+public:
+    void implementation() { /* ... */ }
+};</code></pre>
+
+<pre><code class="language-java">// Java F-bounded（对应写法）
+public abstract class Base&lt;T extends Base&lt;T&gt;&gt; {
+    public void interfaceMethod() {
+        self().implementation();       // 静态类型就能调到子类方法
+    }
+    protected abstract T self();       // 相当于 static_cast&lt;T*&gt;(this)
+}
+
+public class Derived extends Base&lt;Derived&gt; {
+    public void implementation() { /* ... */ }
+}</code></pre>
+
+<div class="box tip">
+  <span class="bt">能说出这个对照，是很强的加分项</span>
+  <p>面试可以这样表述：「Java 的 F-bounded 泛型在形态上与 C++ 的 CRTP 高度相似，都用于在<strong>继承体系下保住子类型信息</strong>——C++ 靠 <code>static_cast</code> 把 <code>this</code> 转成子类，Java 靠 <code>self()</code> 加一次受控强转。区别在于 C++ 的 CRTP 是<strong>编译期静态派发，无虚函数开销</strong>；而 Java 因为擦除，<code>self()</code> 里的强转是运行时 checkcast，且最终还是走虚方法派发。」</p>
+</div>
+
+<!-- ================= 第 12 章 ================= -->
+<h2 id="ch12"><span class="num">12</span>大厂框架中的泛型全景</h2>
+
+<p>前面十一章是「原理」，这一章是「落地」。下面每一个都是你在大厂代码库里天天见到的泛型用法，理解它们背后的机制，才能在看源码时不迷糊、在出问题时能定位。</p>
+
+<h3>12.1 集合与 Stream：泛型设计的教科书</h3>
+
+<pre><code class="language-java">public interface Collection&lt;E&gt; extends Iterable&lt;E&gt; { ... }
+public interface List&lt;E&gt; extends Collection&lt;E&gt; { ... }
+public interface Map&lt;K, V&gt; { Set&lt;Map.Entry&lt;K, V&gt;&gt; entrySet(); ... }
+
+// 泛型方法 + 通配符 + 函数式接口的组合
+public interface Stream&lt;T&gt; {
+    Stream&lt;T&gt; filter(Predicate&lt;? super T&gt; predicate);          // 消费 T
+    &lt;R&gt; Stream&lt;R&gt; map(Function&lt;? super T, ? extends R&gt; mapper); // 消费 T，产出 R
+    void forEach(Consumer&lt;? super T&gt; action);                    // 消费 T
+    &lt;R&gt; R collect(Collector&lt;? super T, A, R&gt; collector);         // 复杂的通配符嵌套
+}</code></pre>
+
+<div class="box info">
+  <span class="bt">为什么 Stream 的每个方法都带通配符？</span>
+  <p>以 <code>filter</code> 为例，写成 <code>Predicate&lt;T&gt;</code> 也能工作，但会<strong>限制调用方</strong>。用 <code>Predicate&lt;? super T&gt;</code> 后，一个 <code>Predicate&lt;Object&gt;</code> 也可以传入 <code>Stream&lt;String&gt;</code>——因为它能处理任何对象，自然也能处理 String。这就是 PECS 原则在 API 设计上的体现：<strong>放宽参数类型，让 API 更好用</strong>。</p>
+  <pre style="margin:8px 0 0"><code class="language-java">Stream&lt;String&gt; stream = list.stream();
+
+Predicate&lt;String&gt; p1 = s -&gt; s.length() &gt; 3;
+Predicate&lt;Object&gt; p2 = o -&gt; o != null;     // 更通用的谓词
+
+stream.filter(p1);   // ✅
+stream.filter(p2);   // ✅ 因为声明是 Predicate&lt;? super String&gt;
+// 如果声明是 Predicate&lt;T&gt;，这一行就编译不过了</code></pre>
+</div>
+
+<h3>12.2 Spring 全家桶</h3>
+
+<h4>12.2.1 <code>ResolvableType</code>：Spring 的泛型解析引擎</h4>
+
+<pre><code class="language-java">// 场景 1：从 Repository 接口反推实体类型
+public interface UserRepository extends JpaRepository&lt;User, Long&gt; { }
+
+ResolvableType t = ResolvableType.forClass(UserRepository.class);
+Class&lt;?&gt; domainType = t.as(JpaRepository.class).getGeneric(0).resolve();  // User
+Class&lt;?&gt; idType     = t.as(JpaRepository.class).getGeneric(1).resolve();  // Long
+
+// 场景 2：解析字段/方法上的嵌套泛型
+class MyService {
+    private Map&lt;String, List&lt;Order&gt;&gt; cache;
+}
+ResolvableType fieldType = ResolvableType.forField(
+        MyService.class.getDeclaredField("cache"));
+ResolvableType valueType = fieldType.getGeneric(1);        // List&lt;Order&gt;
+Class&lt;?&gt; orderClass = valueType.getGeneric(0).resolve();    // Order
+
+// 场景 3：判断泛型是否兼容（常用于事件监听器匹配）
+ResolvableType eventType = ResolvableType.forClass(OrderCreatedEvent.class);
+boolean match = listenerType.as(ApplicationListener.class)
+        .getGeneric(0).isAssignableFrom(eventType);</code></pre>
+
+<div class="box tip">
+  <span class="bt">ResolvableType 解决的三个原生痛点</span>
+  <ol>
+    <li><strong>多层继承</strong>：<code>A → B&lt;T&gt; → C extends B&lt;User&gt;</code>，原生 API 拿到的是 <code>TypeVariable</code>，ResolvableType 会自动沿继承链解析到 <code>User</code></li>
+    <li><strong>嵌套泛型</strong>：<code>Map&lt;String, List&lt;Order&gt;&gt;</code> 可以逐层 <code>getGeneric(i)</code> 下钻</li>
+    <li><strong>类型变量替换</strong>：会带着「上下文」去解析 <code>T</code>，而不是孤立地看待它</li>
+  </ol>
+</div>
+
+<div class="box info">
+  <span class="bt">另一把常被忽略的工具：<code>GenericTypeResolver</code></span>
+  <p>Spring 还提供了 <code>org.springframework.core.GenericTypeResolver</code>，专门用于<strong>从类或方法上反推泛型实参</strong>。它比 <code>ResolvableType</code> 更轻、更直接：</p>
+  <pre style="margin:8px 0 0"><code class="language-java">// 反推单个泛型实参
+Class&lt;?&gt; entityType = GenericTypeResolver.resolveTypeArgument(
+        UserRepository.class, JpaRepository.class);        // User
+
+// 反推全部泛型实参
+Class&lt;?&gt;[] args = GenericTypeResolver.resolveTypeArguments(
+        UserRepository.class, JpaRepository.class);        // [User.class, Long.class]
+
+// 拿到「类型变量 → 类型实参」的完整映射表
+Map&lt;TypeVariable, Type&gt; map =
+        GenericTypeResolver.getTypeVariableMap(UserRepository.class);
+// {T=class User, ID=class Long}</code></pre>
+  <p><strong>选择建议</strong>：只是简单反推一个泛型实参时，<code>GenericTypeResolver</code> 一行搞定、语义自解释；涉及多层继承、嵌套泛型、需要逐层下钻时，用 <code>ResolvableType</code>。两者互补——<code>ResolvableType</code> 更现代、能力更全，而 <code>GenericTypeResolver</code> 在「我明确知道要取哪一个实参」的场景下更简洁。</p>
+</div>
+
+<h4>12.2.2 泛型依赖注入</h4>
+
+<pre><code class="language-java">// Spring 会用泛型作为「隐式 qualifier」来区分同一接口的不同实现
+public interface Validator&lt;T&gt; {
+    void validate(T target);
+}
+
+@Component
+public class UserValidator implements Validator&lt;User&gt; { ... }
+
+@Component
+public class OrderValidator implements Validator&lt;Order&gt; { ... }
+
+// 注入时可以精确匹配到 UserValidator
+@Autowired
+private Validator&lt;User&gt; userValidator;      // ✅ Spring 按泛型实参匹配
+
+// 注入所有实现
+@Autowired
+private List&lt;Validator&lt;?&gt;&gt; allValidators;
+
+// 注入 Map：key 是 bean name
+@Autowired
+private Map&lt;String, Validator&lt;User&gt;&gt; validatorMap;</code></pre>
+
+<h4>12.2.3 HTTP 客户端的泛型反序列化</h4>
+
+<pre><code class="language-java">// ❗ 错误写法：泛型信息丢失
+public &lt;T&gt; T get(String url) {
+    return restTemplate.getForObject(url, T.class);   // T.class 根本不存在！
+}
+
+// ✅ 正确写法 1：传 Class（适合简单类型）
+public &lt;T&gt; T get(String url, Class&lt;T&gt; type) {
+    return restTemplate.getForObject(url, type);
+}
+
+// ✅ 正确写法 2：传 ParameterizedTypeReference（适合泛型嵌套）
+public &lt;T&gt; List&lt;T&gt; getList(String url, ParameterizedTypeReference&lt;List&lt;T&gt;&gt; typeRef) {
+    ResponseEntity&lt;List&lt;T&gt;&gt; resp = restTemplate.exchange(
+            url, HttpMethod.GET, null, typeRef);
+    return resp.getBody();
+}
+
+// 调用
+List&lt;User&gt; users = getList("/api/users", new ParameterizedTypeReference&lt;&gt;() {});
+//                                                  ↑ 匿名子类语法，保留 List&lt;User&gt; 信息</code></pre>
+
+<div class="box danger">
+  <span class="bt">这是生产代码里最常见的泛型事故之一</span>
+  <p>「<code>T.class</code> 不存在」——因为擦除。很多人第一次写通用 HTTP 客户端都会掉进这个坑。正确做法只有两条路：<strong>传 <code>Class&lt;T&gt;</code> 类型令牌</strong>，或<strong>传 <code>TypeReference</code> / <code>ParameterizedTypeReference</code></strong>。</p>
+</div>
+
+<h4>12.2.4 Spring AOP 与泛型切点</h4>
+
+<pre><code class="language-java">// 切点匹配泛型方法时的坑
+@Aspect
+@Component
+public class LogAspect {
+
+    // 这个切点能匹配到泛型类的具体方法吗？
+    @Before("execution(* com.example.repository.*.save(..))")
+    public void before(JoinPoint jp) {
+        MethodSignature sig = (MethodSignature) jp.getSignature();
+        Method m = sig.getMethod();
+
+        // ★ 防御性写法：忽略桥接方法
+        if (m.isBridge() || m.isSynthetic()) return;
+
+        // ★ 获取真实方法（可能来自接口）
+        try {
+            Method real = jp.getTarget().getClass()
+                    .getMethod(m.getName(), m.getParameterTypes());
+            // 从 real 上读注解...
+        } catch (NoSuchMethodException ignored) { }
+    }
+}</code></pre>
+
+<h3>12.3 MyBatis / MyBatis-Plus</h3>
+
+<pre><code class="language-java">// 1. 通用 Mapper：泛型定义 + 泛型解析
+public interface BaseMapper&lt;T&gt; {
+    int insert(T entity);
+    int updateById(T entity);
+    T selectById(Serializable id);
+    List&lt;T&gt; selectList(Wrapper&lt;T&gt; queryWrapper);
+}
+
+// 2. 业务侧只需继承，不写任何实现
+@Mapper
+public interface UserMapper extends BaseMapper&lt;User&gt; { }
+
+// 3. MyBatis 如何知道表名？—— 反射解析泛型实参
+//    内部逻辑大致是：
+//    Type[] types = mapperInterface.getGenericInterfaces();
+//    ParameterizedType pt = (ParameterizedType) types[0];
+//    Class&lt;?&gt; entityClass = (Class&lt;?&gt;) pt.getActualTypeArguments()[0];
+//    → User.class → 推导出表名 user
+
+// 4. TypeHandler 也是泛型接口
+public interface TypeHandler&lt;T&gt; {
+    void setParameter(PreparedStatement ps, int i, T parameter, JdbcType jdbcType);
+    T getResult(ResultSet rs, String columnName);
+}
+
+// 例如 JSON 字段的通用处理器
+public class JsonTypeHandler&lt;T&gt; extends BaseTypeHandler&lt;T&gt; {
+    private final Class&lt;T&gt; clazz;   // 必须靠 Class&lt;T&gt; 记住类型
+    public JsonTypeHandler(Class&lt;T&gt; clazz) { this.clazz = clazz; }
+
+    @Override
+    public void setNonNullParameter(PreparedStatement ps, int i, T param, JdbcType jt) {
+        ps.setString(i, JSON.toJSONString(param));
+    }
+
+    @Override
+    public T getNullableResult(ResultSet rs, String column) throws SQLException {
+        return JSON.parseObject(rs.getString(column), clazz);   // ★ 用到了 clazz
+    }
+}</code></pre>
+
+<h3>12.4 Jackson / Gson / Fastjson</h3>
+
+<pre><code class="language-java">// ---- Jackson ----
+// ❌ 泛型信息丢失
+List&lt;User&gt; users = objectMapper.readValue(json, List.class);
+// 得到 List&lt;LinkedHashMap&gt;，后续 get(0).getName() 会 ClassCastException
+
+// ✅ 用 TypeReference 保留泛型
+List&lt;User&gt; users = objectMapper.readValue(json,
+        new TypeReference&lt;List&lt;User&gt;&gt;() {});
+
+// ✅ 更复杂：嵌套泛型
+Map&lt;String, List&lt;User&gt;&gt; map = objectMapper.readValue(json,
+        new TypeReference&lt;Map&lt;String, List&lt;User&gt;&gt;&gt;() {});
+
+// ---- Gson ----
+Type type = new TypeToken&lt;List&lt;User&gt;&gt;() {}.getType();
+List&lt;User&gt; users = gson.fromJson(json, type);
+
+// ---- Fastjson（注意安全，生产慎用）----
+List&lt;User&gt; users = JSON.parseObject(json, new TypeReference&lt;List&lt;User&gt;&gt;() {});</code></pre>
+
+<div class="box tip">
+  <span class="bt">工程细节：<code>TypeReference</code> 应该声明为 <code>static final</code> 常量</span>
+  <pre style="margin:8px 0 0"><code class="language-java">// ❌ 每次调用都 new 一个匿名类实例：每次都要付一遍反射解析泛型的代价
+public List&lt;User&gt; list() {
+    return objectMapper.readValue(json, new TypeReference&lt;List&lt;User&gt;&gt;() {});
+}
+
+// ✅ 提为静态常量：类型只解析一次，并复用同一个 Type 实例
+private static final TypeReference&lt;List&lt;User&gt;&gt; USER_LIST_TYPE =
+        new TypeReference&lt;List&lt;User&gt;&gt;() {};
+
+public List&lt;User&gt; list() {
+    return objectMapper.readValue(json, USER_LIST_TYPE);
+}</code></pre>
+  <p>原因有两层：其一，<code>TypeReference</code> 的构造器里要调 <code>getClass().getGenericSuperclass()</code>，这是一次<strong>反射调用</strong>；其二，Jackson 内部对 <code>Type</code> 维护了缓存，<strong>复用同一个 <code>Type</code> 实例命中缓存的概率更高</strong>。在 QPS 较高的接口上，这个差别是可测量的。</p>
+</div>
+
+<div class="box warn">
+  <span class="bt">为什么 <code>List&lt;User&gt; users = (List&lt;User&gt;) JSON.parseArray(json)</code> 会炸？</span>
+  <p>因为反序列化时框架<strong>不知道</strong>要创建什么类型的元素，只能退化成 <code>JSONObject</code> 或 <code>LinkedHashMap</code>。变量声明上的 <code>&lt;User&gt;</code> 在擦除后不存在，框架看不到。所以必须<strong>把类型信息作为参数显式传进去</strong>。</p>
+</div>
+
+<h3>12.5 RPC / MQ 编解码</h3>
+
+<pre><code class="language-java">// Dubbo / 自研 RPC 的泛化调用：类型信息必须走协议传输
+public interface GenericService {
+    Object $invoke(String methodName, String[] paramTypes, Object[] args);
+}
+
+// MQ 序列化器：泛型接口，但需要显式指定反序列化的目标类型
+public interface Serializer&lt;T&gt; {
+    byte[] serialize(T obj);
+    T deserialize(byte[] data, Class&lt;T&gt; type);   // ★ 必须传 Class
+}
+
+// Kafka 消费者反序列化：无法用泛型，只能约定
+public class UserDeserializer implements Deserializer&lt;User&gt; {
+    // Kafka 的 Deserializer&lt;T&gt; 里 T 只是文档作用，
+    // 实际运行时 Kafka 不知道 T 是什么，无法做泛型校验
+}</code></pre>
+
+<h3>12.6 Guava / 工具库</h3>
+
+<pre><code class="language-java">// Guava TypeToken：比 Jackson TypeReference 更强的版本
+TypeToken&lt;List&lt;User&gt;&gt; token = new TypeToken&lt;List&lt;User&gt;&gt;() {};
+Type rawType = token.getRawType();               // List
+Type elementType = token.getType();              // List&lt;User&gt;
+
+// Guava 支持「动态构造泛型类型」
+TypeToken&lt;?&gt; t = TypeToken.of(Map.class)
+        .where(new TypeParameter&lt;K&gt;() {}, String.class)
+        .where(new TypeParameter&lt;V&gt;() {}, User.class);   // Map&lt;String, User&gt;
+
+// 集合工具
+Lists.newArrayList();
+Maps.newHashMap();
+ImmutableList&lt;User&gt; immutable = ImmutableList.copyOf(users);</code></pre>
+
+<!-- ================= 第 13 章 ================= -->
+<h2 id="ch13"><span class="num">13</span>泛型设计模式与可复用代码</h2>
+
+<p>这一章全是<strong>可以直接抄进项目</strong>的代码。建议对照自己的项目，看哪些地方可以应用。</p>
+
+<h3>13.1 统一响应封装 <code>Result&lt;T&gt;</code></h3>
+
+<pre><code class="language-java">public class Result&lt;T&gt; implements Serializable {
+    private static final long serialVersionUID = 1L;
+
+    private int code;
+    private String message;
+    private T data;                 // ★ 业务数据，类型由调用方决定
+    private long timestamp;
+
+    public Result() { this.timestamp = System.currentTimeMillis(); }
+
+    public static &lt;T&gt; Result&lt;T&gt; success(T data) {
+        Result&lt;T&gt; r = new Result&lt;&gt;();
+        r.code = 0; r.message = "success"; r.data = data;
+        return r;
+    }
+
+    public static &lt;T&gt; Result&lt;T&gt; success() { return success(null); }
+
+    public static &lt;T&gt; Result&lt;T&gt; fail(int code, String message) {
+        Result&lt;T&gt; r = new Result&lt;&gt;();
+        r.code = code; r.message = message;
+        return r;
+    }
+
+    /** 用于把 Result&lt;A&gt; 转换成 Result&lt;B&gt;（保留状态码） */
+    public &lt;R&gt; Result&lt;R&gt; map(Function&lt;? super T, ? extends R&gt; mapper) {
+        Result&lt;R&gt; r = new Result&lt;&gt;();
+        r.code = this.code; r.message = this.message; r.timestamp = this.timestamp;
+        r.data = this.data == null ? null : mapper.apply(this.data);
+        return r;
+    }
+
+    // getter / setter ...
+}
+
+// 使用
+@GetMapping("/users/{id}")
+public Result&lt;User&gt; getUser(@PathVariable Long id) {
+    return Result.success(userService.findById(id));
+}
+
+@GetMapping("/users")
+public Result&lt;PageResult&lt;User&gt;&gt; list(@RequestParam int page) {
+    return Result.success(userService.page(page));       // ★ 嵌套泛型
+}</code></pre>
+
+<div class="box tip">
+  <span class="bt">设计要点</span>
+  <ul>
+    <li><code>success</code> / <code>fail</code> 是<strong>静态泛型工厂方法</strong>，类型由调用方推断</li>
+    <li><code>map</code> 方法用了 <code>Function&lt;? super T, ? extends R&gt;</code>，是 PECS 的标准用法</li>
+    <li>注意：<code>Result&lt;Void&gt;</code> 和 <code>Result&lt;Object&gt;</code> 的选择——<strong>无返回数据时用 <code>Result&lt;Void&gt;</code></strong>，语义更清晰</li>
+  </ul>
+</div>
+
+<h3>13.2 泛型分页对象 <code>Page&lt;T&gt;</code></h3>
+
+<pre><code class="language-java">public class PageResult&lt;T&gt; {
+    private List&lt;T&gt; records;      // 当前页数据
+    private long total;           // 总记录数
+    private int pageNum;
+    private int pageSize;
+    private int pages;            // 总页数
+
+    public static &lt;T&gt; PageResult&lt;T&gt; of(List&lt;T&gt; records, long total, int pageNum, int pageSize) {
+        PageResult&lt;T&gt; p = new PageResult&lt;&gt;();
+        p.records = records; p.total = total;
+        p.pageNum = pageNum; p.pageSize = pageSize;
+        p.pages = pageSize &lt;= 0 ? 0 : (int) ((total + pageSize - 1) / pageSize);
+        return p;
+    }
+
+    /** 把一页 A 转成一页 B —— 极其常用的套路 */
+    public &lt;R&gt; PageResult&lt;R&gt; convert(Function&lt;? super T, ? extends R&gt; mapper) {
+        List&lt;R&gt; converted = this.records.stream()
+                .map(mapper)
+                .collect(Collectors.toList());
+        return PageResult.of(converted, total, pageNum, pageSize);
+    }
+
+    public boolean isEmpty() { return records == null || records.isEmpty(); }
+    // getter / setter ...
+}
+
+// 使用：DO → VO 转换，分页信息自动保留
+PageResult&lt;UserDO&gt; doPage = userRepository.page(query);
+PageResult&lt;UserVO&gt; voPage = doPage.convert(UserConverter::toVO);   // ★ 一行搞定</code></pre>
+
+<h3>13.3 泛型 DAO 基类</h3>
+
+<pre><code class="language-java">public abstract class BaseDao&lt;T, ID&gt; {
+    private final Class&lt;T&gt; entityClass;
+
+    @SuppressWarnings("unchecked")
+    protected BaseDao() {
+        // ★ 构造期从子类反推泛型实参（前提：子类必须是具体类型）
+        Type superType = getClass().getGenericSuperclass();
+        if (!(superType instanceof ParameterizedType pt)) {
+            throw new IllegalStateException(
+                getClass().getName() + " 必须以 BaseDao&lt;Entity, Id&gt; 的形式继承");
+        }
+        this.entityClass = (Class&lt;T&gt;) pt.getActualTypeArguments()[0];
+    }
+
+    public Class&lt;T&gt; getEntityClass() { return entityClass; }
+    public String getTableName() {
+        return CaseFormat.UPPER_CAMEL.to(CaseFormat.LOWER_UNDERSCORE, entityClass.getSimpleName());
+    }
+
+    public abstract T selectById(ID id);
+    public abstract int insert(T entity);
+    public abstract int update(T entity);
+    public abstract int deleteById(ID id);
+}
+
+// 子类只声明泛型，不用重复写反射代码
+public class UserDao extends BaseDao&lt;User, Long&gt; {
+    @Override public User selectById(Long id) { ... }
+    // ...
+}</code></pre>
+
+<div class="box warn">
+  <span class="bt">这个模式的硬性前提</span>
+  <p>如果你写 <code>public class GenericDao&lt;T&gt; extends BaseDao&lt;T, Long&gt;</code>（保持泛型），那么构造器里解析出来的是 <code>TypeVariable</code> 而不是 <code>Class</code>，<strong>强转会失败</strong>。子类必须「落地」为具体类型，或者改用 <code>ResolvableType</code> 做递归解析。</p>
+</div>
+
+<h3>13.4 策略工厂：<code>Map&lt;Key, Handler&lt;I, O&gt;&gt;</code></h3>
+
+<pre><code class="language-java">// 泛型处理器接口
+public interface OrderHandler&lt;I extends OrderCommand, O&gt; {
+    /** 支持处理的命令类型 */
+    Class&lt;I&gt; supportType();
+    /** 处理 */
+    O handle(I command);
+}
+
+// 工厂：自动注册所有 Handler，按类型分发（Spring 自动注入 List）
+@Component
+public class OrderHandlerFactory {
+
+    private final Map&lt;Class&lt;?&gt;, OrderHandler&lt;?, ?&gt;&gt; handlerMap = new ConcurrentHashMap&lt;&gt;();
+
+    public OrderHandlerFactory(List&lt;OrderHandler&lt;?, ?&gt;&gt; handlers) {
+        for (OrderHandler&lt;?, ?&gt; h : handlers) {
+            handlerMap.put(h.supportType(), h);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    public &lt;I extends OrderCommand, O&gt; O dispatch(I command) {
+        OrderHandler&lt;I, O&gt; handler = (OrderHandler&lt;I, O&gt;) handlerMap.get(command.getClass());
+        if (handler == null) {
+            throw new IllegalArgumentException("未找到处理器: " + command.getClass());
+        }
+        return handler.handle(command);     // ★ 类型安全由调用方保证
+    }
+}</code></pre>
+
+<h3>13.5 泛型缓存 / 本地缓存抽象</h3>
+
+<pre><code class="language-java">public interface CacheService {
+    &lt;T&gt; T get(String key, Class&lt;T&gt; type);
+    &lt;T&gt; List&lt;T&gt; getList(String key, Class&lt;T&gt; elementType);
+    void put(String key, Object value, Duration ttl);
+}
+
+// 带自动加载的封装（防止缓存穿透的常见写法）
+public class LoadingCache&lt;K, V&gt; {
+    private final CacheService cache;
+    private final Function&lt;K, V&gt; loader;
+    private final Class&lt;V&gt; valueType;
+    private final Duration ttl;
+
+    public LoadingCache(CacheService cache, Class&lt;V&gt; valueType,
+                        Function&lt;K, V&gt; loader, Duration ttl) {
+        this.cache = cache; this.valueType = valueType;
+        this.loader = loader; this.ttl = ttl;
+    }
+
+    public V get(K key) {
+        String cacheKey = valueType.getSimpleName() + ":" + key;
+        V cached = cache.get(cacheKey, valueType);
+        if (cached != null) return cached;
+
+        V loaded = loader.apply(key);            // 缓存未命中，回源
+        if (loaded != null) cache.put(cacheKey, loaded, ttl);
+        return loaded;
+    }
+}</code></pre>
+
+<h3>13.6 泛型 + 单例注册表</h3>
+
+<pre><code class="language-java">// 类型安全的单例注册表（避免到处写 ClassCastException）
+public final class SingletonRegistry {
+    private static final Map&lt;Class&lt;?&gt;, Object&gt; REGISTRY = new ConcurrentHashMap&lt;&gt;();
+
+    private SingletonRegistry() { }
+
+    public static &lt;T&gt; void register(Class&lt;T&gt; type, T instance) {
+        REGISTRY.put(type, instance);
+    }
+
+    public static &lt;T&gt; T get(Class&lt;T&gt; type) {           // ★ 返回类型自动正确
+        Object obj = REGISTRY.get(type);
+        if (obj == null) throw new IllegalStateException("未注册: " + type);
+        return type.cast(obj);                          // ★ 用 Class.cast 而非强转
+    }
+}
+
+// 使用：不需要强转，编译期就保证了类型
+SingletonRegistry.register(UserService.class, new UserServiceImpl());
+UserService svc = SingletonRegistry.get(UserService.class);   // ✅ 类型安全</code></pre>
+
+<div class="box tip">
+  <span class="bt"><code>Class.cast()</code> 优于 <code>(T)</code> 强转</span>
+  <p><code>type.cast(obj)</code> 的好处：<strong>不需要 <code>@SuppressWarnings("unchecked")</code></strong>（因为编译器知道 <code>Class&lt;T&gt;.cast</code> 返回 <code>T</code>），而且会抛出语义更准确的 <code>ClassCastException</code>。这是写泛型工具类时的一个「洁癖级」技巧。</p>
+</div>
+
+<h3>13.7 泛型事件总线（简化版）</h3>
+
+<pre><code class="language-java">public class EventBus {
+    private final Map&lt;Class&lt;?&gt;, List&lt;Consumer&lt;?&gt;&gt;&gt; subscribers = new ConcurrentHashMap&lt;&gt;();
+
+    // 订阅：类型安全
+    public &lt;E&gt; void subscribe(Class&lt;E&gt; eventType, Consumer&lt;E&gt; listener) {
+        subscribers.computeIfAbsent(eventType, k -&gt; new CopyOnWriteArrayList&lt;&gt;())
+                   .add(listener);
+    }
+
+    @SuppressWarnings("unchecked")
+    public &lt;E&gt; void publish(E event) {
+        List&lt;Consumer&lt;?&gt;&gt; list = subscribers.get(event.getClass());
+        if (list == null) return;
+        for (Consumer&lt;?&gt; c : list) {
+            ((Consumer&lt;E&gt;) c).accept(event);       // 受控强转：注册时已保证类型匹配
+        }
+    }
+}
+
+// 使用
+EventBus bus = new EventBus();
+bus.subscribe(OrderCreatedEvent.class, e -&gt; System.out.println(e.getOrderId()));
+bus.publish(new OrderCreatedEvent("ORD-001"));</code></pre>
+
+<!-- ================= 第 14 章 ================= -->
+<h2 id="ch14"><span class="num">14</span>生产陷阱与排错清单</h2>
+
+<h3>14.1 十大泛型生产事故</h3>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>#</th><th>现象</th><th>根因</th><th>修复</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>反序列化后 <code>List&lt;User&gt;</code> 里的元素变成 <code>LinkedHashMap</code>，调用 getter 时 <code>ClassCastException</code></td><td>用 <code>List.class</code> 反序列化，泛型信息丢失</td><td>改用 <code>TypeReference</code></td></tr>
+<tr><td>2</td><td>自定义注解在 AOP 里读不到</td><td>匹配到的是桥接方法，注解在真方法上</td><td>过滤 <code>isBridge()</code>，或从目标类重新取方法</td></tr>
+<tr><td>3</td><td>通知执行两次</td><td>桥接方法 + 真方法各触发一次切面</td><td>切点加 <code>&amp;&amp; !execution(* *.*(java.lang.Object))</code> 或过滤</td></tr>
+<tr><td>4</td><td>反射遍历方法出现重名方法，映射混乱</td><td>桥接/合成方法</td><td><code>if (m.isBridge() \|\| m.isSynthetic()) continue;</code></td></tr>
+<tr><td>5</td><td>通用 HTTP 客户端编译不过</td><td><code>T.class</code> 不存在</td><td>传 <code>Class&lt;T&gt;</code> 或 <code>ParameterizedTypeReference</code></td></tr>
+<tr><td>6</td><td>泛型 DAO 构造时 <code>ClassCastException</code></td><td>子类仍保持泛型，解析到 <code>TypeVariable</code></td><td>子类落地具体类型，或用 <code>ResolvableType</code></td></tr>
+<tr><td>7</td><td>缓存取出的对象类型错乱</td><td>多个泛型共用一个 key，类型混淆</td><td>key 里拼上类型名（见 13.5）</td></tr>
+<tr><td>8</td><td>Bean 注入时报「找到多个候选」</td><td>泛型未被 Spring 用作 qualifier，或擦除后无法区分</td><td>用 <code>@Qualifier</code>，或保证泛型实参可解析</td></tr>
+<tr><td>9</td><td>RPC 返回的泛型对象字段全是 null</td><td>服务端未传泛型类型信息</td><td>协议里显式带类型/用泛化调用</td></tr>
+<tr><td>10</td><td>单元测试通过，生产环境偶发 CCE</td><td>堆污染：某处 raw type 混用</td><td>开启 <code>-Xlint:all -Werror</code> 从源头堵住</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>14.2 排查方法：一个标准的诊断流程</h3>
+
+<div class="box info">
+  <span class="bt">遇到泛型相关的 ClassCastException，按这个顺序查</span>
+  <ol>
+    <li><strong>看 CCE 的栈信息</strong>：注意 <code>ClassCastException: java.util.LinkedHashMap cannot be cast to com.x.User</code>——这是「反序列化丢泛型」的典型指纹</li>
+    <li><strong>往上找「污染点」</strong>：CCE 抛出的位置通常不是凶手。往上找哪里把这个容器传出去过</li>
+    <li><strong>搜 raw type</strong>：在代码库里搜 <code>List </code>（不带 <code>&lt;</code>）的声明，以及 <code>@SuppressWarnings("unchecked")</code></li>
+    <li><strong>开 lint</strong>：<code>-Xlint:unchecked</code> 重新编译，让编译器把可疑点全列出来</li>
+    <li><strong>检查反射代码</strong>：是否有 <code>getDeclaredMethods()</code> 未过滤 <code>isBridge()</code></li>
+  </ol>
+</div>
+
+<h3>14.3 团队级防御：把泛型风险挡在 CI 之前</h3>
+
+<pre><code class="language-java">// 1. 统一工具类：强制要求传类型令牌
+public final class JsonUtils {
+    private static final ObjectMapper MAPPER = new ObjectMapper()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+
+    private JsonUtils() { }
+
+    /** 简单类型 */
+    public static &lt;T&gt; T parse(String json, Class&lt;T&gt; type) {
+        try { return MAPPER.readValue(json, type); }
+        catch (Exception e) { throw new IllegalStateException("JSON 解析失败", e); }
+    }
+
+    /** 复杂泛型：强制调用方传入 TypeReference，避免误用 List.class */
+    public static &lt;T&gt; T parse(String json, TypeReference&lt;T&gt; typeRef) {
+        try { return MAPPER.readValue(json, typeRef); }
+        catch (Exception e) { throw new IllegalStateException("JSON 解析失败", e); }
+    }
+
+    public static String toJson(Object obj) {
+        try { return MAPPER.writeValueAsString(obj); }
+        catch (Exception e) { throw new IllegalStateException("JSON 序列化失败", e); }
+    }
+}</code></pre>
+
+<div class="box danger">
+  <span class="bt">Code Review 时的泛型检查清单</span>
+  <ul>
+    <li>☐ 有没有出现 raw type（<code>List</code>、<code>Map</code> 裸用）？</li>
+    <li>☐ 每处 <code>@SuppressWarnings("unchecked")</code> 是否有注释说明「为什么安全」？</li>
+    <li>☐ 反序列化的地方是否用了 <code>TypeReference</code> 或 <code>Class&lt;T&gt;</code>？</li>
+    <li>☐ 反射遍历方法是否过滤了 <code>isBridge()</code> / <code>isSynthetic()</code>？</li>
+    <li>☐ 方法签名中的类型参数是否只出现一次（可以用 <code>?</code> 简化）？</li>
+    <li>☐ 集合参数的型变是否用对了（读用 <code>extends</code>、写用 <code>super</code>）？</li>
+    <li>☐ 泛型工具类的构造器是否有「子类必须落地类型」的校验？</li>
+  </ul>
+</div>
+
+<!-- ================= 第 15 章 ================= -->
+<h2 id="ch15"><span class="num">15</span>分层面试题库（含追问）</h2>
+
+<p>每题按 <strong>问题 → 答题要点 → 可复用表述 → 可能的追问</strong> 四段式组织。标注 <span class="pill g">初级</span> <span class="pill b">中级</span> <span class="pill r">高级</span> 表示考察层级。</p>
+
+<div class="box info">
+  <span class="bt">答题心法：先说结论，再讲原因，最后给证据</span>
+  <p>面试官最怕的是「背课文式」的长篇大论。<strong>「结论 + 原因 + 举例/字节码证据」</strong>的三段式结构，能让你的回答既有高度又有硬度。下面每题的「可复用表述」就是按这个结构写的。</p>
+</div>
+
+<h3>15.1 初级：基础概念（10 题）</h3>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-j">初级</span>Q1. 什么是泛型？它解决了什么问题？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点</div>
+    <p>泛型是 Java 5 引入的<strong>参数化类型</strong>机制，把类型本身作为参数传递给类/接口/方法。解决三个问题：编译期类型安全、消除强制类型转换、支持泛型算法。</p>
+    <div class="lab">可复用表述</div>
+    <p>「泛型的本质是<strong>把类型从运行时提前到编译期校验</strong>。Java 5 之前集合只能存 Object，取出来必须强转，类型错误要到运行时才暴露。泛型让编译器在编译期就能拦下 <code>list.add(123)</code> 这种错误，同时在取出时自动插入正确的类型转换——所以它既提升了安全性，也提升了可读性。代价是引入了类型擦除，带来了一系列限制。」</p>
+    <div class="lab">可能的追问</div>
+    <p>→ 那泛型有性能开销吗？（答：泛型本身零开销，字节码就是 Object + checkcast；真正的开销是包装类的装箱/拆箱）</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-j">初级</span>Q2. 泛型类、泛型接口、泛型方法分别怎么写？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点</div>
+    <ul>
+      <li>泛型类：<code>class Box&lt;T&gt; { T value; }</code></li>
+      <li>泛型接口：<code>interface Repo&lt;T, ID&gt; { T find(ID id); }</code></li>
+      <li>泛型方法：<strong>类型参数声明在返回类型之前</strong>，<code>public static &lt;T&gt; T first(List&lt;T&gt; list)</code></li>
+    </ul>
+    <div class="lab">关键区分点（这是加分项）</div>
+    <p>泛型方法与所在类是否泛型<strong>无关</strong>。判断标准只有一个：<strong>方法自己有没有声明 <code>&lt;T&gt;</code></strong>。普通类里可以有泛型方法；泛型类里的方法也未必是泛型方法。</p>
+    <div class="lab">可能的追问</div>
+    <p>→ 静态方法能用泛型类的类型参数吗？（不能，静态区不随实例的类型参数变化，必须自己声明 <code>&lt;E&gt;</code>）</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-j">初级</span>Q3. 什么是类型擦除？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点</div>
+    <p>编译器在生成字节码时丢弃泛型实参，把类型变量替换为其边界（无界则替换为 <code>Object</code>）。所以 <code>List&lt;String&gt;</code> 和 <code>List&lt;Integer&gt;</code> 在运行时是同一个类。</p>
+    <div class="lab">可复用表述</div>
+    <p>「类型擦除是 Java 泛型的实现方式。擦除规则是：无界类型变量擦除到 <code>Object</code>，有界类型变量擦除到最左侧边界，多边界只保留第一个。可以验证：<code>new ArrayList&lt;String&gt;().getClass() == new ArrayList&lt;Integer&gt;().getClass()</code> 返回 <code>true</code>；用 <code>javap -c</code> 反编译可以看到字段描述符是 <code>Ljava/lang/Object;</code> 而不是 <code>T</code>，并且在调用点有一条编译器插入的 <code>checkcast</code>。选择擦除是为了<strong>迁移兼容性</strong>——保证 Java 5 的代码能和 1.4 时代的已编译 class 文件互相调用。」</p>
+    <div class="lab">可能的追问</div>
+    <p>→ 为什么不用 C# 那种具化泛型？（具化需要改 JVM 指令集和 class 文件格式，无法二进制兼容；C# 是全新平台没有历史包袱）</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-j">初级</span>Q4. <code>List&lt;String&gt;</code> 和 <code>List&lt;Integer&gt;</code> 是同一个类吗？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点</div>
+    <p>运行时是同一个类（<code>ArrayList</code>），字节码只有一份。但编译期是两个不同的类型，不能互相赋值，编译器对它们的检查是分开的。</p>
+    <div class="lab">可复用表述</div>
+    <p>「这是类型擦除最直接的体现：<strong>编译期是两个类型，运行时是一个类型</strong>。可以这样验证——<code>list1.getClass() == list2.getClass()</code> 为 <code>true</code>；但 <code>List&lt;String&gt; a = new ArrayList&lt;Integer&gt;()</code> 编译不过。这个'双重身份'正是 Java 泛型所有'别扭之处'的根源：所有限制都来自'运行时不知道 T 是什么'。」</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-j">初级</span>Q5. 什么是原始类型（Raw Type）？和 <code>List&lt;Object&gt;</code> 有什么区别？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点</div>
+    <p>Raw type 是不带任何类型参数的泛型类型（<code>List</code>）。<strong>它们的编译产物相同，语义完全不同</strong>：<code>List&lt;Object&gt;</code> 参与泛型检查；<code>List</code> 会<strong>关闭</strong>所有泛型检查，只给警告。</p>
+    <div class="lab">可复用表述</div>
+    <p>「Raw type 是 Java 为兼容遗留代码留的逃生口。危险在于它会<strong>把类型安全网撕开一个口子，而且错误会传染</strong>——<code>List raw = typedList; raw.add(123);</code> 之后，<code>typedList</code> 这个看起来完全无辜的变量在下游就会抛 CCE。所以现代代码里 raw type 只该出现在三处：class 字面量（<code>List.class</code>）、<code>instanceof</code> 检查、以及和 Java 5 之前的代码互操作。」</p>
+    <div class="lab">可能的追问</div>
+    <p>→ 那 <code>List&lt;?&gt;</code> 和 <code>List&lt;Object&gt;</code> 呢？（<code>List&lt;?&gt;</code> 能接收 <code>List&lt;String&gt;</code> 但不能 add；<code>List&lt;Object&gt;</code> 相反，详见 Q8）</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-j">初级</span>Q6. 为什么不能写 <code>new T()</code> 和 <code>new T[10]</code>？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点</div>
+    <p>擦除后 <code>T</code> 是 <code>Object</code>，编译器不知道要 new 什么；数组需要运行时类型（<code>String[].class</code> 真实存在），擦除后变成 <code>Object[]</code>，会破坏类型安全。</p>
+    <div class="lab">解决方案（必须给出，否则答案不完整）</div>
+    <ul>
+      <li><code>new T()</code> → 传 <code>Class&lt;T&gt;</code> 类型令牌，或 <code>Supplier&lt;T&gt;</code> 工厂函数（<strong>推荐后者</strong>，无受检异常且支持带参数的构造）</li>
+      <li><code>new T[]</code> → 用 <code>List</code> 代替，或 <code>Array.newInstance(type, size)</code></li>
+    </ul>
+    <div class="lab">进阶加分</div>
+    <p>「泛型数组被禁止还有一个更深的原因——<strong>数组是协变的，泛型是不变的</strong>。如果允许 <code>List&lt;String&gt;[] lsa = new List&lt;String&gt;[10]</code>，那么通过 <code>Object[] oa = lsa</code> 就能塞进去一个 <code>List&lt;Integer&gt;</code>，运行时的 <code>ArrayStoreException</code> 检查在擦除后失效。所以编译器从源头禁止。」</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-j">初级</span>Q7. <code>&lt;? extends T&gt;</code> 和 <code>&lt;? super T&gt;</code> 有什么区别？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点</div>
+    <div class="tbl-wrap" style="margin:6px 0">
+    <table>
+    <thead><tr><th></th><th><code>? extends T</code></th><th><code>? super T</code></th></tr></thead>
+    <tbody>
+    <tr><td>型变</td><td>协变</td><td>逆变</td></tr>
+    <tr><td>读</td><td>✅ 读成 T</td><td>⚠️ 只能读成 Object</td></tr>
+    <tr><td>写</td><td>❌ 只能 null</td><td>✅ 写 T 及子类</td></tr>
+    <tr><td>PECS</td><td>Producer（生产者）</td><td>Consumer（消费者）</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <div class="lab">可复用表述</div>
+    <p>「一句话记：<strong>出 extends，进 super</strong>。要<strong>从容器读</strong>数据就用 <code>? extends T</code>——因为我们只知道它是 T 的子类，读出来一定能赋给 T，但不知道具体是哪个子类，所以写不进去；要<strong>往容器写</strong>数据就用 <code>? super T</code>——因为容器至少能装 T，写 T 及子类一定安全，但读出来只能当 Object。JDK 的 <code>Collections.copy(dest, src)</code> 是标准范例：<code>dest</code> 是 <code>? super T</code>，<code>src</code> 是 <code>? extends T</code>。」</p>
+    <div class="lab">可能的追问</div>
+    <p>→ <code>Stream.map</code> 的参数为什么是 <code>Function&lt;? super T, ? extends R&gt;</code>？（入参是消费者所以用 super，返回是生产者所以用 extends）</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-j">初级</span>Q8. <code>List&lt;?&gt;</code>、<code>List&lt;Object&gt;</code>、<code>List</code> 三者有什么区别？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点</div>
+    <div class="tbl-wrap" style="margin:6px 0">
+    <table>
+    <thead><tr><th>类型</th><th>能接收 <code>List&lt;String&gt;</code></th><th><code>get()</code> 返回</th><th><code>add()</code></th><th>语义</th></tr></thead>
+    <tbody>
+    <tr><td><code>List&lt;?&gt;</code></td><td>✅</td><td><code>Object</code></td><td>只能 <code>null</code></td><td>某种未知类型的列表（只读视图）</td></tr>
+    <tr><td><code>List&lt;Object&gt;</code></td><td>❌</td><td><code>Object</code></td><td>任意引用类型</td><td>元素类型明确是 Object</td></tr>
+    <tr><td><code>List</code>（raw）</td><td>✅</td><td><code>Object</code></td><td>任意（仅警告）</td><td>关闭泛型检查，危险</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <div class="lab">可复用表述</div>
+    <p>「三者的编译产物完全一样，但<strong>语义和编译期检查完全不同</strong>。<code>List&lt;?&gt;</code> 是'我不知道元素是什么类型'，所以只读不写，是最安全的只读参数类型；<code>List&lt;Object&gt;</code> 是'我明确知道元素是 Object'，能读能写，但正因为不定，它<strong>不能</strong>接收 <code>List&lt;String&gt;</code>（泛型不变）；<code>List</code> 是关掉了检查，只在遗留代码互操作时用。」</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-j">初级</span>Q9. 泛型能不能用于基本类型？为什么？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点</div>
+    <p>不能。<code>List&lt;int&gt;</code> 非法，必须用 <code>List&lt;Integer&gt;</code>。因为擦除后类型是 <code>Object</code>，而 <code>Object</code> 装不下 <code>int</code>，只能用引用类型。</p>
+    <div class="lab">进阶延伸（能把这道题答出深度）</div>
+    <p>「这个限制的代价是<strong>装箱/拆箱开销</strong>。在数据量大的场景下这是真实成本——比如千万级循环里 <code>sum += list.get(i)</code> 会隐式调用 <code>Integer.intValue()</code>。这也解释了为什么 JDK 8 要引入原始类型特化的流：<code>IntStream</code>、<code>LongStream</code>、<code>mapToInt</code>、<code>ToIntFunction</code> 这一整套 API 的存在，本质就是为了绕开'泛型不支持基本类型'带来的装箱开销。Project Valhalla 想引入的值类型（value types）就是为了从根本上解决这个问题，但至今仍未正式落地。」</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-j">初级</span>Q10. 泛型有运行时开销吗？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点</div>
+    <p><strong>泛型本身没有</strong>。字节码层面就是 <code>Object</code> 加一次 <code>checkcast</code>，没有任何额外对象或方法调用。真正的开销来自两处：<strong>包装类的装箱/拆箱</strong>（因为不支持基本类型）、以及 <code>checkcast</code> 的类型检查（JIT 通常能优化掉）。</p>
+    <div class="lab">可复用表述</div>
+    <p>「泛型是<strong>零运行时开销的抽象</strong>——这一点和 C++ 模板类似，但原因不同：C++ 是靠编译期展开消除抽象，Java 是靠类型擦除。需要注意的是，<code>checkcast</code> 本身是有成本的，但因为类型检查能被 JIT 的逃逸分析和类型推导优化掉，实测中几乎可以忽略。真正的性能问题在装箱——如果一个热路径上大量使用泛型集合装数值，应该改用原始类型数组或特化流。」</p>
+  </div>
+</div>
+
+<h3>15.2 中级：机制与源码（10 题）</h3>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-m">中级</span>Q11. 什么是桥接方法？为什么需要它？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点</div>
+    <p>擦除会让子类的「重写」变成「重载」（<code>Node.setData(Object)</code> vs <code>MyNode.setData(Integer)</code>），多态会失效。编译器通过合成一个与父类擦除后签名一致的<strong>桥接方法</strong>，把调用转发给真实现，从而修复多态。</p>
+    <div class="lab">可复用表述</div>
+    <p>「桥接方法是编译器合成的、带 <code>ACC_BRIDGE</code> 和 <code>ACC_SYNTHETIC</code> 标志的方法。它只做两件事：<code>checkcast</code> 转成真实类型，然后 <code>invokevirtual</code> 转发给真实现。可以用 <code>javap -c -p</code> 验证：实现 <code>Comparable&lt;Person&gt;</code> 的类里会有两个 <code>compareTo</code>，一个是 <code>compareTo(Person)</code>，一个是合成的 <code>compareTo(Object)</code>。」</p>
+    <div class="lab">可能的追问（这里往往藏着真问题）</div>
+    <p>→ 桥接方法在实际项目中会造成什么问题？</p>
+    <p><strong>答案要点</strong>：三类。①<strong>反射</strong>：<code>getDeclaredMethods()</code> 会多出一个方法，用「方法名+参数类型」做映射的框架会混乱，需要 <code>isBridge()</code> 过滤；②<strong>AOP</strong>：切点可能匹配到桥接方法，导致注解读不到或通知执行两次；③<strong>框架解析</strong>：MyBatis、Spring Data 之类靠泛型反推实体的框架，需要正确处理桥接与 TypeVariable。</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-m">中级</span>Q12. 泛型为什么是不变的？数组为什么是协变的？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点</div>
+    <p>泛型不变是为了类型安全：如果 <code>List&lt;String&gt;</code> 能赋给 <code>List&lt;Object&gt;</code>，就能往里塞 Integer，破坏 String 列表的约定。数组协变是 Java 1.0 的历史遗留，代价是运行时必须做 <code>ArrayStoreException</code> 检查。</p>
+    <div class="lab">可复用表述</div>
+    <p>「这是 Java 类型系统里一对很有意思的反差。数组协变是<strong>早期设计的缺陷</strong>——为了让 <code>Object[]</code> 能接收任意数组以便写通用工具，Java 1.0 就允许了协变，代价是每次数组写入都要在运行时做类型检查。Java 5 设计泛型时吸取了教训，选择了<strong>编译期禁止</strong>而非运行时检查：与其运行时付代价，不如编译期拦住。所以泛型不变不是'麻烦'，而是用<strong>编译期的严格换来运行时的安全和零开销</strong>。需要灵活性时，用通配符引入受控型变。」</p>
+    <div class="lab">可能的追问</div>
+    <p>→ <code>Object[] arr = new String[10]; arr[0] = 42;</code> 会怎样？（编译通过，运行时 <code>ArrayStoreException</code>——这就是数组协变的代价）</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-m">中级</span>Q13. 什么是通配符捕获？怎么解决？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点</div>
+    <p><code>List&lt;?&gt;</code> 中的 <code>?</code> 是一个「未知但固定」的类型（capture）。编译器无法证明 <code>list.get(j)</code> 的元素与 <code>list.set(i, ...)</code> 期望的是同一类型，所以交换元素的代码编译不过。</p>
+    <div class="lab">解决方案（必须给出代码）</div>
+    <pre><code class="language-java">public static void swap(List&lt;?&gt; list, int i, int j) {
+    swapHelper(list, i, j);          // 调用时 ? 被捕获为具体类型 E
+}
+private static &lt;E&gt; void swapHelper(List&lt;E&gt; list, int i, int j) {
+    E tmp = list.get(i);
+    list.set(i, list.get(j));
+    list.set(j, tmp);
+}</code></pre>
+    <div class="lab">加分点</div>
+    <p>「这也是 JDK <code>Collections.swap</code> 的真实实现方式——<strong>公开 API 保持通配符的可读性，内部用泛型方法把类型'捕获'出来</strong>。这个模式叫 wildcard capture。」</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-m">中级</span>Q14. 什么是堆污染？怎么避免？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点</div>
+    <p>堆污染指一个参数化类型的变量指向了不是该类型的对象，导致运行时类型错误。三个来源：raw type 混用、未检查的强转、泛型可变参数。</p>
+    <div class="lab">可复用表述</div>
+    <p>「堆污染的本质是<strong>类型系统被欺骗</strong>。最隐蔽的来源是泛型可变参数——因为可变参数本质是数组，而泛型数组是被禁止创建的，JDK 在这里做了妥协：允许创建但给出 <code>unchecked</code> 警告，并要求你承诺不往数组里写东西。这个承诺的正式表达就是 <code>@SafeVarargs</code>。」</p>
+    <div class="lab">防御手段</div>
+    <ul>
+      <li>编译开启 <code>-Xlint:all -Werror</code>，把警告当错误</li>
+      <li><code>@SuppressWarnings</code> 的作用域缩到最小，且必须写注释说明为什么安全</li>
+      <li>接受可变参数后<strong>先拷贝再保存</strong>，不要直接持有调用方传入的数组引用</li>
+      <li>能不用泛型数组就不用，优先 <code>List</code></li>
+    </ul>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-m">中级</span>Q15. <code>@SafeVarargs</code> 和 <code>@SuppressWarnings("unchecked")</code> 有什么区别？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点</div>
+    <div class="tbl-wrap" style="margin:6px 0">
+    <table>
+    <thead><tr><th>维度</th><th><code>@SuppressWarnings("unchecked")</code></th><th><code>@SafeVarargs</code></th></tr></thead>
+    <tbody>
+    <tr><td>作用范围</td><td>类/方法/字段/局部变量，可任意位置</td><td>仅 static / final / private 方法、构造器</td></tr>
+    <tr><td>语义</td><td>「我知道有警告，别报」——纯粹压制</td><td>「我保证不污染可变参数数组」——是<strong>承诺</strong></td></tr>
+    <tr><td>编译器是否校验</td><td>不校验，压过头会掩盖真 bug</td><td>信任你；如果内部确实写了数组就是真 bug</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <div class="lab">可复用表述</div>
+    <p>「两者是不同层次的工具。可以理解成：<code>@SuppressWarnings</code> 是<strong>让它闭嘴</strong>，<code>@SafeVarargs</code> 是<strong>向编译器作担保</strong>。所以 <code>@SafeVarargs</code> 只允许加在不会被重写的方法上（static / final / private），因为一旦允许子类重写，子类就可能破坏这个保证。Java 9 起也允许加在 private 实例方法上。」</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-m">中级</span>Q16. 泛型接口怎么在框架里做通用能力？举个你用过或见过的例子。</div>
+  <div class="qa-b">
+    <div class="lab">答题要点（结合自己项目）</div>
+    <p>MyBatis-Plus 的 <code>BaseMapper&lt;T&gt;</code>、Spring Data 的 <code>JpaRepository&lt;T, ID&gt;</code>、自定义的 <code>BaseDao&lt;T, ID&gt;</code>。核心机制是：<strong>框架通过反射解析泛型父类/父接口，反推出具体的实体类型</strong>，从而自动生成 SQL、表名映射或 CRUD 实现。</p>
+    <div class="lab">可复用表述（可以结合你的 CRM 项目）</div>
+    <p>「我在项目里做过类似的设计。核心是利用 <code>getGenericSuperclass()</code> 或 <code>getGenericInterfaces()</code> 拿到 <code>ParameterizedType</code>，再通过 <code>getActualTypeArguments()</code> 取出泛型实参，从而在运行期知道'这个 DAO 到底管哪个实体'。但有个坑必须处理：<strong>如果中间隔了一层泛型继承，取出来的是 <code>TypeVariable</code> 而不是 <code>Class</code></strong>，需要递归向上去解析边界——这也是 Spring 要专门造一个 <code>ResolvableType</code> 的原因，它把'多层继承 + 嵌套泛型 + 类型变量替换'的解析逻辑统一封装了。」</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-m">中级</span>Q17. 为什么 <code>objectMapper.readValue(json, List.class)</code> 会出问题？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点</div>
+    <p>因为 <code>List.class</code> 只告诉 Jackson「这是个 List」，<strong>没有告诉它元素是什么类型</strong>。Jackson 只能退化成 <code>LinkedHashMap</code>。变量声明上的 <code>&lt;User&gt;</code> 在擦除后不存在，框架根本看不到。</p>
+    <div class="lab">解决方案</div>
+    <pre><code class="language-java">List&lt;User&gt; users = objectMapper.readValue(json,
+        new TypeReference&lt;List&lt;User&gt;&gt;() {});   // 匿名子类保留泛型信息</code></pre>
+    <div class="lab">原理（这是关键，要能讲透）</div>
+    <p>「<code>TypeReference</code> 的原理是<strong>利用匿名子类的 <code>Signature</code> 属性</strong>。虽然泛型被擦除了，但<strong>类声明处</strong>的泛型签名会以 <code>Signature</code> 属性形式保留在 class 文件里（这是 JVM 规范明确要求保留的，目的就是给反射和工具使用）。所以 <code>new TypeReference&lt;List&lt;User&gt;&gt;(){}</code> 创建的这个匿名子类，它的 <code>getGenericSuperclass()</code> 返回一个 <code>ParameterizedType</code>，里面完整保留了 <code>List&lt;User&gt;</code>。注意<strong>必须带 <code>{}</code></strong>——不加花括号就没有子类，也就没有地方承载这个签名。」</p>
+    <div class="lab">可能的追问</div>
+    <p>→ 那对象实例上的泛型信息丢了吗？（丢了。保留的只是<strong>声明处</strong>的签名，不是实例的）</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-m">中级</span>Q18. 泛型方法中的类型参数只出现一次，该优化成什么？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点</div>
+    <p>换成通配符。这是《Effective Java》Item 31 的结论：类型参数的作用是<strong>在多个位置之间建立类型约束</strong>，只出现一次说明没有约束，用通配符更简洁且对调用方更宽松。</p>
+    <div class="lab">代码对比</div>
+    <pre><code class="language-java">// ❌ T 只用了一次
+public static &lt;T&gt; void printAll(List&lt;T&gt; list) { ... }
+
+// ✅ 换通配符，接受面更广
+public static void printAll(List&lt;?&gt; list) { ... }</code></pre>
+    <div class="lab">加分点</div>
+    <p>「但要注意<strong>不是二选一</strong>。像 <code>Collections.addAll(List&lt;? super T&gt; dest, Iterable&lt;? extends T&gt; src)</code> 就同时用了 <code>&lt;T&gt;</code> 和通配符——<strong>类型参数负责'建立关系'，通配符负责'放宽边界'</strong>，两者配合使用。」</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-m">中级</span>Q19. <code>? extends</code> 和泛型方法 <code>&lt;T extends&gt;</code> 看起来都能限定上界，怎么选？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点</div>
+    <p>关键区别在<strong>方法体内部能不能引用这个类型</strong>。</p>
+    <ul>
+      <li><code>List&lt;? extends Number&gt;</code>：方法体里<strong>无法命名</strong>这个类型，只能当成 Number 用，不能声明同类型的新变量</li>
+      <li><code>&lt;T extends Number&gt; void f(List&lt;T&gt;)</code>：<code>T</code> 是一个<strong>可命名的类型</strong>，可以声明 <code>T tmp</code>、返回 <code>T</code>、在多个参数间建立关联</li>
+    </ul>
+    <div class="lab">可复用表述</div>
+    <p>「判断标准是<strong>你需不需要在方法体里'提到'这个类型</strong>。如果只需要读出来当上界用，通配符足够；如果要声明变量、返回它、或者让多个参数共享同一个类型，就必须用类型参数。有一个细节：通配符捕获本质上是编译器在后台帮你生成了一个匿名的类型参数，所以有时你可以在通配符方法里'调用'一个泛型方法来间接获得命名能力——这就是 <code>Collections.swap</code> 的做法。」</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-m">中级</span>Q20. 你项目里有没有因为泛型踩过坑？怎么解决的？</div>
+  <div class="qa-b">
+    <div class="lab">答题框架（行为面试题，要用 STAR 讲）</div>
+    <p>选一个真实例子，按 <strong>场景 → 现象 → 定位 → 根因 → 修复 → 沉淀</strong> 组织。以下是三个最容易改编的模板：</p>
+    <div class="lab">模板 A：反序列化丢泛型</div>
+    <p>「我们有个统一 HTTP 客户端，最初写成 <code>&lt;T&gt; T get(String url)</code>，内部用 <code>restTemplate.getForObject(url, T.class)</code>。后来发现返回 <code>List&lt;User&gt;</code> 时元素全变成 LinkedHashMap。定位后确认是擦除导致 T.class 不存在，框架拿不到元素类型。修复方案是改用 <code>ParameterizedTypeReference</code>，在调用侧用匿名子类保留类型，同时把老 API 标记为 <code>@Deprecated</code> 并在 Code Review 清单里加了检查项。」</p>
+    <div class="lab">模板 B：AOP 切面失效</div>
+    <p>「泛型 Service 的某个方法上加了自定义注解，但切面读不到注解。排查发现切点匹配到的是编译器合成的<strong>桥接方法</strong>——注解在真方法上，桥接方法上没有。修复方式是在切面里主动过滤 <code>isBridge()</code>，并通过 <code>getTarget().getClass().getMethod(...)</code> 重新取到真方法再读注解。」</p>
+    <div class="lab">模板 C：泛型 DAO 的 ClassCastException</div>
+    <p>「通用的 <code>BaseDao&lt;T, ID&gt;</code> 在构造器里用 <code>getGenericSuperclass()</code> 解析实体类型，但某个中间层还保持着泛型（<code>class XxxDao&lt;T&gt; extends BaseDao&lt;T, Long&gt;</code>），导致解析出 <code>TypeVariable</code> 而不是 <code>Class</code>，强转失败。修复是引入递归解析逻辑，或直接用 <code>ResolvableType</code>。这件事让我意识到<strong>泛型反射工具必须处理'多层继承'的边界情况</strong>，后来把它写进了团队的工具类。」</p>
+  </div>
+</div>
+
+<h3>15.3 高级：深度理解（8 题）</h3>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-s">高级</span>Q21. Java 为什么选择类型擦除而不是具化泛型？这个选择带来了哪些代价？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点（分三层）</div>
+    <p><strong>第一层 · 为什么</strong>：迁移兼容性（Migration Compatibility）。Java 5 发布时，世界上已有海量已编译的 class 文件和第三方库。具化泛型需要修改 JVM 指令集（<code>checkcast</code> 要支持带参数的类）、修改 class 文件格式、并让 <code>List&lt;String&gt;</code> 有自己的 <code>Class</code> 对象——这些都会导致<strong>老 class 文件无法加载、老代码无法调用新 API</strong>。C# 之所以能用具化泛型，是因为它 2005 年重新设计了整个平台，没有兼容包袱。</p>
+    <p><strong>第二层 · 代价</strong>：①不能 <code>new T()</code>/<code>new T[]</code>、不能 <code>instanceof</code>、不能重载（七大限制）；②运行时拿不到实例的泛型实参，导致框架必须传 <code>Class&lt;T&gt;</code> 或 <code>TypeReference</code>；③不支持基本类型，引入装箱开销；④产生了桥接方法这种「编译器魔法」，给反射和 AOP 带来隐患。</p>
+    <p><strong>第三层 · 如何权衡</strong>：这些代价换来的是<strong>整个 Java 生态的平滑演进</strong>。可以对比：Kotlin 同样运行在 JVM 上，也必须遵守擦除规则；而 C#、Scala（部分）走的是另一条路。没有绝对优劣，只有权衡。</p>
+    <div class="lab">加分表述</div>
+    <p>「有意思的是，Java 团队一直在想办法'补救'：<code>@SafeVarargs</code>、<code>TypeReference</code> 模式、<code>MethodHandles</code> 的泛型签名保留、以及正在推进的 Project Valhalla 值类型。本质上都是在擦除的框架下，尽量把类型信息找回来。」</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-s">高级</span>Q22. 擦除之后，运行时还能拿到哪些泛型信息？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点</div>
+    <p>「运行时拿不到泛型信息」这句话<strong>只对了一半</strong>。准确说：<strong>类/方法/字段的声明处签名被保留，对象实例上的实参丢失</strong>。</p>
+    <div class="lab">技术依据</div>
+    <p>保留的机制是 class 文件里的 <code>Signature</code> 属性——JVM 规范明确要求保留，目的是「支持反射和其他工具」。所以 <code>getGenericSuperclass()</code>、<code>getGenericInterfaces()</code>、<code>Field.getGenericType()</code>、<code>Method.getGenericReturnType()</code> 都能拿到完整的泛型签名。</p>
+    <div class="lab">Type 接口体系（能说出这个说明真读过了）</div>
+    <ul>
+      <li><code>Class&lt;T&gt;</code> —— 原始类型</li>
+      <li><code>ParameterizedType</code> —— 参数化类型，<code>getRawType()</code> / <code>getActualTypeArguments()</code></li>
+      <li><code>TypeVariable</code> —— 类型变量 T，<code>getBounds()</code></li>
+      <li><code>GenericArrayType</code> —— 泛型数组 <code>T[]</code></li>
+      <li><code>WildcardType</code> —— 通配符 <code>? extends X</code></li>
+    </ul>
+    <div class="lab">工程意义</div>
+    <p>「这个'半保留'的特性是<strong>整个 Java 框架生态泛型能力的技术基础</strong>。Jackson 的 <code>TypeReference</code>、Gson 的 <code>TypeToken</code>、Spring 的 <code>ResolvableType</code>、MyBatis-Plus 的 <code>BaseMapper&lt;T&gt;</code>、Spring Data 的 Repository 泛型解析——全部建立在这个机制上。」</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-s">高级</span>Q23. <code>TypeReference</code> 的原理是什么？为什么必须写 <code>{}</code>？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点（要能写出核心代码）</div>
+    <pre><code class="language-java">protected TypeReference() {
+    // getClass() 返回的是运行时类 —— 即匿名子类 TypeReference$1
+    Type superClass = getClass().getGenericSuperclass();
+    // 显式继承的子类，其 Signature 属性保留了泛型实参
+    this.type = ((ParameterizedType) superClass).getActualTypeArguments()[0];
+}</code></pre>
+    <div class="lab">为什么必须写 <code>{}</code>（这是本题的核心）</div>
+    <p>「泛型信息只保留在<strong>类声明处</strong>。直接 <code>new TypeReference&lt;List&lt;User&gt;&gt;()</code> 会创建 <code>TypeReference</code> 本身的实例——而 <code>TypeReference</code> 的定义里是 <code>&lt;T&gt;</code>，不是 <code>List&lt;User&gt;</code>，所以拿不到具体实参。加上 <code>{}</code> 后，编译器会<strong>生成一个新的匿名子类</strong>，在它的 <code>Signature</code> 属性里写入 <code>TypeReference&lt;List&lt;User&gt;&gt;</code>——信息这才有了承载位置。所以 <code>{}</code> 不是可选的语法糖，而是这个机制能工作的前提。」</p>
+    <div class="lab">进阶延伸</div>
+    <p>→ 但它不能解析字段或方法上的泛型。如果需要更强的能力（比如 <code>Map&lt;String, List&lt;User&gt;&gt;</code> 里再动态替换某个类型参数），Guava 的 <code>TypeToken.where(...)</code> 或 Spring 的 <code>ResolvableType</code> 才是完整方案。</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-s">高级</span>Q24. <code>ResolvableType</code> 解决了什么原生反射做不到的事？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点</div>
+    <p>原生反射 API 在处理「多层继承 + 嵌套泛型 + 类型变量」时会退化：拿到的是 <code>TypeVariable</code> 而不是具体的 <code>Class</code>，需要大量手写递归。</p>
+    <div class="lab">三个具体场景</div>
+    <pre><code class="language-java">// 场景 1：多层泛型继承
+// A → B&lt;T&gt; extends A → C extends B&lt;User&gt;
+// 原生：getGenericSuperclass() 得到 B&lt;T&gt;，T 是 TypeVariable，解析不下去
+// ResolvableType：自动沿继承链把 T 替换为 User
+
+// 场景 2：嵌套泛型逐层下钻
+ResolvableType t = ResolvableType.forField(MyService.class.getDeclaredField("cache"));
+// Map&lt;String, List&lt;Order&gt;&gt;
+Class&lt;?&gt; orderType = t.getGeneric(1).getGeneric(0).resolve();   // Order
+
+// 场景 3：依赖注入时的泛型匹配
+boolean match = ResolvableType.forClass(UserValidator.class)
+        .as(Validator.class).getGeneric(0).resolve() == User.class;</code></pre>
+    <div class="lab">核心价值一句话</div>
+    <p>「<code>ResolvableType</code> 的本质是<strong>把泛型解析从'静态类型查看'变成了'带上下文的类型推演'</strong>。原生 API 回答的是'这个 Field 声明上写了什么'，而 ResolvableType 回答的是'在这个具体的类层次结构里，这个 T 最终是什么'。后者才是框架真正需要的能力。」</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-s">高级</span>Q25. 什么是 F-bounded 泛型？举一个实际应用。</div>
+  <div class="qa-b">
+    <div class="lab">答题要点</div>
+    <p>F-bounded（递归类型参数）指类型参数受自身约束，写法 <code>&lt;T extends SomeClass&lt;T&gt;&gt;</code>。用途有三：类型安全的比较（<code>Enum&lt;E extends Enum&lt;E&gt;&gt;</code>）、链式 Builder 的继承、同构容器。</p>
+    <div class="lab">JDK 里的例子（要能解释为什么这么写）</div>
+    <p><code>Enum&lt;E extends Enum&lt;E&gt;&gt; implements Comparable&lt;E&gt;</code>：目的是让 <code>compareTo</code> 的参数<strong>必须是同一个枚举类型</strong>。如果写成 <code>Comparable&lt;Enum&gt;</code>，任意两个枚举都能比较，类型不安全；写成 <code>Comparable&lt;E&gt;</code> 又不知道 E 是什么。只有「E 是一个枚举，且它的同类就是 E 自己」这个闭环约束，才能达到目的。</p>
+    <div class="lab">工程应用（能举例的加分）</div>
+    <pre><code class="language-java">public abstract class BaseBuilder&lt;T, B extends BaseBuilder&lt;T, B&gt;&gt; {
+    @SuppressWarnings("unchecked")
+    protected B self() { return (B) this; }
+    public B id(String id) { this.id = id; return self(); }
+}
+public class UserBuilder extends BaseBuilder&lt;User, UserBuilder&gt; {
+    public UserBuilder name(String n) { ...; return this; }
+}
+// 关键：没有 F-bounded，父类的 id() 只能返回 BaseBuilder，
+// 链式调用到这里就断了 —— .id("x").name("张三") 编译不过</code></pre>
+    <div class="lab">跨语言对照（如果你有 C++ 背景，这是王牌）</div>
+    <p>「Java 的 F-bounded 在形态上和 C++ 的 <strong>CRTP（奇异递归模板模式）</strong>几乎一样，都用于在继承体系下保住子类型信息。C++ 靠 <code>static_cast&lt;T*&gt;(this)</code>，Java 靠 <code>self()</code> 加一次受控强转。区别在于 C++ 的 CRTP 是编译期静态派发、无虚函数开销；而 Java 因为擦除，<code>self()</code> 里的强转是运行时 checkcast，最终仍走虚方法派发。」</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-s">高级</span>Q26. 泛型擦除对 AOP / 动态代理有什么影响？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点（按代理类型分）</div>
+    <p><strong>JDK 动态代理</strong>：基于接口生代理。由于泛型方法擦除后签名变成 <code>Object</code>，且存在桥接方法，可能出现：①切点匹配到桥接方法而非真方法；②注解读不到（注解在真方法上）；③通知执行两次。</p>
+    <p><strong>CGLIB 代理</strong>：通过继承生成子类并覆写方法。泛型场景下同样可能生成桥接方法，需要注意 <code>final</code> 方法无法代理、以及桥接方法的调用路径。</p>
+    <div class="lab">防御性写法</div>
+    <pre><code class="language-java">@Around("execution(* com.x.service.*.*(..))")
+public Object around(ProceedingJoinPoint pjp) throws Throwable {
+    MethodSignature sig = (MethodSignature) pjp.getSignature();
+    Method m = sig.getMethod();
+    if (m.isBridge() || m.isSynthetic()) {
+        return pjp.proceed();          // 桥接方法直接放行，不重复处理
+    }
+    // 从目标对象重新取真方法（可能来自接口）
+    Method real = AopUtils.getMostSpecificMethod(m, pjp.getTarget().getClass());
+    // 在 real 上读注解
+    MyAnno anno = real.getAnnotation(MyAnno.class);
+    ...
+}</code></pre>
+    <div class="lab">加分点</div>
+    <p>「Spring 内部其实已经做了类似处理——<code>AopUtils.getMostSpecificMethod</code> 和 <code>BridgeMethodResolver</code> 就是专门用来把桥接方法还原成真方法的工具类。如果自己写切面，直接复用它们比自己处理更稳妥。」</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-s">高级</span>Q27. 设计一个通用 API 时，你会怎么用泛型？（开放题）</div>
+  <div class="qa-b">
+    <div class="lab">答题框架（体现方法论，比答案本身更重要）</div>
+    <ol>
+      <li><strong>先问：类型信息需要在多处建立关联吗？</strong> 是 → 用 <code>&lt;T&gt;</code>；否 → 用 <code>?</code></li>
+      <li><strong>再问：参数是生产者还是消费者？</strong> 读 → <code>? extends T</code>；写 → <code>? super T</code>；读写都要 → 保持 <code>T</code>（PECS）</li>
+      <li><strong>需要运行时类型吗？</strong> 需要 → 要求调用方传 <code>Class&lt;T&gt;</code> 或 <code>TypeReference</code>；不需要 → 不要增加调用方负担</li>
+      <li><strong>需要实例化 T 吗？</strong> 需要 → 用 <code>Supplier&lt;T&gt;</code> 而非 <code>Class&lt;T&gt;</code>（无受检异常、支持有参构造）</li>
+      <li><strong>继承体系需要保住子类型吗？</strong> 需要 → F-bounded（<code>B extends Builder&lt;T, B&gt;</code>）</li>
+    </ol>
+    <div class="lab">可复用表述</div>
+    <p>「设计泛型 API 我遵循两个原则。第一是<strong>Joshua Bloch 的 PECS</strong>：先把每个参数分类成生产者或消费者，再决定用 <code>extends</code> 还是 <code>super</code>，这样 API 的接受面最广、类型约束最合理。第二是<strong>'不要向调用方索要它不需要提供的东西'</strong>——如果我的实现不需要 <code>Class&lt;T&gt;</code>，就绝不把它加进签名；但如果确实需要（比如要反射创建实例或反序列化），就必须显式要，否则一定会在运行时炸。我们项目的统一响应封装 <code>Result&lt;T&gt;</code>、分页对象 <code>PageResult&lt;T&gt;</code> 和通用 DAO 都是按这个思路设计的。」</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-s">高级</span>Q28. 如果让你改造 Java 泛型，你会怎么做？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点（考察技术视野，没有标准答案）</div>
+    <p>核心矛盾是：<strong>要保留二进制兼容，就不可能完全具化</strong>。业界的探索方向有三类：</p>
+    <ul>
+      <li><strong>Project Valhalla（值类型）</strong>：引入 <code>value class</code> 和特化泛型，让 <code>List&lt;int&gt;</code> 这类写法成为可能且零装箱开销。同时会引入「原始类型特化」的泛型（specialized generics），但为兼容，擦除的默认行为会保留——需要显式标注才做特化。</li>
+      <li><strong>Kotlin 的 inline class + reified</strong>：<code>inline fun &lt;reified T&gt;</code> 通过内联把泛型实参「写死」到调用点，从而在函数内使用 <code>T::class</code>。这是一个非常巧妙的绕过方案——不改变类型系统，而是用内联机制在编译期注入类型信息。</li>
+      <li><strong>Scala 3 的 <code>erased</code> / <code>inline</code> 机制</strong>：类似的思路，用内联换取类型信息保留。</li>
+    </ul>
+    <div class="lab">可复用表述（这句很容易让面试官眼前一亮）</div>
+    <p>「如果让我改，我会倾向于<strong>沿着 Valhalla 的方向走：保留擦除作为默认行为以维持兼容，但增加一个显式的'特化泛型'语法</strong>——让需要零装箱开销或需要运行时类型信息的场景可以主动选择具化，代价是接受潜在的代码膨胀和二进制不兼容。这实际上就是'渐进式具化'的思路。<strong>Kotlin 的 <code>reified</code> 已经证明了这个方向是可行的</strong>——它不改变 JVM 的擦除规则，而是通过 <code>inline</code> 在编译期把类型信息注入到调用点，是一种非常务实的折中。」</p>
+  </div>
+</div>
+
+<h3>15.4 两个高频延伸题</h3>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-m">中级</span>Q29. 为什么转数组推荐写 <code>toArray(new T[0])</code> 而不是 <code>toArray(new T[size])</code>？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点</div>
+    <p>集合的 <code>toArray()</code> 有两个重载：无参版只能返回 <code>Object[]</code>；<code>&lt;T&gt; T[] toArray(T[] a)</code> 需要调用方把一个真实类型的实例传进来充当「类型载体」——这就是擦除下的变通方案。</p>
+    <div class="lab">关键结论</div>
+    <p>传长度 0 的数组比传精确长度更快：<code>new T[0]</code> 会走 <code>Arrays.copyOf</code>（JIT intrinsic）分支，且是<strong>编译期常量大小</strong>的分配，更容易被逃逸分析消除；而 <code>new T[size]</code> 走 <code>System.arraycopy</code> 分支，需要分配一个运行时大小的数组。</p>
+    <div class="lab">可复用表述</div>
+    <p>见 9.4 节。点睛之句：「这个设计本身就是擦除的产物——如果 Java 有具化泛型，<code>toArray()</code> 根本不需要这个参数。」</p>
+  </div>
+</div>
+
+<div class="qa">
+  <div class="qa-h"><span class="lv lv-s">高级</span>Q30. 什么情况下不该用泛型？</div>
+  <div class="qa-b">
+    <div class="lab">答题要点</div>
+    <p>泛型的价值有两个前提，缺任何一个都该重新考虑：<strong>① 同一套逻辑需要适配多个类型；② 这些类型之间的关系需要被编译器保证。</strong></p>
+    <div class="lab">五个「用过头」的信号</div>
+    <ul>
+      <li>方法体里出现 <code>instanceof</code> 分支判断类型 —— 你在用泛型模拟编译期特化，而 Java 做不到</li>
+      <li>类型参数超过 3 个 —— 调用方必须写全，可读性急剧下降</li>
+      <li>到处 <code>@SuppressWarnings("unchecked")</code> —— 类型安全网已经被自己拆掉了</li>
+      <li>写了 <code>&lt;T&gt;</code> 但实际只用了 1~2 种类型 —— 纯粹的过度抽象</li>
+      <li>只为了省一个强制转换 —— 收益小于理解成本</li>
+    </ul>
+    <div class="lab">可复用表述</div>
+    <p>「我的判断标准是<strong>两个条件必须同时成立</strong>：既要适配多个类型，又要让类型关系被编译器保证。如果只是'能通用'但类型之间没有关联，那用 <code>Object</code> 或者干脆写几个重载反而更清楚。泛型的抽象成本是真实的——它会传导到每一个调用方，所以在团队代码里我倾向于<strong>只在收益明确的地方用泛型</strong>。」</p>
+  </div>
+</div>
+
+<!-- ================= 第 16 章 ================= -->
+<h2 id="ch16"><span class="num">16</span>速查表</h2>
+
+<h3>16.1 语法速查</h3>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>语法</th><th>含义</th><th>典型用途</th></tr></thead>
+<tbody>
+<tr><td><code>&lt;T&gt;</code></td><td>类型参数声明</td><td>类/接口/方法定义</td></tr>
+<tr><td><code>&lt;T extends A &amp; B&gt;</code></td><td>多边界，类必须在第一位</td><td>需要调用多个类型的方法</td></tr>
+<tr><td><code>&lt;T extends Comparable&lt;T&gt;&gt;</code></td><td>F-bounded（递归约束）</td><td>Enum、Builder、同构容器</td></tr>
+<tr><td><code>List&lt;?&gt;</code></td><td>无界通配符，只读视图</td><td>只做 size/迭代的参数</td></tr>
+<tr><td><code>List&lt;? extends T&gt;</code></td><td>上界，协变，只能读</td><td>数据源、Producer</td></tr>
+<tr><td><code>List&lt;? super T&gt;</code></td><td>下界，逆变，只能写</td><td>结果容器、Consumer</td></tr>
+<tr><td><code>Box&lt;&gt;</code></td><td>菱形运算符（Java 7+）</td><td>new 时省略右侧类型</td></tr>
+<tr><td><code>Collections.&lt;String&gt;emptyList()</code></td><td>显式类型见证</td><td>推断失败时的兜底</td></tr>
+<tr><td><code>@SafeVarargs</code></td><td>承诺不污染可变参数数组</td><td>static/final/private 方法</td></tr>
+<tr><td><code>@SuppressWarnings("unchecked")</code></td><td>压制未检查警告</td><td>作用域尽量小 + 写注释</td></tr>
+<tr><td><code>Class&lt;T&gt;</code></td><td>类型令牌</td><td>需要 new T() 或反序列化时</td></tr>
+<tr><td><code>TypeReference&lt;T&gt;(){}</code></td><td>保留泛型信息的匿名子类</td><td>反序列化、HTTP 客户端</td></tr>
+<tr><td><code>toArray(new T[0])</code></td><td>集合转数组的推荐写法</td><td>绕过擦除的「类型载体」惯用法</td></tr>
+<tr><td><code>GenericTypeResolver</code></td><td>Spring 的轻量泛型解析器</td><td>简单反推泛型实参，一行搞定</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>16.2 七大限制与规避方案</h3>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>不能做</th><th>替代方案</th></tr></thead>
+<tbody>
+<tr><td><code>new T()</code></td><td><code>Supplier&lt;T&gt;</code>（首选）/ <code>Class&lt;T&gt;</code></td></tr>
+<tr><td><code>new T[10]</code></td><td>用 <code>List</code> / <code>Array.newInstance(type, n)</code></td></tr>
+<tr><td><code>instanceof List&lt;String&gt;</code></td><td><code>instanceof List</code> + 元素类型判断</td></tr>
+<tr><td>重载 <code>f(List&lt;A&gt;)</code> / <code>f(List&lt;B&gt;)</code></td><td>改方法名或加区分参数</td></tr>
+<tr><td>静态成员用类类型参数</td><td>静态方法自己声明 <code>&lt;E&gt;</code></td></tr>
+<tr><td><code>List&lt;int&gt;</code></td><td><code>List&lt;Integer&gt;</code> / 原始类型特化流</td></tr>
+<tr><td><code>catch (T e)</code></td><td>不这么做</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>16.3 反射 API 速查</h3>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>API</th><th>返回类型</th><th>用途</th></tr></thead>
+<tbody>
+<tr><td><code>Class.getGenericSuperclass()</code></td><td><code>Type</code></td><td>父类的泛型声明</td></tr>
+<tr><td><code>Class.getGenericInterfaces()</code></td><td><code>Type[]</code></td><td>接口的泛型声明</td></tr>
+<tr><td><code>Field.getGenericType()</code></td><td><code>Type</code></td><td>字段的泛型声明</td></tr>
+<tr><td><code>Method.getGenericReturnType()</code></td><td><code>Type</code></td><td>方法返回类型</td></tr>
+<tr><td><code>Method.getGenericParameterTypes()</code></td><td><code>Type[]</code></td><td>方法参数类型</td></tr>
+<tr><td><code>ParameterizedType.getRawType()</code></td><td><code>Type</code></td><td>原始类型（如 List）</td></tr>
+<tr><td><code>ParameterizedType.getActualTypeArguments()</code></td><td><code>Type[]</code></td><td>泛型实参（如 [String]）</td></tr>
+<tr><td><code>TypeVariable.getBounds()</code></td><td><code>Type[]</code></td><td>类型变量的边界</td></tr>
+<tr><td><code>WildcardType.getUpperBounds()</code></td><td><code>Type[]</code></td><td><code>? extends</code> 的上界</td></tr>
+<tr><td><code>WildcardType.getLowerBounds()</code></td><td><code>Type[]</code></td><td><code>? super</code> 的下界</td></tr>
+<tr><td><code>Class.cast(obj)</code></td><td><code>T</code></td><td>类型安全强转，无需 suppress</td></tr>
+<tr><td><code>Method.isBridge()</code></td><td><code>boolean</code></td><td>过滤编译器合成的桥接方法</td></tr>
+<tr><td><code>Method.isSynthetic()</code></td><td><code>boolean</code></td><td>过滤所有合成成员</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>16.4 一页纸总结（面试前 3 分钟看这个）</h3>
+
+<div class="box deep">
+  <span class="bt">Java 泛型 · 核心八句话</span>
+  <ol>
+    <li><strong>擦除是一切的前提</strong>：编译期检查 + 自动插桩，运行时 <code>List&lt;String&gt;</code> 就是 <code>List</code>。选擦除是为了<strong>二进制兼容</strong>。</li>
+    <li><strong>七大限制都源自擦除</strong>：不能 <code>new T()</code>/<code>new T[]</code>/<code>instanceof</code>/重载/静态成员/基本类型/catch T。</li>
+    <li><strong>不变是为了安全</strong>：对比数组协变带来的 <code>ArrayStoreException</code>。灵活性用通配符补。</li>
+    <li><strong>PECS</strong>：Producer → <code>? extends</code>（只读）；Consumer → <code>? super</code>（只写）。出 extends，进 super。</li>
+    <li><strong>桥接方法</strong>：编译器合成的转发方法，用来修复擦除破坏的多态。会给反射和 AOP 带来坑，要用 <code>isBridge()</code> 过滤。</li>
+    <li><strong>声明处的泛型信息保留了</strong>（Signature 属性），这是 <code>TypeReference</code> / <code>ResolvableType</code> / 泛型 DAO 的技术基础；实例上的实参丢失。</li>
+    <li><strong>实战三板斧</strong>：需要 new T 用 <code>Supplier</code>；需要反序列化用 <code>TypeReference</code>；需要解析继承体系用 <code>ResolvableType</code>。</li>
+    <li><strong>多边界的顺序有实质影响</strong>：擦除只保留最左边界，而擦除结果决定了方法签名的二进制形态。JDK 的 <code>Collections.max</code> 写作 <code>&lt;T extends Object &amp; Comparable&lt;? super T&gt;&gt;</code>，那个看似多余的 <code>Object &amp;</code>，是为了让擦除回退成 <code>Object</code>，好让二十年前编译的老字节码继续链接得上。</li>
+  </ol>
+</div>
+
+<h3>16.5 进一步学习路线</h3>
+
+<div class="grid g2">
+  <div class="card">
+    <h4>1. 读源码（最有效）</h4>
+    <p><code>java.util.Collection</code> / <code>Collections</code> / <code>Stream</code> 的泛型设计 → Spring 的 <code>ResolvableType</code> → MyBatis-Plus 的 <code>BaseMapper</code> 泛型解析。这三个读完，泛型在工程里的用法基本就通了。</p>
+  </div>
+  <div class="card">
+    <h4>2. 动手实验</h4>
+    <p>用 <code>javap -c -p -v</code> 反编译自己写的泛型代码，观察：桥接方法、Signature 属性、checkcast 指令、字段描述符。做一遍胜过读十遍。</p>
+  </div>
+  <div class="card">
+    <h4>3. 权威资料</h4>
+    <p>JLS 第 4 章（Types, Values, and Variables）与第 5 章（Conversions）、《Effective Java》Item 26/28/29/31/32/33、Angelika Langer 的 <em>Java Generics FAQ</em>（业界最详尽）。</p>
+  </div>
+  <div class="card">
+    <h4>4. 理论拔高</h4>
+    <p>型变理论（协变/逆变/不变）、Kotlin 的声明处型变与 <code>reified</code>、Scala 的型变标注、C++ Concepts。横向对比能显著提升你对类型系统的理解。</p>
+  </div>
+</div>
+
+<div class="foot">
+  <p><strong>Java 泛型完全指南</strong> · 共 16 章 · 编写于 2026 年 9 月</p>
+  <p>基于 Java 5 → Java 25 的泛型演进整理，面向 10 年经验后端工程师的深度要求。</p>
+</div>
+
+<button id="top" title="回到顶部">↑</button>
+</div>
+<script>
+(function(){
+  var bar = document.getElementById('progress');
+  var links = Array.prototype.slice.call(document.querySelectorAll('.sidebar a'));
+  var secs = links.map(function(a){ return document.querySelector(a.getAttribute('href')); });
+  var btn = document.getElementById('top');
+  function onScroll(){
+    var h = document.documentElement.scrollHeight - window.innerHeight;
+    bar.style.width = (h > 0 ? (window.scrollY / h * 100) : 0) + '%';
+    btn.style.display = window.scrollY > 600 ? 'block' : 'none';
+    var idx = 0;
+    for (var i = 0; i < secs.length; i++) {
+      if (secs[i] && secs[i].getBoundingClientRect().top <= 120) idx = i;
+    }
+    links.forEach(function(a, i){ a.classList.toggle('active', i === idx); });
+  }
+  window.addEventListener('scroll', onScroll, {passive:true});
+  onScroll();
+
+  btn.addEventListener('click', function(){
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+})();
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>
+  if (window.hljs) {
+    document.querySelectorAll('pre code').forEach(function (el) {
+      try { hljs.highlightElement(el); } catch (e) { /* 降级：保留纯文本 */ }
+    });
+  }
+</script>
+</body>
+</html>

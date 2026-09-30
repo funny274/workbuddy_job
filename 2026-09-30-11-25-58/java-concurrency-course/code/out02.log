@@ -1,0 +1,51 @@
+===== 1) 四种创建方式 =====
+    runAsync 在 cf-pool
+    立即完成 / supplyAsync 结果 / 手动完成
+
+===== 2) 串行链式：thenApply / thenAccept / thenRun =====
+    thenApply 在 main
+    最终结果=25
+    注意：thenApply 在「上一个任务的执行线程」上运行（同线程续跑）
+
+===== 3) 带 Async 后缀：切换到别的线程 =====
+    thenApplyAsync 在 cf-pool
+    thenAcceptAsync 拿到 AB
+
+===== 4) 异常处理三件套 =====
+    handle      → handle 兜底: java.lang.RuntimeException: 模拟失败
+    exceptionally → exceptionally 兜底: boom
+    whenComplete 观察到: v=正常值, e=null
+    whenComplete → 返回值不变: 正常值
+
+===== 5) 组合：thenCompose（扁平化）vs thenCombine（合并）=====
+    thenCompose → 根据[用户ID=100]查到订单
+    thenCombine → A+B，耗时 301ms（并行，非 600ms）
+
+===== 6) 多任务编排：allOf / anyOf =====
+    allOf 全部完成 → [服务1结果, 服务2结果, 服务3结果]，耗时 206ms
+    anyOf 第一个完成 → 快
+
+============ 方法速查表 ============
+| 方法             | 入参→出参      | 用途                        |
+|------------------|---------------|-----------------------------|
+| thenApply        | T→U           | 转换结果（串行）            |
+| thenAccept       | T→void        | 消费结果                    |
+| thenRun          | void→void     | 不关心结果，跑下一步        |
+| thenCompose      | T→CF<U>       | 依赖前一结果返回新 CF（扁平化）|
+| thenCombine      | (T,U)→V       | 两个独立 CF 结果合并        |
+| allOf            | CF[]→CF<Void> | 全部完成                    |
+| anyOf            | CF[]→CF<Object>| 任一完成                   |
+| handle           | (T,E)→U       | 成功/失败都处理，可改变结果 |
+| exceptionally    | E→T           | 只处理异常，兜底返回        |
+| whenComplete     | (T,E)→void    | 只观察不改变结果            |
+
+---------- 三个必知要点 ----------
+① 没有 Async 后缀的方法：如果任务已完成，用调用者线程执行；
+   如果未完成，用「完成那个任务的线程」执行。→ 可能阻塞调用者，
+   也可能在任意线程跑，容易踩坑。生产建议显式用带 Async 的版本并传线程池。
+② 默认线程池是 ForkJoinPool.commonPool()，
+   parallelStream 也用它 → 共用会互相影响，必须传自己的池。
+③ allOf 返回 CompletableFuture<Void>，拿不到各个结果，
+   需要自己 join 每个子任务（本项目演示了标准写法）。
+====================================
+

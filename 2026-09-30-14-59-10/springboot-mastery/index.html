@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Spring Boot 3.x 大厂级深度精讲 · 7天速成体系</title>
+<style>
+:root{
+  --bg:#f7f8fa;
+  --bg-panel:#ffffff;
+  --bg-side:#1e2229;
+  --bg-side-hover:#2b313b;
+  --bg-code:#f4f6f8;
+  --bg-inline:#eef1f4;
+  --bg-tip:#eaf4ff;
+  --bg-warn:#fff7e6;
+  --bg-danger:#fdeceb;
+  --bg-ok:#eaf7ee;
+  --text:#1f2329;
+  --text-2:#5c6470;
+  --text-3:#8a929e;
+  --side-text:#c9d1d9;
+  --side-text-dim:#8b949e;
+  --border:#e3e6ea;
+  --accent:#2f6fed;
+  --accent-2:#1b4fd8;
+  --accent-soft:#e8f0fe;
+  --kw:#c0392b;
+  --str:#0a7d3f;
+  --num:#b45309;
+  --cmt:#8b949e;
+  --fn:#1f4fd8;
+  --maxw:960px;
+  --sidebar-w:320px;
+}
+*{box-sizing:border-box;}
+html{scroll-behavior:smooth;}
+body{
+  margin:0;background:var(--bg);color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  font-size:15px;line-height:1.75;-webkit-font-smoothing:antialiased;
+}
+
+/* ============ 顶部进度条 ============ */
+#progressbar{position:fixed;top:0;left:0;height:3px;background:linear-gradient(90deg,var(--accent),#7ba8ff);width:0;z-index:9999;transition:width .1s;}
+
+/* ============ 布局 ============ */
+#layout{display:flex;min-height:100vh;}
+
+/* ============ 侧栏 ============ */
+#sidebar{
+  width:var(--sidebar-w);flex:0 0 var(--sidebar-w);
+  background:var(--bg-side);color:var(--side-text);
+  position:fixed;top:0;left:0;bottom:0;overflow-y:auto;
+  border-right:1px solid #12151a;z-index:100;
+  scrollbar-width:thin;scrollbar-color:#3a414d transparent;
+}
+#sidebar::-webkit-scrollbar{width:7px;}
+#sidebar::-webkit-scrollbar-thumb{background:#3a414d;border-radius:4px;}
+.side-head{padding:20px 20px 14px;border-bottom:1px solid #2b313b;position:sticky;top:0;background:var(--bg-side);z-index:2;}
+.side-title{font-size:16px;font-weight:700;color:#fff;letter-spacing:.2px;}
+.side-sub{font-size:12px;color:var(--side-text-dim);margin-top:4px;}
+.side-meta{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap;}
+.tagpill{font-size:11px;padding:2px 8px;border-radius:20px;background:#2f6fed22;color:#7ba8ff;border:1px solid #2f6fed44;}
+.tagpill.g{background:#0a7d3f22;color:#6ee7a8;border-color:#0a7d3f55;}
+
+#toc{padding:10px 0 60px;}
+.toc-day{
+  display:flex;align-items:center;gap:8px;
+  padding:9px 18px 9px 20px;cursor:pointer;user-select:none;
+  font-size:13.5px;font-weight:600;color:#e6edf3;
+  border-left:3px solid transparent;transition:background .15s;
+}
+.toc-day:hover{background:var(--bg-side-hover);}
+.toc-day.active{border-left-color:var(--accent);background:#2f6fed1a;}
+.toc-day .caret{font-size:10px;color:var(--side-text-dim);transition:transform .2s;display:inline-block;width:10px;}
+.toc-day.open .caret{transform:rotate(90deg);}
+.toc-day .dnum{font-size:10.5px;background:#2f6fed;color:#fff;border-radius:4px;padding:1px 6px;font-weight:700;letter-spacing:.3px;}
+.toc-day .dnum.alt{background:#0a7d3f;}
+.toc-sub{display:none;padding:2px 0 6px;}
+.toc-sub.open{display:block;}
+.toc-sub a{
+  display:block;padding:6px 16px 6px 44px;font-size:13px;color:var(--side-text-dim);
+  text-decoration:none;border-left:3px solid transparent;line-height:1.5;transition:all .15s;
+}
+.toc-sub a:hover{color:#fff;background:var(--bg-side-hover);}
+.toc-sub a.active{color:#7ba8ff;border-left-color:#7ba8ff;background:#2f6fed14;font-weight:600;}
+.toc-sub a .lv{font-size:10px;color:#6b7280;margin-right:5px;}
+
+/* ============ 主内容 ============ */
+#main{margin-left:var(--sidebar-w);flex:1;min-width:0;padding:0 0 120px;}
+.content-wrap{max-width:var(--maxw);margin:0 auto;padding:0 40px;}
+
+/* 封面 */
+.cover{
+  background:linear-gradient(135deg,#1b2a4a 0%,#22304f 45%,#2f6fed 140%);
+  color:#fff;padding:64px 40px 56px;margin-bottom:0;
+}
+.cover-inner{max-width:var(--maxw);margin:0 auto;padding:0 0px;}
+.cover h1{font-size:36px;margin:0 0 14px;font-weight:800;letter-spacing:-.5px;line-height:1.25;}
+.cover .lead{font-size:16.5px;color:#c6d4ea;max-width:720px;line-height:1.8;}
+.cover-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-top:32px;}
+.cover-card{background:#ffffff14;border:1px solid #ffffff26;border-radius:10px;padding:16px 18px;}
+.cover-card .k{font-size:12px;color:#9fb6d8;letter-spacing:.5px;text-transform:uppercase;}
+.cover-card .v{font-size:17px;font-weight:700;margin-top:5px;color:#fff;}
+
+/* 章节 */
+section.chapter{padding-top:44px;margin-bottom:18px;}
+h2.ch-title{
+  font-size:27px;font-weight:800;margin:0 0 8px;padding-bottom:14px;
+  border-bottom:2px solid var(--border);letter-spacing:-.3px;scroll-margin-top:70px;
+}
+h2.ch-title .badge{
+  display:inline-block;font-size:12px;font-weight:700;padding:3px 10px;border-radius:6px;
+  background:var(--accent);color:#fff;vertical-align:middle;margin-right:12px;letter-spacing:.5px;
+}
+h2.ch-title .badge.alt{background:#0a7d3f;}
+h2.ch-title .badge.warm{background:#d97706;}
+.ch-intro{color:var(--text-2);font-size:14.5px;margin:0 0 8px;}
+
+h3{font-size:21px;font-weight:700;margin:40px 0 12px;scroll-margin-top:70px;letter-spacing:-.2px;}
+h4{font-size:17px;font-weight:700;margin:28px 0 10px;color:#111827;scroll-margin-top:70px;}
+h5{font-size:15px;font-weight:700;margin:20px 0 8px;color:#374151;scroll-margin-top:70px;}
+p{margin:10px 0;}
+ul,ol{margin:10px 0;padding-left:26px;}
+li{margin:5px 0;}
+li>ul,li>ol{margin:4px 0;}
+strong{font-weight:700;color:#111827;}
+code{
+  font-family:"JetBrains Mono","Cascadia Code",Consolas,"Courier New",monospace;
+  background:var(--bg-inline);padding:2px 6px;border-radius:4px;font-size:13px;color:#b3305a;
+  border:1px solid #e0e4e9;
+}
+a{color:var(--accent);text-decoration:none;}
+a:hover{text-decoration:underline;}
+
+/* 代码块 */
+pre{
+  background:var(--bg-code);border:1px solid var(--border);border-radius:9px;
+  padding:0;margin:14px 0;overflow:hidden;position:relative;
+}
+pre .code-head{
+  display:flex;justify-content:space-between;align-items:center;
+  padding:7px 14px;background:#eef1f5;border-bottom:1px solid var(--border);
+  font-size:12px;color:var(--text-2);font-family:inherit;font-weight:600;
+}
+pre .code-head .lang{letter-spacing:.5px;text-transform:uppercase;font-size:11px;}
+pre .copy-btn{
+  background:#fff;border:1px solid var(--border);border-radius:5px;cursor:pointer;
+  font-size:11px;padding:2px 10px;color:var(--text-2);font-family:inherit;transition:.15s;
+}
+pre .copy-btn:hover{background:var(--accent);color:#fff;border-color:var(--accent);}
+pre code{
+  display:block;background:none;border:none;padding:15px 18px;font-size:13px;
+  line-height:1.72;color:#24292f;overflow-x:auto;white-space:pre;
+}
+.kw{color:var(--kw);font-weight:600;}
+.str{color:var(--str);}
+.num{color:var(--num);}
+.cmt{color:var(--cmt);font-style:italic;}
+.fn{color:var(--fn);}
+.ann{color:#8250df;}
+.op{color:#cf222e;}
+code .type{color:#0550ae;}
+
+/* 提示框 */
+.box{border-radius:9px;padding:14px 18px;margin:16px 0;font-size:14px;border-left:4px solid;}
+.box .box-t{font-weight:700;margin-bottom:6px;font-size:14px;display:flex;align-items:center;gap:7px;}
+.box p:last-child{margin-bottom:0;}
+.box.tip{background:var(--bg-tip);border-color:#3b82f6;}
+.box.tip .box-t{color:#1d4ed8;}
+.box.warn{background:var(--bg-warn);border-color:#f59e0b;}
+.box.warn .box-t{color:#b45309;}
+.box.danger{background:var(--bg-danger);border-color:#ef4444;}
+.box.danger .box-t{color:#b91c1c;}
+.box.ok{background:var(--bg-ok);border-color:#10b981;}
+.box.ok .box-t{color:#047857;}
+.box.interview{background:#f5f0ff;border-color:#8b5cf6;}
+.box.interview .box-t{color:#6d28d9;}
+
+/* 表格 */
+.tbl-wrap{overflow-x:auto;margin:16px 0;border:1px solid var(--border);border-radius:9px;}
+table{border-collapse:collapse;width:100%;font-size:13.5px;background:#fff;}
+th,td{padding:10px 14px;text-align:left;border-bottom:1px solid var(--border);vertical-align:top;}
+th{background:#f3f5f8;font-weight:700;color:#111827;font-size:13px;white-space:nowrap;}
+tr:last-child td{border-bottom:none;}
+tbody tr:hover{background:#fafbfc;}
+
+/* 对比双栏 */
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:16px 0;}
+.col{border:1px solid var(--border);border-radius:9px;padding:14px 16px;background:#fff;}
+.col h5{margin-top:0;}
+.col.bad{border-top:3px solid #ef4444;}
+.col.good{border-top:3px solid #10b981;}
+
+/* 面试题卡片 */
+.qa{border:1px solid var(--border);border-radius:10px;margin:14px 0;overflow:hidden;background:#fff;}
+.qa .q{
+  padding:12px 16px;background:#f7f9fc;font-weight:700;font-size:14.5px;color:#111827;
+  cursor:pointer;display:flex;gap:10px;align-items:flex-start;user-select:none;
+}
+.qa .q:hover{background:#eff3f9;}
+.qa .q .qn{flex:0 0 auto;background:var(--accent);color:#fff;border-radius:5px;font-size:11px;padding:2px 7px;margin-top:2px;}
+.qa .q .arrow{margin-left:auto;color:var(--text-3);font-size:11px;transition:transform .2s;}
+.qa.open .q .arrow{transform:rotate(90deg);}
+.qa .a{display:none;padding:14px 18px;border-top:1px solid var(--border);font-size:14px;}
+.qa.open .a{display:block;}
+
+/* 步骤流程 */
+.steps{counter-reset:st;margin:18px 0;padding-left:0;list-style:none;}
+.steps>li{
+  counter-increment:st;position:relative;padding:0 0 20px 46px;border-left:2px solid #e0e6ef;
+  margin-left:15px;
+}
+.steps>li:last-child{border-left-color:transparent;padding-bottom:0;}
+.steps>li::before{
+  content:counter(st);position:absolute;left:-16px;top:-2px;width:30px;height:30px;border-radius:50%;
+  background:var(--accent);color:#fff;font-weight:700;font-size:13px;
+  display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px #fff;
+}
+.steps>li .st-t{font-weight:700;font-size:15.5px;margin-bottom:6px;color:#111827;}
+
+/* 打印 */
+.badge-row{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0;}
+.badge-row span{font-size:12px;padding:4px 11px;border-radius:20px;background:var(--accent-soft);color:var(--accent-2);font-weight:600;border:1px solid #cfe0fb;}
+.badge-row span.g{background:#e7f7ee;color:#047857;border-color:#b9e6cd;}
+.badge-row span.o{background:#fff2e0;color:#b45309;border-color:#f8dcb0;}
+.badge-row span.p{background:#f3ecfd;color:#6d28d9;border-color:#ddd0f7;}
+
+/* 回到顶部 */
+#totop{
+  position:fixed;right:26px;bottom:26px;width:44px;height:44px;border-radius:50%;
+  background:var(--accent);color:#fff;border:none;cursor:pointer;font-size:18px;
+  display:none;align-items:center;justify-content:center;box-shadow:0 4px 14px #2f6fed55;z-index:500;
+}
+#totop.show{display:flex;}
+
+/* 移动端 */
+#menu-toggle{
+  display:none;position:fixed;left:14px;top:12px;z-index:300;
+  background:var(--bg-side);color:#fff;border:none;border-radius:8px;padding:9px 12px;cursor:pointer;font-size:16px;
+}
+@media(max-width:1000px){
+  #sidebar{transform:translateX(-100%);transition:transform .25s;}
+  #sidebar.open{transform:translateX(0);}
+  #main{margin-left:0;}
+  #menu-toggle{display:block;}
+  .content-wrap{padding:0 20px;}
+  .cover{padding:56px 20px 40px;}
+  .cover h1{font-size:26px;}
+  .cover-inner{padding:0;}
+  .cols{grid-template-columns:1fr;}
+  .side-head{padding-top:56px;}
+}
+
+/* 章节内小结 */
+.summary{background:#f6f8fb;border:1px solid var(--border);border-radius:10px;padding:16px 20px;margin:22px 0;font-size:14px;}
+.summary .box-t{color:var(--accent-2);}
+hr{border:none;border-top:1px dashed var(--border);margin:30px 0;}
+.kbd{background:#fff;border:1px solid #cfd4da;border-bottom-width:2px;border-radius:5px;padding:1px 6px;font-size:12px;font-family:monospace;}
+.mini{font-size:12.5px;color:var(--text-3);}
+.nowrap{white-space:nowrap;}
+</style>
+</head>
+<body>
+<div id="progressbar"></div>
+<button id="menu-toggle">☰</button>
+
+<div id="layout">
+  <aside id="sidebar">
+    <div class="side-head">
+      <div class="side-title">Spring Boot 3.x 深度精讲</div>
+      <div class="side-sub">7 天从熟练到驾驭 · 大厂级体系</div>
+      <div class="side-meta">
+        <span class="tagpill">JDK 17 / 21</span>
+        <span class="tagpill g">Boot 3.2+</span>
+      </div>
+    </div>
+    <nav id="toc"></nav>
+  </aside>
+
+  <main id="main">
+    <div class="cover">
+      <div class="cover-inner">
+        <h1>Spring Boot 3.x 大厂级深度精讲</h1>
+        <p class="lead">一份写给「有经验但想补齐 Boot 体系」的工程师的教程。从自动配置源码一路讲到高并发调优与分布式场景，每个知识点都配可运行案例与面试标准答法。目标：学完能直接上手华为 / 阿里 / 腾讯生产项目，并从容应对八股与场景追问。</p>
+        <div class="cover-grid">
+          <div class="cover-card"><div class="k">学习周期</div><div class="v">7 天 · 每天 2–3 小时</div></div>
+          <div class="cover-card"><div class="k">技术栈</div><div class="v">Boot 3.2 / JDK 17+</div></div>
+          <div class="cover-card"><div class="k">覆盖内容</div><div class="v">8 大模块 · 60+ 考点</div></div>
+          <div class="cover-card"><div class="k">配套产出</div><div class="v">案例代码 + 面试答法</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="content-wrap" id="content">
+      <!-- 章节由 render.js 注入 -->
+    </div>
+  </main>
+</div>
+
+<button id="totop">↑</button>
+
+<script src="content.js"></script>
+<script>
+(function(){
+  "use strict";
+
+  /* ---------- 1. 生成目录树 ---------- */
+  var toc = document.getElementById("toc");
+  var html = "";
+  CHAPTERS.forEach(function(ch, ci){
+    var isAlt = ch.badgeType === "alt";
+    var badge = ch.badge ? '<span class="dnum'+(isAlt?" alt":"")+'">'+ch.badge+'</span>' : '';
+    html += '<div class="toc-day'+(ci===0?' open':'')+'" data-idx="'+ci+'">'
+          +   '<span class="caret">▶</span>'+badge
+          +   '<span>'+ch.title+'</span>'
+          + '</div><div class="toc-sub'+(ci===0?' open':'')+'" data-sub="'+ci+'">';
+    ch.sections.forEach(function(s, si){
+      html += '<a href="#'+s.id+'" data-sec="'+s.id+'"><span class="lv">'+ch.badge+'.'+(si+1)+'</span>'+s.title+'</a>';
+    });
+    html += '</div>';
+  });
+  toc.innerHTML = html;
+
+  /* ---------- 2. 注入正文 ---------- */
+  var contentEl = document.getElementById("content");
+  var body = "";
+  CHAPTERS.forEach(function(ch){
+    var badgeCls = ch.badgeType === "alt" ? "badge alt" : (ch.badgeType === "warm" ? "badge warm" : "badge");
+    body += '<section class="chapter" id="'+ch.id+'">';
+    body += '<h2 class="ch-title"><span class="'+badgeCls+'">'+ch.badgeLabel+'</span>'+ch.title+'</h2>';
+    if(ch.intro) body += '<p class="ch-intro">'+ch.intro+'</p>';
+    ch.sections.forEach(function(s){
+      body += '<div class="sec" id="'+s.id+'" data-sec="'+s.id+'">'+s.html+'</div>';
+    });
+    body += '</section>';
+  });
+  contentEl.innerHTML = body;
+
+  /* ---------- 3. 目录树折叠 ---------- */
+  document.querySelectorAll(".toc-day").forEach(function(el){
+    el.addEventListener("click", function(){
+      var idx = el.getAttribute("data-idx");
+      var sub = document.querySelector('[data-sub="'+idx+'"]');
+      el.classList.toggle("open");
+      sub.classList.toggle("open");
+    });
+  });
+
+  /* ---------- 4. 代码高亮（轻量 Java 高亮） ---------- */
+  function escapeHtml(s){
+    return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  }
+  var JAVA_KW = ["abstract","assert","boolean","break","byte","case","catch","char","class","const","continue","default","do","double","else","enum","extends","final","finally","float","for","goto","if","implements","import","instanceof","int","interface","long","native","new","package","private","protected","public","return","short","static","strictfp","super","switch","synchronized","this","throw","throws","transient","try","void","volatile","while","var","record","sealed","permits","yield","true","false","null"];
+  var kwRe = new RegExp("\\b("+JAVA_KW.join("|")+")\\b","g");
+
+  function highlightJava(code){
+    // 统一策略：所有插入的 HTML 一律先进占位符仓库，最后一步（且仅此一步）还原；
+    // 占位符用「私有区字符 + 序号 + 分隔符 + 私有区字符」，不含数字/单词字符，天然免疫后续正则。
+    var PH_A = "\uE000", PH_B = "\uE001", SEP = "\uE002";
+    var store = [];
+    function stash(html){ store.push(html); return PH_A + store.length + SEP + PH_B; }
+    function wrap(tag, text){ return stash('<span class="' + tag + '">' + text + '</span>'); }
+
+    var out = escapeHtml(code);
+    // 0) Java 文本块（JDK15+ 的 """ ... """），必须在普通字符串之前处理
+    out = out.replace(/"""[\s\S]*?"""/g, function(m){ return wrap('str', m); });
+    // 1) 块注释 / 行注释（排除 URL 中的 //：前面不是冒号）
+    out = out.replace(/\/\*[\s\S]*?\*\//g, function(m){ return wrap('cmt', m); });
+    out = out.replace(/(^|[^:])(\/\/[^\n]*)/g, function(m, p, cmt){ return p + wrap('cmt', cmt); });
+    // 2) 字符串 / 字符
+    out = out.replace(/"(?:\\.|[^"\\])*"/g, function(m){ return wrap('str', m); });
+    out = out.replace(/'(?:\\.|[^'\\])*'/g, function(m){ return wrap('str', m); });
+    // 3) 关键字 / 注解 / 数字（此时源码文本里已无插入的 HTML，不会互相误伤）
+    out = out.replace(kwRe, function(m){ return wrap('kw', m); });
+    out = out.replace(/@[A-Za-z_][A-Za-z0-9_]*/g, function(m){ return wrap('ann', m); });
+    out = out.replace(/(^|[^\w.\uE000])(\d+\.?\d*[fFdDlL]?)(?![\w.])/g, function(m, p1, p2){ return p1 + wrap('num', p2); });
+    // 4) 统一还原（最后一步）
+    return out.replace(new RegExp(PH_A + '(\\d+)' + SEP + PH_B, 'g'), function(m, i){ return store[+i - 1]; });
+  }
+  function highlightXml(code){
+    var PH_A = "\uE000", PH_B = "\uE001", SEP = "\uE002";
+    var store = [];
+    function wrap(tag, text){ store.push('<span class="'+tag+'">'+text+'</span>'); return PH_A+store.length+SEP+PH_B; }
+    var out = escapeHtml(code);
+    out = out.replace(/&lt;!--[\s\S]*?--&gt;/g, function(m){ return wrap('cmt', m); });
+    out = out.replace(/(&lt;\/?)([A-Za-z_][\w:.-]*)/g, function(m, p1, p2){ return p1 + wrap('ann', p2); });
+    out = out.replace(/([\w:.-]+)=(&quot;[^&]*?&quot;|"[^"]*?")/g, function(m, k, v){ return wrap('fn', k) + '=' + wrap('str', v); });
+    return out.replace(new RegExp(PH_A+'(\\d+)'+SEP+PH_B, 'g'), function(m, i){ return store[+i-1]; });
+  }
+  function highlightSql(code){
+    var PH_A = "\uE000", PH_B = "\uE001", SEP = "\uE002";
+    var store = [];
+    function wrap(tag, text){ store.push('<span class="'+tag+'">'+text+'</span>'); return PH_A+store.length+SEP+PH_B; }
+    var out = escapeHtml(code);
+    // 字符串（含 SQL 转义引号 ''）
+    out = out.replace(/'(?:[^']|'')*'/g, function(m){ return wrap('str', m); });
+    out = out.replace(/&quot;(?:[^&]|&amp;)*?&quot;/g, function(m){ return wrap('str', m); });
+    out = out.replace(/--[^\n]*/g, function(m){ return wrap('cmt', m); });
+    out = out.replace(/\b(SELECT|FROM|WHERE|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|TABLE|INDEX|JOIN|LEFT|RIGHT|INNER|ON|GROUP|BY|ORDER|HAVING|LIMIT|AND|OR|NOT|NULL|PRIMARY|KEY|FOREIGN|REFERENCES|DEFAULT|AUTO_INCREMENT|ENGINE|EXPLAIN|AS|COUNT|SUM|DESC|ASC|UNIQUE|ALTER|ADD|COLUMN|DROP)\b/gi,
+      function(m){ return wrap('kw', m); });
+    return out.replace(new RegExp(PH_A+'(\\d+)'+SEP+PH_B, 'g'), function(m, i){ return store[+i-1]; });
+  }
+  function highlightYaml(code){
+    var PH_A = "\uE000", PH_B = "\uE001", SEP = "\uE002";
+    var store = [];
+    function wrap(tag, text){ store.push('<span class="'+tag+'">'+text+'</span>'); return PH_A+store.length+SEP+PH_B; }
+    var out = escapeHtml(code);
+    out = out.split('\n').map(function(line){
+      // 先拆出「值后面的行内注释」：未加引号的 # 才算注释（# 前必须是空白或行首）
+      var cmt = '';
+      var ci = -1;
+      for(var k=0;k<line.length;k++){
+        if(line[k] === '#'){
+          // 前面是行首或空白，且不在引号内（简化：前面无未闭合引号）
+          if(k === 0 || /\s/.test(line[k-1])){
+            // 检查该 # 之前是否有未配对的引号
+            var before = line.slice(0, k);
+            var dq = (before.match(/&quot;/g)||[]).length, sq = (before.match(/'/g)||[]).length;
+            if(dq % 2 === 0 && sq % 2 === 0){ ci = k; break; }
+          }
+        }
+      }
+      var main = line, tail = '';
+      if(ci >= 0){ main = line.slice(0, ci); tail = line.slice(ci); }
+      // 主行：key: value
+      var m = main.match(/^([ \t]*)([\w.$-]+)(:)([ \t]*)(.*)$/);
+      var head;
+      if(m){
+        var val = m[5].replace(/[ \t]+$/,'');
+        head = m[1] + wrap('fn', m[2]) + m[3] + m[4];
+        if(val !== '') head += wrap('str', val);
+      } else {
+        head = main;
+      }
+      if(ci >= 0) head += (main.replace(/[ \t]+$/,'') !== '' ? ' ' : '') + wrap('cmt', tail.replace(/[ \t]+$/,''));
+      return head;
+    }).join('\n');
+    return out.replace(new RegExp(PH_A+'(\\d+)'+SEP+PH_B, 'g'), function(m, i){ return store[+i-1]; });
+  }
+  function highlightShell(code){
+    var PH_A = "\uE000", PH_B = "\uE001", SEP = "\uE002";
+    var store = [];
+    function wrap(tag, text){ store.push('<span class="'+tag+'">'+text+'</span>'); return PH_A+store.length+SEP+PH_B; }
+    var out = escapeHtml(code);
+    out = out.replace(/(^|\n)([ \t]*)(#[^\n]*)/g, function(m, nl, sp, c){ return nl + sp + wrap('cmt', c); });
+    out = out.replace(/(^|\n)([ \t]*)(mvn|gradle|java|jar|curl|docker|kubectl|git|export|cd|npm|jps|jstat|top|ps)\b/g,
+      function(m, nl, sp, cmd){ return nl + sp + wrap('fn', cmd); });
+    out = out.replace(/"(?:[^"\\]|\\.)*"/g, function(m){ return wrap('str', m); });
+    return out.replace(new RegExp(PH_A+'(\\d+)'+SEP+PH_B, 'g'), function(m, i){ return store[+i-1]; });
+  }
+
+  document.querySelectorAll("pre[data-lang]").forEach(function(pre){
+    var lang = pre.getAttribute("data-lang");
+    var raw = pre.getAttribute("data-code") || "";
+    var code = decodeURIComponent(raw);
+    var highlighted;
+    switch(lang){
+      case "java": highlighted = highlightJava(code); break;
+      case "xml": case "html": highlighted = highlightXml(code); break;
+      case "sql": highlighted = highlightSql(code); break;
+      case "yaml": highlighted = highlightYaml(code); break;
+      case "bash": case "sh": highlighted = highlightShell(code); break;
+      default: highlighted = escapeHtml(code);
+    }
+    var head = '<div class="code-head"><span class="lang">'+lang+'</span>'
+             + '<button class="copy-btn" type="button">复制</button></div>';
+    pre.outerHTML = '<pre class="hl">'+head+'<code>'+highlighted+'</code></pre>';
+  });
+
+  // 复制按钮
+  document.addEventListener("click", function(e){
+    var btn = e.target.closest(".copy-btn");
+    if(!btn) return;
+    var pre = btn.closest("pre");
+    var codeEl = pre.querySelector("code");
+    var text = codeEl.innerText;
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).then(function(){
+        btn.textContent = "已复制"; setTimeout(function(){btn.textContent="复制";},1400);
+      });
+    } else {
+      var ta = document.createElement("textarea");
+      ta.value = text; document.body.appendChild(ta); ta.select();
+      try{document.execCommand("copy");}catch(err){}
+      document.body.removeChild(ta);
+      btn.textContent = "已复制"; setTimeout(function(){btn.textContent="复制";},1400);
+    }
+  });
+
+  /* ---------- 5. 面试题折叠 ---------- */
+  document.addEventListener("click", function(e){
+    var q = e.target.closest(".qa .q");
+    if(!q) return;
+    q.parentElement.classList.toggle("open");
+  });
+
+  /* ---------- 6. 滚动监听：高亮当前小节 + 展开目录 ---------- */
+  var secEls = Array.prototype.slice.call(document.querySelectorAll(".sec[data-sec]"));
+  var links = {};
+  document.querySelectorAll('.toc-sub a').forEach(function(a){ links[a.getAttribute("data-sec")] = a; });
+
+  function onScroll(){
+    // 进度条
+    var h = document.documentElement.scrollHeight - window.innerHeight;
+    var p = h > 0 ? (window.scrollY / h) * 100 : 0;
+    document.getElementById("progressbar").style.width = Math.min(p,100) + "%";
+
+    // 回到顶部
+    document.getElementById("totop").classList.toggle("show", window.scrollY > 500);
+
+    // 当前小节
+    var cur = null, offset = 90;
+    for(var i=0;i<secEls.length;i++){
+      if(secEls[i].getBoundingClientRect().top <= offset) cur = secEls[i]; else break;
+    }
+    if(cur){
+      var id = cur.getAttribute("data-sec");
+      if(!cur._active){
+        Object.keys(links).forEach(function(k){ links[k].classList.remove("active"); });
+        if(links[id]){
+          links[id].classList.add("active");
+          // 展开所属大章节
+          var idx = links[id].closest(".toc-sub").getAttribute("data-sub");
+          var dayEl = document.querySelector('.toc-day[data-idx="'+idx+'"]');
+          var subEl = document.querySelector('[data-sub="'+idx+'"]');
+          if(!subEl.classList.contains("open")){ subEl.classList.add("open"); dayEl.classList.add("open"); }
+        }
+        secEls.forEach(function(s){ s._active = false; });
+        cur._active = true;
+      }
+    }
+  }
+  window.addEventListener("scroll", onScroll, {passive:true});
+  window.addEventListener("resize", onScroll);
+  onScroll();
+
+  /* ---------- 7. 回到顶部 ---------- */
+  document.getElementById("totop").addEventListener("click", function(){
+    window.scrollTo({top:0,behavior:"smooth"});
+  });
+
+  /* ---------- 8. 移动端菜单 ---------- */
+  document.getElementById("menu-toggle").addEventListener("click", function(){
+    document.getElementById("sidebar").classList.toggle("open");
+  });
+  // 移动端点击目录后收起
+  document.getElementById("toc").addEventListener("click", function(e){
+    if(e.target.tagName === "A" && window.innerWidth <= 1000){
+      document.getElementById("sidebar").classList.remove("open");
+    }
+  });
+
+  /* ---------- 9. 打开首个折叠项 ---------- */
+  var first = document.querySelector(".qa");
+  if(first) first.classList.add("open");
+
+})();
+</script>
+</body>
+</html>

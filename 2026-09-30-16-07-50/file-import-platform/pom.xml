@@ -1,0 +1,228 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- ============================================================
+         父工程：Spring Boot 3.3.x
+         Spring Boot 3.x 要求 JDK 17+，本项目使用 JDK 21（LTS），
+         因为要用虚拟线程（Virtual Threads）处理 IO 密集型的文件读写。
+         ============================================================ -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.3.5</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.example</groupId>
+    <artifactId>file-import-platform</artifactId>
+    <version>1.0.0</version>
+    <name>file-import-platform</name>
+    <description>通用文件采集入库调度平台 - 支持 N 个定时任务并发运行</description>
+
+    <properties>
+        <!-- 生产建议 JDK 21（LTS）：虚拟线程 + 分代 ZGC 都可用。
+             注意：请勿用 JDK 24/25 编译本项目——Lombok 在 JDK 24+ 上存在
+             注解处理器与 javac 交互的已知问题，会报出"方法不会覆盖或实现超类型的方法"
+             这类难以定位的编译错误。JDK 21 是 Spring Boot 3.3 官方支持的 LTS 版本。 -->
+        <java.version>21</java.version>
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <mybatis-plus.version>3.5.7</mybatis-plus.version>
+        <elasticjob.version>3.0.4</elasticjob.version>
+        <!-- ElasticJob 3.x 使用 Curator 5.x 作为 ZK 客户端 -->
+        <curator.version>5.6.0</curator.version>
+        <hikaricp.version>5.1.0</hikaricp.version>
+        <commons-io.version>2.16.1</commons-io.version>
+        <commons-csv.version>1.11.0</commons-csv.version>
+        <guava.version>33.3.1-jre</guava.version>
+        <!-- Lombok 需显式指定版本以覆盖 Spring Boot 父 POM 中的旧版本：
+             Boot 3.3.5 默认带 1.18.34，在 JDK 24/25 上会因 javac 内部 API 变更而编译崩溃。
+             1.18.48 为当前最新版，已正式支持 JDK 25。 -->
+        <lombok.version>1.18.48</lombok.version>
+    </properties>
+
+    <dependencies>
+        <!-- ==================== Web ==================== -->
+        <!-- 用于暴露运维接口：手动触发任务、查看任务状态 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!-- 健康检查 / 指标：生产环境接入 K8s 探针与 Prometheus 必备 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+
+        <!-- ==================== 参数校验 ==================== -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
+        <!-- ==================== 数据库 ==================== -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
+            <!-- Spring Boot 3 默认自带 HikariCP，这里显式锁定版本 -->
+            <exclusions>
+                <exclusion>
+                    <groupId>com.zaxxer</groupId>
+                    <artifactId>HikariCP</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+            <version>${hikaricp.version}</version>
+        </dependency>
+
+        <!-- MyBatis-Plus：国内主流，单表 CRUD 零 SQL，批量写入用自带的 saveBatch -->
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+            <version>${mybatis-plus.version}</version>
+        </dependency>
+
+        <!-- MySQL 8 驱动 -->
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- ==================== Redis ==================== -->
+        <!-- 用于分布式文件锁（多机部署时防止同一文件被重复处理）。
+             单机部署可不启 Redis：FileDispatcher 会降级为单机模式。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+        <!-- Lettuce 连接池需要 commons-pool2 -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-pool2</artifactId>
+        </dependency>
+
+        <!-- ==================== 分布式调度 ==================== -->
+        <!-- ElasticJob 3.x：Apache 顶级项目，当当开源，国内大厂分布式定时任务主流选型 -->
+        <dependency>
+            <groupId>org.apache.shardingsphere.elasticjob</groupId>
+            <artifactId>elasticjob-lite-spring-boot-starter</artifactId>
+            <version>${elasticjob.version}</version>
+        </dependency>
+        <!-- ElasticJob 的注册中心依赖 ZooKeeper(Curator) -->
+        <dependency>
+            <groupId>org.apache.curator</groupId>
+            <artifactId>curator-recipes</artifactId>
+            <version>${curator.version}</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.apache.zookeeper</groupId>
+                    <artifactId>zookeeper</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <!-- 手动引入 ZooKeeper，排除自带的旧版 logback 避免与 Spring Boot 冲突 -->
+        <dependency>
+            <groupId>org.apache.zookeeper</groupId>
+            <artifactId>zookeeper</artifactId>
+            <version>3.9.2</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>ch.qos.logback</groupId>
+                    <artifactId>logback-classic</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>ch.qos.logback</groupId>
+                    <artifactId>logback-core</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-log4j12</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>log4j</groupId>
+                    <artifactId>log4j</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <!-- ==================== 工具库 ==================== -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-csv</artifactId>
+            <version>${commons-csv.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>commons-io</groupId>
+            <artifactId>commons-io</artifactId>
+            <version>${commons-io.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.google.guava</groupId>
+            <artifactId>guava</artifactId>
+            <version>${guava.version}</version>
+        </dependency>
+
+        <!-- ==================== 代码简化 ==================== -->
+        <!-- Lombok：编译期生成 getter/setter/构造器，减少样板代码。
+             注意 scope 必须是 provided —— 它只在编译期起作用，不进运行时包。 -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- ==================== 运维 ==================== -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <annotationProcessorPaths>
+                        <path>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </path>
+                    </annotationProcessorPaths>
+                    <!-- 保留方法参数名，Spring 依赖注入 + MyBatis 映射都需要 -->
+                    <parameters>true</parameters>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <!-- 打可执行 fat jar -->
+                    <mainClass>com.example.fileimport.FileImportApplication</mainClass>
+                    <excludes>
+                        <exclude>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

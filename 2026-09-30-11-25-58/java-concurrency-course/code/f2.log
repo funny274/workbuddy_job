@@ -1,0 +1,66 @@
+JDK 版本 = 25.0.3+9-LTS-195
+CPU 核心数 = 8
+
+===== 1) 三种创建方式 =====
+  ① Thread.ofVirtual().start() → VirtualThread[#27,vt-1]/runnable@ForkJoinPool-1-worker-1
+  ② Thread.startVirtualThread() → isVirtual=true
+  ③ newVirtualThreadPerTaskExecutor 提交的任务
+
+===== 2) 关键：虚拟线程 vs 平台线程 =====
+| 维度         | 平台线程(Platform)        | 虚拟线程(Virtual)                  |
+|--------------|---------------------------|------------------------------------|
+| 实现         | 1:1 映射 OS 线程          | M:N 映射（大量虚拟线程→少量载体线程）|
+| 创建成本     | 约 1MB 栈，创建慢         | 约几百字节~几KB，创建极快          |
+| 数量上限     | 几千个（受内存限制）      | 百万级（取决于堆内存）             |
+| 调度         | 操作系统内核调度          | JVM 调度（ForkJoinPool 作为载体）  |
+| 阻塞代价     | 线程挂起，切换成本高      | 自动 unmount，几乎零成本           |
+| 适用         | CPU 密集                  | IO 密集（高并发网络请求）          |
+
+===== 3) 数量对比实测 =====
+  100000 个任务（每个 sleep 10ms）
+  平台线程池(500线程)  :  2173 ms
+  虚拟线程(每任务一线程):   348 ms
+  → 提速 6.2 倍
+  注意：换成线程池=10万 处理同样的 IO 阻塞，才是真正的「多少线程都不够」场景
+
+============== 虚拟线程必须知道的坑 ==============
+【坑1】synchronized 会导致载体线程被 pin 住（JDK21）
+   synchronized 块里发生阻塞 → 虚拟线程无法 unmount，
+   载体线程被占用 → 严重时整个调度器饥饿。
+   JDK24 起已修复（JEP 491），但 JDK21 项目必须注意：
+   → 用 ReentrantLock 替代 synchronized
+
+  synchronized 块内阻塞   :  4230 ms（可能 pin 住载体线程）
+  ReentrantLock 块内阻塞  :  4051 ms（可正常 unmount）
+【坑2】ThreadLocal 变得危险
+   百万虚拟线程 × 每个 ThreadLocal 一份 → 内存爆炸。
+   → 改用 ScopedValue（JDK21 预览 / JDK25 稳定）做不可变上下文传递
+   → 或确保及时 remove
+
+【坑3】不要池化虚拟线程！
+   虚拟线程极轻量，「池化」反而损失了它的价值。
+   正确用法：Executors.newVirtualThreadPerTaskExecutor()，
+            一个任务一个虚拟线程，用完即弃。
+   → 注意：这个 Executor 内部并不是真的「池」，只是复用调度器。
+
+【坑4】CPU 密集型任务用虚拟线程没有收益
+   载体线程数默认 = CPU 核数，真正的计算任务还是排队。
+   → CPU 密集继续用平台线程池
+
+【坑5】结构化并发（Structured Concurrency，JDK25 正式）
+   StructuredTaskScope 让「子任务的生命周期严格嵌套在父任务内」，
+   避免线程泄漏，异常传播更清晰。这是配套虚拟线程的最佳实践。
+==================================================
+
+===== 4) StructuredTaskScope 示例 =====
+  try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+      Supplier<String> user  = scope.fork(() -> fetchUser());
+      Supplier<String> order = scope.fork(() -> fetchOrder());
+      scope.join();                    // 等所有子任务
+      scope.throwIfFailed();           // 任一失败就抛异常
+      return new Result(user.get(), order.get());
+  }
+  // 出 try 块时：所有子任务保证已结束（成功或取消）→ 无线程泄漏
+
+  核心价值：把「并发任务的作用域」变成代码块级的结构化约束，
+           像 try-with-resources 一样管理线程生命周期。

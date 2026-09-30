@@ -1,0 +1,45 @@
+===== 1) ArrayBlockingQueue：有界数组队列 =====
+  ArrayBlockingQueue 生产 100，消费 100
+
+===== 2) LinkedBlockingQueue：双锁分离，吞吐更高 =====
+  LinkedBlockingQueue 生产 100，消费 100
+
+===== 3) SynchronousQueue：容量 0，一手交钱一手交货 =====
+  put 前时间: 17627
+  put 返回时间: 18129（阻塞了约 500ms）
+
+===== 4) DelayQueue：延时队列（订单超时未支付自动取消）=====
+  消费者取到: 握手数据
+  [ 101ms] 处理超时订单 ORDER-003
+  [ 301ms] 处理超时订单 ORDER-001
+  [ 802ms] 处理超时订单 ORDER-002
+  → DelayQueue 按「剩余延时」排序，未到期取不到
+
+===== 5) PriorityBlockingQueue：带优先级的无界队列 =====
+  出队: 高优先级任务
+  出队: 中优先级任务
+  出队: 低优先级任务
+
+============== 阻塞队列三大类方法 ==============
+| 操作 | 抛异常        | 返回特殊值   | 阻塞          | 超时退出                    |
+|------|---------------|--------------|---------------|------------------------------|
+| 插入 | add(e)        | offer(e)     | put(e)        | offer(e, time, unit)         |
+| 移除 | remove()      | poll()       | take()        | poll(time, unit)             |
+| 检查 | element()     | peek()       | -             | -                            |
+记忆法：add/remove 会抛异常；offer/poll 返回 false/null；put/take 会阻塞。
+
+============== 有界 vs 无界 ==============
+有界队列 + 拒绝策略 = 天然的背压（backpressure）机制，
+这是保护下游服务不被压垮的第一道防线。
+无界队列 = 把 OOM 风险藏起来，是最危险的「看起来没问题」。
+
+============== ArrayBlockingQueue vs LinkedBlockingQueue ==============
+ArrayBlockingQueue：
+  一把 ReentrantLock + 两个 Condition（notEmpty/notFull）
+  → put 和 take 不能并行（互斥同一把锁）
+LinkedBlockingQueue：
+  两把锁：putLock 和 takeLock，各带一个 Condition
+  → 生产和消费可以真正并行，吞吐更高
+  代价：需要维护 count 的原子性（用 AtomicInteger）
+=============================================
+

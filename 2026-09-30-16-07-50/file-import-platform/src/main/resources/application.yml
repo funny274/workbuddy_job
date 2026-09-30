@@ -1,0 +1,230 @@
+# ============================================================================
+#  通用文件采集入库平台 —— 主配置
+#  新增任务时，你只需要在 app.task.tasks 下"照着已有任务加一段"。
+# ============================================================================
+
+server:
+  port: 8080
+  # 优雅停机：等待正在处理的任务完成，避免处理到一半被 kill 导致数据截断。
+  # 生产环境必须开启，配合 K8s 的 terminationGracePeriodSeconds 使用。
+  shutdown: graceful
+  tomcat:
+    threads:
+      max: 50
+
+spring:
+  application:
+    name: file-import-platform
+
+  lifecycle:
+    # 优雅停机等待时间：应大于单个文件的最长处理时间
+    timeout-per-shutdown-phase: 120s
+
+  # ==================== 数据源 ====================
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    # ------------------------------------------------------------------------
+    # 关键参数说明（性能与稳定性都在这行 URL 上）：
+    #   rewriteBatchedStatements=true  → 让驱动把 N 条 INSERT 合并成一条多值 INSERT。
+    #        【批量写入提速最关键的一个参数】不开则批量写入性能提升极其有限。
+    #   useServerPrepStmts=true        → 使用服务端预编译，减少 SQL 解析开销
+    #   cachePrepStmts=true            → 客户端缓存 PreparedStatement
+    #   prepStmtCacheSize=500          → PS 缓存数量
+    #   prepStmtCacheSqlLimit=2048     → 缓存 SQL 长度上限
+    #   useLocalSessionState=true      → 避免驱动频繁查询会话变量，减少往返
+    #   allowMultiQueries=false        → 【安全】禁止多语句，防 SQL 注入
+    #   useSSL=false                   → 内网可关；公网务必改为 true
+    #   serverTimezone=Asia/Shanghai   → 明确时区，避免夏令时/UTC 导致的时间错乱
+    # ------------------------------------------------------------------------
+    url: jdbc:mysql://127.0.0.1:3306/file_import?useUnicode=true&characterEncoding=utf8mb4&rewriteBatchedStatements=true&useServerPrepStmts=true&cachePrepStmts=true&prepStmtCacheSize=500&prepStmtCacheSqlLimit=2048&useLocalSessionState=true&allowMultiQueries=false&useSSL=false&serverTimezone=Asia/Shanghai&zeroDateTimeBehavior=convertToNull
+    username: root
+    password: root
+    hikari:
+      # ----------------------------------------------------------------------
+      # 连接池配置 —— 这是最容易配错、也最影响稳定性的部分
+      # 经验公式：maximumPoolSize = CPU核数 * 2 + 有效磁盘数，不是越大越好。
+      # 连接数超过数据库的处理能力后，加大连接数只会让等待队列更长、TPS 下降。
+      # ----------------------------------------------------------------------
+      maximum-pool-size: 20
+      minimum-idle: 5
+      # 连接超时：超过 30 秒拿不到连接就快速失败，避免请求无限堆积
+      connection-timeout: 30000
+      # 空闲连接回收（小于 minimum-idle 不会被回收）
+      idle-timeout: 600000
+      # 连接最大存活时间：应小于 MySQL 的 wait_timeout，避免拿到已被服务端关闭的死连接
+      max-lifetime: 1200000
+      # 连接有效性检测。用 ping 而非 query 开销更低
+      connection-test-query: SELECT 1
+      validation-timeout: 3000
+      pool-name: FileImportHikariPool
+
+  # ==================== Redis（分布式文件锁）====================
+  # 单机部署时 Redis 非必需：若连不上，框架会降级为单机模式继续工作。
+  # 多机部署时必须配置，否则同一文件可能被多节点重复处理。
+  data:
+    redis:
+      host: 127.0.0.1
+      port: 6379
+      password:
+      database: 0
+      timeout: 3000
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+          min-idle: 2
+          max-wait: 3000
+
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: GMT+8
+
+# ==================== MyBatis-Plus ====================
+mybatis-plus:
+  configuration:
+    # 驼峰到下划线映射
+    map-underscore-to-camel-case: true
+    # 【生产环境不要开】打印 SQL 会严重拖慢批量写入。排查问题时临时打开即可。
+    log-impl: org.apache.ibatis.logging.nologging.NoLoggingImpl
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+
+# ==================== 调度模式 ====================
+app:
+  schedule:
+    # ------------------------------------------------------------------------
+    # 调度模式二选一：
+    #   local      → Spring @Scheduled，无需任何外部依赖，适合单机/开发调试
+    #   elasticjob → ElasticJob + ZooKeeper，支持任务分片与弹性扩缩容，适合生产集群
+    # 切换只改这一行，业务代码完全不用动。
+    # ------------------------------------------------------------------------
+    mode: local
+    # 本地模式下统一调度入口的扫描间隔（毫秒）
+    local-scan-interval-ms: 5000
+    # ElasticJob 模式专用配置
+    elasticjob:
+      # 生产环境必须配置 3 个以上 ZK 节点做高可用
+      server-lists: 127.0.0.1:2181
+      # 【重要】不同环境必须用不同 namespace，否则 dev 会覆盖 prod 的配置
+      namespace: file-import-dev
+      base-sleep-time-ms: 1000
+      max-retries: 3
+      # 生产环境建议 false：避免发版时把运维在管控台调好的参数覆盖掉
+      overwrite: false
+
+  # ==================== 线程池 ====================
+  thread-pool:
+    core-size: 0
+
+  # ==================== 实例标识 ====================
+  # 用于日志与执行记录表，多机部署时可直观区分节点
+  instance-id: ${HOSTNAME:app-node-1}
+
+  # ==========================================================================
+  #  任务配置区 —— 【新增任务就在这里加一段】
+  #  key 必须与 Java 中 TaskHandler#taskCode() 的返回值完全一致
+  # ==========================================================================
+  task:
+    tasks:
+
+      # ----------------------------------------------------------------------
+      # 示例任务：订单明细 CSV 导入
+      # 新增任务时，直接复制下面这一段，改掉 key 和各路径即可。
+      # 除 source-dirs / backup-dir / cron 外，其余都有默认值，可不配。
+      # ----------------------------------------------------------------------
+      ORDER_DETAIL_IMPORT:
+        name: 订单明细文件导入
+        enabled: true
+        # 6 段 cron：秒 分 时 日 月 周。0 0/5 * * * ? 表示每 5 分钟一次
+        # 常用示例：
+        #   0 0/5 * * * ?     每 5 分钟
+        #   0 0 2 * * ?       每天凌晨 2 点
+        #   0 0 2 1 * ?       每月 1 号凌晨 2 点
+        #   0 30 9,14,17 * * MON-FRI   工作日 9:30/14:30/17:30
+        cron: 0 0/5 * * * ?
+        # 源目录（相对或绝对路径均可，建议生产用绝对路径）
+        source-dirs:
+          - data/in/order
+        # 文件名通配符。留空或注释掉表示处理目录下所有文件
+        file-patterns:
+          - "ORDER_*.csv"
+        backup-dir: data/backup/order
+        error-dir: data/error/order
+        charset: UTF-8
+        delimiter: ","
+        skip-header: true
+        # 静默期 30 秒：文件最后修改距今超过 30 秒才处理，防止读到正在写入的文件
+        file-quiet-period-millis: 30000
+        # 批量提交条数。经验区间 500~2000；调大可提升吞吐但增大单次回滚代价
+        batch-size: 1000
+        # 同时处理的文件数。这是保护数据库的主要阀门——感觉 DB 吃紧就调小
+        concurrency: 4
+        retry-times: 2
+        retry-interval-millis: 1000
+        # ElasticJob 分片数（仅 elasticjob 模式生效）
+        sharding-total-count: 2
+        # 业务扩展参数：透传给 Handler，同一个 Handler 可服务多渠道数据
+        extras:
+          channelCode: WEB
+          dataType: ORDER_DETAIL
+
+      # ----------------------------------------------------------------------
+      # 这是给你参考的"第二个任务"示例（默认停用）。
+      # 注意：它需要配套的 Task 实现类与目标表，直接启用会因缺少实现而只打警告。
+      # 它的价值在于演示"新增任务只需要加这么一段配置"。
+      # ----------------------------------------------------------------------
+      PRODUCT_SNAPSHOT_IMPORT:
+        name: 商品快照文件导入
+        enabled: false
+        cron: 0 0 3 * * ?
+        source-dirs:
+          - data/in/product
+        file-patterns:
+          - "PRODUCT_*.dat"
+        backup-dir: data/backup/product
+        error-dir: data/error/product
+        # 上游是 GBK 编码的存量系统
+        charset: GBK
+        # 竖线分隔
+        delimiter: "|"
+        skip-header: false
+        batch-size: 2000
+        concurrency: 2
+        extras:
+          channelCode: LEGACY
+          dataType: PRODUCT_SNAPSHOT
+
+# ==================== 监控与日志 ====================
+management:
+  endpoints:
+    web:
+      exposure:
+        # 生产环境按需开放：health/info 给 LB 探针，prometheus 给监控
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+logging:
+  level:
+    root: INFO
+    com.example.fileimport: DEBUG
+    # 关闭 Hikari 的心跳噪音日志
+    com.zaxxer.hikari: WARN
+    # 关闭 ZK 客户端在未使用时的重连噪音
+    org.apache.zookeeper: WARN
+    org.apache.curator: WARN
+  pattern:
+    # 日志格式里带上线程名：虚拟线程名包含任务标识，排查并发问题极其有用
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+  file:
+    name: logs/file-import.log
+  logback:
+    rollingpolicy:
+      max-file-size: 200MB
+      max-history: 30

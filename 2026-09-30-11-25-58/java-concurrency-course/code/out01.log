@@ -1,0 +1,65 @@
+===== 1) 三种关闭方式对比 =====
+  提交 5 个任务后，队列长度 = 4
+  调用 shutdown() 后 isShutdown=true，队列还在跑，剩余 = 4
+  等待完成 = true，isTerminated=true
+  shutdownNow() 返回未执行任务数 = 4（立即中断线程 + 清空队列）
+
+===== 2) 优雅关闭模板（生产可用）=====
+  已完成 10 个任务，线程池优雅关闭成功
+
+===== 3) 任务异常的处理陷阱 =====
+  陷阱A：submit() 提交的任务异常被 Future 吞掉，不打印也不触发 handler
+    → 通过 future.get() 拿到：submit 里的异常
+  陷阱B：execute() 提交的任务异常会触发 UncaughtExceptionHandler
+    → UncaughtExceptionHandler 捕获：execute 里的异常
+  陷阱C：重写 afterExecute 统一兜底（推荐）
+    → protected void afterExecute(Runnable r, Throwable t)
+       如果是 FutureTask，需要 ((FutureTask)r).get() 才能取出异常
+
+===== 4) 线程池监控指标 =====
+  容量 = 8 线程 + 10 队列 = 18，实际提交 25 个 → 被拒绝 7 个
+  [运行中] 池大小=8 活跃=8 队列=10(剩余容量=0) 最大曾达=8 完成=0 总任务=18
+  [执行后] 池大小=8 活跃=0 队列=0(剩余容量=10) 最大曾达=8 完成=18 总任务=18
+
+---------- 自定义扩展点（继承 ThreadPoolExecutor）----------
+protected void beforeExecute(Thread t, Runnable r)  // 任务执行前（可埋点计时）
+protected void afterExecute(Runnable r, Throwable t)// 任务执行后（可统计耗时）
+protected void terminated()                          // 池终止时（可告警）
+典型用途：耗时分布统计、拒绝计数、TraceId 透传
+----------------------------------------------------------
+
+
+============== 生产级线程池最佳实践 ==============
+【创建】禁止用 Executors 快捷方法：
+  × Executors.newFixedThreadPool(n)   → 无界队列，OOM
+  × Executors.newCachedThreadPool()   → max=Integer.MAX_VALUE，线程爆炸
+  × Executors.newSingleThreadExecutor() → 无界队列，OOM
+  √ new ThreadPoolExecutor(...) 手动指定七大参数
+  （阿里 Java 开发手册强制要求，原因就是上面两个坑）
+
+【参数估算】
+  CPU 密集：N + 1      （N = CPU 核数，+1 是为偶发缺页中断兜底）
+  IO  密集：2N ~ 2N + 1（甚至更高，取决于阻塞系数 W/C）
+            精确公式：线程数 = N * (1 + WT/CT)
+            WT=等待时间, CT=计算时间
+            例：CT=50ms, WT=450ms, N=8 → 8*(1+9) = 80
+
+【队列选择】
+  强烈建议 ArrayBlockingQueue 或有界 LinkedBlockingQueue
+  容量估算：核心线程数 / 单个任务处理耗时 * 可容忍等待秒数
+
+【隔离】
+  不同业务用不同线程池（避免相互拖垮）
+  下游 RPC 调用、DB 查询、日志写盘 → 各自独立池
+  这就是 Hystrix / Sentinel 线程池隔离的思想
+
+【动态调整】（面试加分项）
+  setCorePoolSize / setMaximumPoolSize 支持运行时修改，
+  配合配置中心（Nacos/Apollo）可实现不重启调参。
+
+【监控】（必做）
+  核心指标：poolSize / activeCount / queueSize / completedTaskCount
+           + 拒绝次数（需自己包一层 handler 计数）
+  → 接入 Micrometer / Prometheus，queueSize 持续增长要告警
+=================================================
+

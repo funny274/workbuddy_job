@@ -1,0 +1,25 @@
+===== 1) 三种关闭方式对比 =====
+  提交 5 个任务后，队列长度 = 4
+  调用 shutdown() 后 isShutdown=true，队列还在跑，剩余 = 4
+  等待完成 = true，isTerminated=true
+  shutdownNow() 返回未执行任务数 = 4（立即中断线程 + 清空队列）
+
+===== 2) 优雅关闭模板（生产可用）=====
+  已完成 10 个任务，线程池优雅关闭成功
+
+===== 3) 任务异常的处理陷阱 =====
+  陷阱A：submit() 提交的任务异常被 Future 吞掉，不打印也不触发 handler
+    → 通过 future.get() 拿到：submit 里的异常
+  陷阱B：execute() 提交的任务异常会触发 UncaughtExceptionHandler
+    → UncaughtExceptionHandler 捕获：execute 里的异常
+  陷阱C：重写 afterExecute 统一兜底（推荐）
+    → protected void afterExecute(Runnable r, Throwable t)
+       如果是 FutureTask，需要 ((FutureTask)r).get() 才能取出异常
+
+===== 4) 线程池监控指标 =====
+Exception in thread "main" java.util.concurrent.RejectedExecutionException: Task course.ch08._01_PoolBestPractice$$Lambda/0x000000009716c000@23e84203 rejected from java.util.concurrent.ThreadPoolExecutor@1033576a[Running, pool size = 8, active threads = 8, queued tasks = 10, completed tasks = 0]
+	at java.base/java.util.concurrent.ThreadPoolExecutor$AbortPolicy.rejectedExecution(ThreadPoolExecutor.java:2032)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.reject(ThreadPoolExecutor.java:787)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.execute(ThreadPoolExecutor.java:1328)
+	at course.ch08._01_PoolBestPractice.monitor(_01_PoolBestPractice.java:164)
+	at course.ch08._01_PoolBestPractice.main(_01_PoolBestPractice.java:24)

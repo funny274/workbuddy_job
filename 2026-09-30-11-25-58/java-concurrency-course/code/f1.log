@@ -1,0 +1,55 @@
+CPU 核心数 = 8
+
+===== 1) 手写 RecursiveTask：并行归并排序 =====
+  Arrays.sort（单线程）:  1487 ms
+  ForkJoin 并行归并    :   722 ms
+
+===== 2) ForkJoinPool 任务提交方式 =====
+  invoke(task)      → 提交并阻塞等待结果（最常用）
+  submit(task)      → 提交并返回 ForkJoinTask，不阻塞
+  execute(task)     → 提交无返回值任务
+  pool.invokeAll(c) → 批量提交 Collection<Callable>
+
+  并行流求和 = 1250000025000000，耗时 53 ms
+  → parallelStream 默认使用 ForkJoinPool.commonPool()
+    commonPool 线程数 = CPU 核数 - 1，被全 JVM 共享
+【生产注意】可以自定义池提交：
+    try (ForkJoinPool custom = new ForkJoinPool(32)) {
+        long r = custom.submit(() ->
+            list.parallelStream().map(...).collect(...)).get();
+    }
+
+
+============== ForkJoinPool 核心机制 ==============
+【1】分治（Divide and Conquer）
+   把大任务 fork() 拆成小任务，递归到足够小就 compute() 直接算，
+   然后 join() 合并结果。阈值（threshold）很关键：
+     太大 → 拆得不够，并行度低
+     太小 → 任务太碎，调度开销超过收益
+
+【2】工作窃取（Work-Stealing）—— 它的灵魂
+   每个工作线程有自己的一条双端队列（Deque）：
+     - 自己的任务从队头取（LIFO，符合栈式递归的局部性）
+     - 空闲时从别人的队尾「偷」任务（FIFO，偷大任务粒度）
+   优点：负载自动均衡，不会出现「一个线程忙死，其他闲着」
+
+   为什么自己用 LIFO，偷别人用 FIFO？
+     因为递归拆分的任务里，越靠后拆出来的越「大」，
+     偷大的能一次偷到更多工作量，减少窃取次数（降低竞争）。
+
+【3】与 ThreadPoolExecutor 的区别
+   ThreadPoolExecutor：共享一条任务队列，所有线程抢同一个队列头
+                       → 队列头是热点，需要加锁/CAS
+   ForkJoinPool      ：每个线程一条队列，减少竞争，支持窃取
+
+【4】适用场景
+   CPU 密集型的分治计算：排序、归并、树遍历、大数组聚合
+   不适合：IO 密集（线程会被阻塞，无法窃取走阻塞）
+           任务粒度极细（调度开销大于收益）
+
+【5】ForkJoinTask 三个子类
+   RecursiveAction ：无返回值
+   RecursiveTask<V>：有返回值（本项目演示）
+   CountedCompleter ：JDK8+，更灵活，CompletableFuture 底层用到
+====================================================
+

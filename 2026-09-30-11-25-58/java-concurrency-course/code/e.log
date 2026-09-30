@@ -1,0 +1,36 @@
+===== 1) 无锁环形队列功能验证 =====
+  放入 10 个后 size = 10
+  依次取出: 0 1 2 3 4 5 6 7 8 9 
+  取出后 size = 0
+
+===== 2) 性能对比：无锁 RingBuffer vs 阻塞队列 =====
+  ArrayBlockingQueue :  1305 ms
+  无锁 RingBuffer    :   703 ms  (快 1.9 倍)
+
+============== 为什么 RingBuffer 这么快？==============
+1) 数组预先分配，永不 GC（无对象创建 = 无 GC 停顿）
+2) 序号单调递增，用位运算 & (capacity-1) 代替取模 %
+3) 生产者只用 volatile long tail，消费者只用 volatile long head
+   → 没有锁竞争，没有 CAS 失败重试
+4) 内存顺序友好：消费者和生产者访问不同的缓存行（配合缓存行填充效果更好）
+
+---------- 与 BlockingQueue 的本质区别 ----------
+ArrayBlockingQueue：
+  put/take 都要先 lock()，队列满/空时线程 park 挂起（涉及内核态切换）
+  → 每次操作有锁开销 + 可能的上下文切换开销
+
+无锁 RingBuffer：
+  用「序号差值」判断满/空，无需挂起线程
+  生产者只管推，消费者只管取，各自独立推进
+  → 但要自己处理「队列满怎么办」和「没有数据怎么办」（自旋或降级）
+
+---------- Disruptor 的三大杀手锏 ----------
+① RingBuffer + 序号栅栏（SequenceBarrier）
+   支持多消费者、消费者组、依赖链（如 handlerA → handlerB）
+② 消除伪共享
+   每个 Sequence 都做了缓存行填充（64 字节对齐）
+③ 批量处理（Batch EventProcessor）
+   一次取一批，摊薄序号 CAS 的成本
+→ 官方基准测试：比 ArrayBlockingQueue 快一个数量级
+======================================================
+
